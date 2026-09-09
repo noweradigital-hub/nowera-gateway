@@ -155,15 +155,33 @@ export function tenantDetail(t, destinations, events, schemas) {
   </div>
 
   <div class="panel">
-    <form method="post" action="/admin/tenants/${t.id}/destinations">
+    <form method="post" action="/admin/tenants/${t.id}/destinations" id="dest-form">
       <label for="kind">Pridať destináciu</label>
-      <select id="kind" name="kind" onchange="document.querySelectorAll('[data-kind]').forEach(function(el){el.hidden = el.dataset.kind !== this.value}.bind(this))">
-        ${kindOptions}
-      </select>
+      <select id="kind" name="kind">${kindOptions}</select>
       ${Object.entries(schemas).map(([kind, schema], i) => `
         <div data-kind="${kind}" ${i === 0 ? '' : 'hidden'}>${destinationFields(kind, schema)}</div>`).join('')}
       <div class="actions"><button class="primary" type="submit">Pridať</button></div>
     </form>
+    <script>
+    (function () {
+      var select = document.getElementById('kind');
+      var groups = document.querySelectorAll('#dest-form [data-kind]');
+      function sync() {
+        Array.prototype.forEach.call(groups, function (group) {
+          var active = group.dataset.kind === select.value;
+          group.hidden = !active;
+          // A hidden input that is still required blocks submission and cannot be
+          // focused, so the submit button looks dead. Disabling skips it in both
+          // validation and the POST body.
+          Array.prototype.forEach.call(group.querySelectorAll('input'), function (input) {
+            input.disabled = !active;
+          });
+        });
+      }
+      select.addEventListener('change', sync);
+      sync();
+    })();
+    </script>
   </div>
 
   <h2>Posledné eventy</h2>
