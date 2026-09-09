@@ -63,7 +63,7 @@ npm run dev
 npm test
 ```
 
-Tests need no database — the HTTP suite stubs `src/db.js` via module mocks.
+Tests need no database — the HTTP suite injects stub data access into the routes.
 
 ## Deploying to the production VPS
 
@@ -75,28 +75,30 @@ Ports 80/443 belong to the existing `root` project's Traefik (serving n8n). Do
 not add a second proxy: attach to the external network `root_default` and route
 by label using the existing `mytlschallenge` ACME resolver.
 
-1. Build and push the image, or add a `build:` context the VPS can reach.
-2. Deploy `docker/compose.yml` as a new Docker project.
-3. Run migrations once: `npm run migrate` inside the container.
-4. Seed the first admin user.
-5. Point `gw.example.com` at `<VPS_IP>` (DNS for example.com lives at
-   **the DNS registrar**, not Hostinger).
+1. Point the admin host (`ADMIN_HOST`) at the VPS address with a real A record.
+2. Set the project environment: `GATEWAY_IMAGE`, `DB_PASSWORD`, `SESSION_SECRET`,
+   `INGEST_SECRET`, `ADMIN_HOST`, and `ADMIN_EMAIL` for the first login.
+3. Deploy `docker/compose.yml` as a Docker project. The one-shot `migrate` and
+   `seed` services run before the gateway starts — there is no shell on this box,
+   so nothing is run by hand.
+4. Read the generated admin password from the `seed` service log, then clear
+   `ADMIN_EMAIL` so a later redeploy does not reset it.
 
-### DNS gotchas that have bitten this VPS before
+### DNS and TLS gotchas worth knowing
 
-- `example.com` has a wildcard `*` A record → `<shared-hosting-IP>` (shared hosting), so a
-  new subdomain *appears* to resolve while pointing at the wrong host. Always
-  confirm a real A record exists, not just that the name resolves.
+- If the domain has a wildcard `*` A record, a new subdomain *appears* to resolve
+  while pointing at the wrong host. Always confirm a real A record exists, not
+  just that the name resolves.
 - Traefik does not promptly retry a failed ACME order — it can sit for 25+
   minutes. If a certificate fails because DNS was not ready, fixing DNS is not
   enough: force a fresh order by redeploying the project with any label change.
-- Image pulls on this box can take ~7 minutes, during which the project list
-  looks empty and log calls 404. Poll the `docker_compose_up` action instead of
-  assuming failure.
+- Image pulls on a small VPS can take several minutes, during which the project
+  list looks empty and log calls 404. Poll the deploy action rather than assuming
+  failure.
 
 ## Adding a client
 
-1. **DNS:** the client creates `t.<ich-domena.sk>` → `<VPS_IP>`.
+1. **DNS:** the client points `t.<their-domain>` at the gateway's address.
 2. **Traefik:** append `Host(\`t.klient.sk\`)` to the `nwrgw-collector` router
    rule in `docker/compose.yml` and redeploy. The certificate issues on its own.
 3. **Admin:** create the tenant (collector host, allowed origins, cookie domain),
