@@ -40,6 +40,11 @@ export default async function adminRoutes(app) {
     req.adminUser = user;
   });
 
+  // The bare domain is where someone lands when they type the host by hand.
+  // The host hook above has already refused every other host, so this only ever
+  // answers on ADMIN_HOST.
+  app.get('/', async (req, reply) => reply.redirect('/admin', 303));
+
   app.get('/admin/login', async (req, reply) =>
     reply.type('text/html').send(page({
       title: 'Prihlásenie',
