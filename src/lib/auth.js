@@ -47,3 +47,33 @@ export const destroySession = (token) =>
 
 export const purgeExpiredSessions = () =>
   query('DELETE FROM sessions WHERE expires_at < now()');
+
+export const MIN_PASSWORD_LENGTH = 12;
+
+/**
+ * Reject a new password before it is hashed. Returns null when acceptable,
+ * otherwise a message meant for the person typing it.
+ */
+export function validateNewPassword(password, confirmation) {
+  if (!password) return 'Zadajte nové heslo.';
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return `Nové heslo musí mať aspoň ${MIN_PASSWORD_LENGTH} znakov.`;
+  }
+  if (password !== confirmation) return 'Nové heslá sa nezhodujú.';
+  return null;
+}
+
+/**
+ * Change a password and drop every other session for that user, so a stolen
+ * cookie stops working the moment the password is rotated. `keepToken` is the
+ * session doing the change, which stays signed in.
+ */
+export async function changePassword(userId, newPassword, keepToken) {
+  const hash = await hashPassword(newPassword);
+  await query('UPDATE admin_users SET password_hash = $1 WHERE id = $2', [hash, userId]);
+  const { rowCount } = await query(
+    'DELETE FROM sessions WHERE user_id = $1 AND token <> $2',
+    [userId, keepToken || ''],
+  );
+  return rowCount;
+}

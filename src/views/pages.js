@@ -20,6 +20,32 @@ export const loginPage = () => `
   </form>
 </div>`;
 
+export function accountPage(user, minLength) {
+  return `
+  <h1>Môj účet</h1>
+  <p class="sub mono">${esc(user.email)}</p>
+  <div class="panel" style="max-width:460px">
+    <form method="post" action="/admin/account">
+      <label for="current_password">Súčasné heslo</label>
+      <input id="current_password" name="current_password" type="password" autocomplete="current-password" required autofocus>
+
+      <label for="new_password">Nové heslo</label>
+      <input id="new_password" name="new_password" type="password" autocomplete="new-password"
+             minlength="${minLength}" required>
+      <div class="hint">Aspoň ${minLength} znakov.</div>
+
+      <label for="confirm_password">Nové heslo znova</label>
+      <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password"
+             minlength="${minLength}" required>
+
+      <div class="actions"><button class="primary" type="submit">Zmeniť heslo</button></div>
+    </form>
+    <p class="hint" style="margin-top:18px">
+      Zmena hesla odhlási všetky ostatné prihlásenia. Toto zostane aktívne.
+    </p>
+  </div>`;
+}
+
 export function tenantList(tenants) {
   const rows = tenants.map((t) => `
     <tr>

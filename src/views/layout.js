@@ -61,7 +61,7 @@ export function page({ title, user, body, flash }) {
 <title>${esc(title)} · Nowera Gateway</title><style>${CSS}</style></head><body>
 ${user ? `<header><span class="brand">Nowera Gateway</span><nav>
 <a href="/admin">Klienti</a><a href="/admin/events">Eventy</a>
-<span style="color:var(--dim)">${esc(user.email)}</span>
+<a href="/admin/account" style="color:var(--dim)">${esc(user.email)}</a>
 <form method="post" action="/admin/logout" class="inline"><button>Odhlásiť</button></form>
 </nav></header>` : ''}
 <main>${flash ? `<div class="flash ${flash.type}">${esc(flash.text)}</div>` : ''}${body}</main>

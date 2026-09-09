@@ -1,12 +1,15 @@
 import { config } from '../config.js';
 import { many, one, query } from '../db.js';
-import { createSession, destroySession, getSessionUser, verifyPassword } from '../lib/auth.js';
+import {
+  MIN_PASSWORD_LENGTH, changePassword, createSession, destroySession,
+  getSessionUser, validateNewPassword, verifyPassword,
+} from '../lib/auth.js';
 import { SCHEMAS } from '../destinations/index.js';
 import { invalidateTenantCache } from '../lib/tenants.js';
 import { enqueue } from '../lib/queue.js';
 import { newEventId } from '../lib/ids.js';
 import { page } from '../views/layout.js';
-import { tenantForm, tenantList, tenantDetail, eventLog, loginPage } from '../views/pages.js';
+import { accountPage, tenantForm, tenantList, tenantDetail, eventLog, loginPage } from '../views/pages.js';
 
 const SESSION_COOKIE = 'nwr_admin';
 
@@ -67,6 +70,33 @@ export default async function adminRoutes(app) {
     await destroySession(req.cookies?.[SESSION_COOKIE]);
     reply.clearCookie(SESSION_COOKIE, { path: '/' });
     return reply.redirect('/admin/login', 303);
+  });
+
+  app.get('/admin/account', async (req, reply) =>
+    reply.type('text/html').send(page({
+      title: 'Môj účet', user: req.adminUser, flash: flashFrom(req.query),
+      body: accountPage(req.adminUser, MIN_PASSWORD_LENGTH),
+    })));
+
+  app.post('/admin/account', async (req, reply) => {
+    const b = req.body || {};
+    const token = req.cookies?.[SESSION_COOKIE];
+
+    // Re-read the hash rather than trusting the session: the point of asking for
+    // the current password is to prove the person at the keyboard knows it.
+    const row = await one('SELECT password_hash FROM admin_users WHERE id = $1', [req.adminUser.id]);
+    if (!row || !(await verifyPassword(b.current_password || '', row.password_hash))) {
+      return redirect(reply, '/admin/account', 'Súčasné heslo nesedí.', 'err');
+    }
+
+    const problem = validateNewPassword(b.new_password || '', b.confirm_password || '');
+    if (problem) return redirect(reply, '/admin/account', problem, 'err');
+
+    const dropped = await changePassword(req.adminUser.id, b.new_password, token);
+    const note = dropped
+      ? ` Odhlásených ostatných prihlásení: ${dropped}.`
+      : '';
+    return redirect(reply, '/admin/account', `Heslo zmenené.${note}`);
   });
 
   app.get('/admin', async (req, reply) => {
