@@ -1,67 +1,113 @@
-# Nowera Gateway on the production VPS.
+# Nowera Gateway — the production VPS (<vps-hostname>, <VPS_IP>)
 #
-# Deployed through the Hostinger VPS Docker-project API (there is no SSH on this
-# box), so: named volumes only, no bind mounts, no hand-prepared files on disk.
+# Deployed through the Hostinger VPS Docker-project API — there is no SSH on this
+# box. Consequences that shape this file:
+#   * named volumes only, no bind mounts, no hand-prepared files on disk
+#   * no `docker login`, so the GHCR package must be PUBLIC (.github/workflows/ci.yml
+#     builds and pushes it; GATEWAY_IMAGE in the project env points at it)
+#   * no one-off `docker compose run`, so migrations and the admin seed are
+#     ordinary one-shot services below
 #
-# Ports 80/443 belong to the existing `root` project's Traefik. We attach to its
-# network and let it route by label — do NOT add a second proxy here.
+# Ports 80/443 belong to the existing `root` project's Traefik; we attach to its
+# network (root_default) and route by label. Do NOT add a second proxy here.
 #
-# Adding a client = append their collector host to the `collector` router rule
-# and redeploy. Traefik requests the certificate on its own once DNS resolves.
+# Project name on the VPS: nowera-gateway
+# Secrets live in the project environment (hPanel / API), not in this file.
 
 services:
+  # --- schema, runs to completion before the app starts ------------------
+  migrate:
+    image: ${GATEWAY_IMAGE}
+    restart: "no"
+    command: ["node", "src/migrate.js"]
+    environment:
+      DATABASE_URL: postgres://gateway:${DB_PASSWORD}@db:5432/gateway
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+
+  # --- first admin account ----------------------------------------------
+  # Runs only while ADMIN_EMAIL is set in the project environment; the generated
+  # password is printed to this service's log (read it with the project-logs API).
+  # CLEAR ADMIN_EMAIL AFTERWARDS — otherwise every redeploy resets that password.
+  seed:
+    image: ${GATEWAY_IMAGE}
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ['if [ -n "$$ADMIN_EMAIL" ]; then node src/seed-admin.js "$$ADMIN_EMAIL"; else echo "ADMIN_EMAIL unset - skipping admin seed"; fi']
+    environment:
+      DATABASE_URL: postgres://gateway:${DB_PASSWORD}@db:5432/gateway
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - internal
+
+  # --- the gateway itself -------------------------------------------------
   gateway:
-    image: ghcr.io/nowera/gateway:latest   # or build from this repo and push
-    restart: unless-stopped
+    image: ${GATEWAY_IMAGE}
+    restart: always
     environment:
       NODE_ENV: production
       PORT: "8080"
       DATABASE_URL: postgres://gateway:${DB_PASSWORD}@db:5432/gateway
       SESSION_SECRET: ${SESSION_SECRET}
       INGEST_SECRET: ${INGEST_SECRET}
-      ADMIN_HOST: gw.example.com
+      ADMIN_HOST: ${ADMIN_HOST}
     depends_on:
-      db:
-        condition: service_healthy
-    networks: [root_default, internal]
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - proxy
+      - internal
     labels:
       - traefik.enable=true
       - traefik.docker.network=root_default
+      - traefik.http.services.nwrgw.loadbalancer.server.port=8080
 
-      # Admin dashboard — its own host, so a client subdomain can never serve it.
-      - traefik.http.routers.nwrgw-admin.rule=Host(`gw.example.com`)
-      - traefik.http.routers.nwrgw-admin.entrypoints=websecure
+      # Admin dashboard — its own host (ADMIN_HOST in the project env), so a
+      # client collector subdomain can never serve it.
+      - traefik.http.routers.nwrgw-admin.rule=Host(`${ADMIN_HOST}`)
+      - traefik.http.routers.nwrgw-admin.entrypoints=web,websecure
+      - traefik.http.routers.nwrgw-admin.tls=true
       - traefik.http.routers.nwrgw-admin.tls.certresolver=mytlschallenge
       - traefik.http.routers.nwrgw-admin.service=nwrgw
 
-      # Client collector hosts. One Host() per client, comma separated.
-      - traefik.http.routers.nwrgw-collector.rule=Host(`t.klient.sk`)
-      - traefik.http.routers.nwrgw-collector.entrypoints=websecure
-      - traefik.http.routers.nwrgw-collector.tls.certresolver=mytlschallenge
-      - traefik.http.routers.nwrgw-collector.service=nwrgw
-
-      - traefik.http.services.nwrgw.loadbalancer.server.port=8080
+      # Client collector hosts. Add one Host(`...`) per client, OR-joined, and
+      # redeploy; Traefik requests the certificate itself once DNS resolves here.
+      # Keep hosts you do not control out of this rule - failed ACME challenges
+      # count against the Let's Encrypt rate limit.
+      # - traefik.http.routers.nwrgw-collector.rule=Host(`t.klient.sk`)
+      # - traefik.http.routers.nwrgw-collector.entrypoints=web,websecure
+      # - traefik.http.routers.nwrgw-collector.tls=true
+      # - traefik.http.routers.nwrgw-collector.tls.certresolver=mytlschallenge
+      # - traefik.http.routers.nwrgw-collector.service=nwrgw
 
   db:
     image: postgres:16-alpine
-    restart: unless-stopped
+    restart: always
     environment:
       POSTGRES_DB: gateway
       POSTGRES_USER: gateway
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - gateway_db:/var/lib/postgresql/data
-    networks: [internal]
+      - gateway-db-data:/var/lib/postgresql/data
+    networks:
+      - internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 5
 
 volumes:
-  gateway_db:
+  gateway-db-data:
 
 networks:
-  root_default:
+  proxy:
+    name: root_default
     external: true
   internal:
