@@ -157,3 +157,10 @@ test('the loader degrades safely when GA4 is not configured', () => {
   assert.match(src, /var GA_STREAM = null/);
   assert.doesNotThrow(() => new Function(src));
 });
+
+test('the loader merges page-published identity into every event', () => {
+  const src = loaderScript({ endpoint: 'https://t.k.sk/e', pixelId: '1', measurementId: 'G-X' });
+  assert.match(src, /var DEFAULT_USER = w\.nwrUser \|\| \{\}/);
+  assert.match(src, /user_data: merge\(DEFAULT_USER, opts\.user\)/);
+  assert.doesNotThrow(() => new Function(src));
+});

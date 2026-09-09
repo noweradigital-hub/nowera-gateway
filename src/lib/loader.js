@@ -14,6 +14,10 @@ export function loaderScript({ endpoint, pixelId, measurementId }) {
   var PIXEL_ID = ${JSON.stringify(pixelId)};
   // Stream id half of the GA4 measurement id, which names the session cookie.
   var GA_STREAM = ${JSON.stringify(measurementId ? String(measurementId).replace(/^G-/, '') : null)};
+  // A page can publish already-hashed identifiers for a signed-in visitor, which
+  // lifts Meta's Event Match Quality on the browser leg from four weak signals to
+  // a real match. Plaintext never has to leave the site.
+  var DEFAULT_USER = w.nwrUser || {};
 
   function uuid() {
     if (w.crypto && w.crypto.randomUUID) return w.crypto.randomUUID();
@@ -43,6 +47,14 @@ export function loaderScript({ endpoint, pixelId, measurementId }) {
     if (!raw) return null;
     var parts = raw.split('.');
     return parts.length >= 3 ? parts[2] : null;
+  }
+
+  function merge(base, extra) {
+    var out = {};
+    var k;
+    for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) out[k] = base[k];
+    for (k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) out[k] = extra[k];
+    return out;
   }
 
   function post(body) {
@@ -77,7 +89,7 @@ export function loaderScript({ endpoint, pixelId, measurementId }) {
       event_time: Math.floor(Date.now() / 1000),
       event_source_url: w.location.href,
       custom_data: props,
-      user_data: opts.user || {},
+      user_data: merge(DEFAULT_USER, opts.user),
       fbp: cookie('_fbp'),
       fbc: cookie('_fbc'),
       fbclid: new URLSearchParams(w.location.search).get('fbclid'),

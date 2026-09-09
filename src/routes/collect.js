@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { normalizeEvent } from '../lib/event.js';
 import { enqueue as defaultEnqueue } from '../lib/queue.js';
-import { newFbp, resolveFbc } from '../lib/ids.js';
+import { newEventId, newFbp, resolveFbc } from '../lib/ids.js';
 import { originAllowed, tenantByHost as defaultTenantByHost } from '../lib/tenants.js';
 import { loaderScript } from '../lib/loader.js';
 
@@ -35,6 +35,15 @@ function clientIp(req) {
 
 function ensureIdentity(req, reply, tenant, body = {}) {
   const cookies = req.cookies || {};
+
+  // A first-party id that survives across sessions. Meta hashes it as external_id
+  // and it is often the only stable identifier a guest checkout ever produces.
+  let visitorId = cookies._nwr_id || null;
+  if (!visitorId) {
+    visitorId = newEventId();
+    persistCookie(reply, tenant, '_nwr_id', visitorId);
+  }
+
   let fbp = cookies._fbp || body.fbp || null;
   if (!fbp) {
     fbp = newFbp();
@@ -46,7 +55,7 @@ function ensureIdentity(req, reply, tenant, body = {}) {
     url: body.event_source_url || body.url || req.headers.referer,
   });
   if (fbc && fbc !== cookies._fbc) persistCookie(reply, tenant, '_fbc', fbc);
-  return { fbp, fbc };
+  return { fbp, fbc, visitorId };
 }
 
 function verifySignature(rawBody, signature) {
@@ -124,7 +133,12 @@ export default async function collectRoutes(app, opts = {}) {
       .header('access-control-allow-credentials', 'true');
 
     const body = req.body || {};
-    const identity = ensureIdentity(req, reply, tenant, body);
+    const { visitorId, ...identity } = ensureIdentity(req, reply, tenant, body);
+
+    // Only as a fallback: a real customer id from the site is always better.
+    if (visitorId && !body.user_data?.external_id && !body.user?.external_id) {
+      body.user_data = { ...(body.user_data || body.user || {}), external_id: visitorId };
+    }
 
     let event;
     try {
@@ -164,8 +178,8 @@ export default async function collectRoutes(app, opts = {}) {
         userAgent: body.client_user_agent || req.headers['user-agent'],
         referer: null,
         actionSource: body.action_source || 'website',
-        fbp: body.fbp || null,
-        fbc: body.fbc || null,
+        fbp: body.fbp || req.cookies?._fbp || null,
+        fbc: body.fbc || req.cookies?._fbc || null,
         gaClientId: body.ga_client_id || null,
         gaSessionId: body.ga_session_id || null,
       });

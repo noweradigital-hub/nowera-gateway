@@ -93,6 +93,19 @@ add_action( 'wp_head', function () {
 	if ( empty( $s['collector_host'] ) || empty( $s['load_script'] ) ) {
 		return;
 	}
+	// Publish hashed identifiers for the browser leg. Hashing happens here, so no
+	// plaintext personal data is ever written into the page.
+	$identity = array();
+	foreach ( nowera_capi_current_user() as $key => $value ) {
+		$digest = nowera_capi_hash( $key, $value );
+		if ( $digest !== null ) {
+			$identity[ $key ] = $digest;
+		}
+	}
+	if ( $identity ) {
+		printf( '<script>window.nwrUser=%s;</script>' . "\n", wp_json_encode( $identity ) );
+	}
+
 	printf(
 		'<script async src="https://%s/px.js"></script>' . "\n",
 		esc_attr( $s['collector_host'] )
@@ -145,6 +158,44 @@ function nowera_capi_hash( string $key, $value ): ?string {
 	return $normalized === '' ? null : hash( 'sha256', $normalized );
 }
 
+/**
+ * GA4 joins a Measurement Protocol hit to the visitor's browser session by these
+ * two ids. Without them the event lands as Direct and is useless for Ads import.
+ */
+function nowera_capi_ga_ids(): array {
+	$client_id = null;
+	$session_id = null;
+
+	if ( ! empty( $_COOKIE['_ga'] ) ) {
+		$parts = explode( '.', sanitize_text_field( wp_unslash( $_COOKIE['_ga'] ) ) );
+		if ( count( $parts ) >= 4 ) {
+			$client_id = $parts[ count( $parts ) - 2 ] . '.' . $parts[ count( $parts ) - 1 ];
+		}
+	}
+
+	// The session cookie is named after the stream id, which we do not configure
+	// anywhere — find whichever _ga_* cookie this property set.
+	foreach ( $_COOKIE as $name => $value ) {
+		if ( strpos( $name, '_ga_' ) !== 0 ) {
+			continue;
+		}
+		$parts = explode( '.', sanitize_text_field( wp_unslash( $value ) ) );
+		if ( count( $parts ) >= 3 ) {
+			$session_id = $parts[2];
+			break;
+		}
+	}
+
+	return array( 'client_id' => $client_id, 'session_id' => $session_id );
+}
+
+/** First-party visitor id set by the gateway; often a guest's only stable identifier. */
+function nowera_capi_visitor_id(): ?string {
+	return empty( $_COOKIE['_nwr_id'] )
+		? null
+		: sanitize_text_field( wp_unslash( $_COOKIE['_nwr_id'] ) );
+}
+
 function nowera_capi_client_ip(): string {
 	foreach ( array( 'HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR' ) as $key ) {
 		if ( ! empty( $_SERVER[ $key ] ) ) {
@@ -172,10 +223,14 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 		}
 	}
 
+	$ga = nowera_capi_ga_ids();
+
 	$body = wp_json_encode( array(
 		'event_name'        => $event_name,
 		'event_id'          => $event_id,
 		'event_time'        => time(),
+		'ga_client_id'      => $ga['client_id'],
+		'ga_session_id'     => $ga['session_id'],
 		'event_source_url'  => $url ?: home_url( add_query_arg( array() ) ),
 		'action_source'     => 'website',
 		'user_data'         => $hashed,
@@ -211,7 +266,9 @@ function nowera_capi_user_from_order( \WC_Order $order ): array {
 		'ct'          => $order->get_billing_city(),
 		'zp'          => $order->get_billing_postcode(),
 		'country'     => $order->get_billing_country(),
-		'external_id' => $order->get_customer_id() ? (string) $order->get_customer_id() : '',
+		'external_id' => $order->get_customer_id()
+			? (string) $order->get_customer_id()
+			: (string) nowera_capi_visitor_id(),
 	) );
 }
 
@@ -308,15 +365,41 @@ add_action( 'woocommerce_before_checkout_form', function () {
 	);
 } );
 
+/**
+ * Best identity available before an order exists. Most checkouts are guests, so
+ * falling back to what they typed into the cart/checkout session is what keeps
+ * Event Match Quality off the floor.
+ */
 function nowera_capi_current_user(): array {
-	if ( ! is_user_logged_in() ) {
-		return array();
+	$data = array();
+
+	if ( is_user_logged_in() ) {
+		$user = wp_get_current_user();
+		$data = array(
+			'em'          => $user->user_email,
+			'fn'          => $user->first_name,
+			'ln'          => $user->last_name,
+			'external_id' => (string) $user->ID,
+		);
+	} elseif ( function_exists( 'WC' ) && WC()->customer ) {
+		$customer = WC()->customer;
+		$data = array(
+			'em'      => $customer->get_billing_email(),
+			'ph'      => $customer->get_billing_phone(),
+			'fn'      => $customer->get_billing_first_name(),
+			'ln'      => $customer->get_billing_last_name(),
+			'ct'      => $customer->get_billing_city(),
+			'zp'      => $customer->get_billing_postcode(),
+			'country' => $customer->get_billing_country(),
+		);
 	}
-	$user = wp_get_current_user();
-	return array_filter( array(
-		'em'          => $user->user_email,
-		'fn'          => $user->first_name,
-		'ln'          => $user->last_name,
-		'external_id' => (string) $user->ID,
-	) );
+
+	if ( empty( $data['external_id'] ) ) {
+		$visitor = nowera_capi_visitor_id();
+		if ( $visitor ) {
+			$data['external_id'] = $visitor;
+		}
+	}
+
+	return array_filter( $data );
 }
