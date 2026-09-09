@@ -79,12 +79,13 @@ services:
       # Client collector hosts. Add one Host(`...`) per client, OR-joined, and
       # redeploy; Traefik requests the certificate itself once DNS resolves here.
       # Keep hosts you do not control out of this rule - failed ACME challenges
-      # count against the Let's Encrypt rate limit.
-      # - traefik.http.routers.nwrgw-collector.rule=Host(`t.klient.sk`)
-      # - traefik.http.routers.nwrgw-collector.entrypoints=web,websecure
-      # - traefik.http.routers.nwrgw-collector.tls=true
-      # - traefik.http.routers.nwrgw-collector.tls.certresolver=mytlschallenge
-      # - traefik.http.routers.nwrgw-collector.service=nwrgw
+      # count against the Let's Encrypt rate limit. The record must be DNS-only:
+      # behind a Cloudflare proxy the TLS-ALPN challenge never reaches us.
+      - traefik.http.routers.nwrgw-collector.rule=Host(`t.kidvak.com`)
+      - traefik.http.routers.nwrgw-collector.entrypoints=web,websecure
+      - traefik.http.routers.nwrgw-collector.tls=true
+      - traefik.http.routers.nwrgw-collector.tls.certresolver=mytlschallenge
+      - traefik.http.routers.nwrgw-collector.service=nwrgw
 
   db:
     image: postgres:16-alpine
