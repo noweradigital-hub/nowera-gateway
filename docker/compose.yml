@@ -1,0 +1,67 @@
+# Nowera Gateway on the production VPS.
+#
+# Deployed through the Hostinger VPS Docker-project API (there is no SSH on this
+# box), so: named volumes only, no bind mounts, no hand-prepared files on disk.
+#
+# Ports 80/443 belong to the existing `root` project's Traefik. We attach to its
+# network and let it route by label — do NOT add a second proxy here.
+#
+# Adding a client = append their collector host to the `collector` router rule
+# and redeploy. Traefik requests the certificate on its own once DNS resolves.
+
+services:
+  gateway:
+    image: ghcr.io/nowera/gateway:latest   # or build from this repo and push
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "8080"
+      DATABASE_URL: postgres://gateway:${DB_PASSWORD}@db:5432/gateway
+      SESSION_SECRET: ${SESSION_SECRET}
+      INGEST_SECRET: ${INGEST_SECRET}
+      ADMIN_HOST: gw.example.com
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [root_default, internal]
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=root_default
+
+      # Admin dashboard — its own host, so a client subdomain can never serve it.
+      - traefik.http.routers.nwrgw-admin.rule=Host(`gw.example.com`)
+      - traefik.http.routers.nwrgw-admin.entrypoints=websecure
+      - traefik.http.routers.nwrgw-admin.tls.certresolver=mytlschallenge
+      - traefik.http.routers.nwrgw-admin.service=nwrgw
+
+      # Client collector hosts. One Host() per client, comma separated.
+      - traefik.http.routers.nwrgw-collector.rule=Host(`t.klient.sk`)
+      - traefik.http.routers.nwrgw-collector.entrypoints=websecure
+      - traefik.http.routers.nwrgw-collector.tls.certresolver=mytlschallenge
+      - traefik.http.routers.nwrgw-collector.service=nwrgw
+
+      - traefik.http.services.nwrgw.loadbalancer.server.port=8080
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - gateway_db:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  gateway_db:
+
+networks:
+  root_default:
+    external: true
+  internal:

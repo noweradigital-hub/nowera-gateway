@@ -1,0 +1,23 @@
+{
+  "name": "nowera-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-tenant server-side tracking gateway (Meta CAPI + GA4) for Nowera client sites",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node src/migrate.js",
+    "seed:admin": "node src/seed-admin.js",
+    "test": "node --experimental-test-module-mocks --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/formbody": "^8.0.2",
+    "fastify": "^5.2.1",
+    "pg": "^8.13.1"
+  }
+}
