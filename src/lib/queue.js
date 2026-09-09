@@ -1,27 +1,36 @@
 import { config } from '../config.js';
 import { many, query } from '../db.js';
-import { driverFor } from '../destinations/index.js';
+import { dedupeKeyFor, driverFor } from '../destinations/index.js';
 
 // Exponential backoff, capped. Index = attempt number.
 const BACKOFF_SECONDS = [10, 30, 120, 600, 1800, 3600];
 const MAX_ATTEMPTS = BACKOFF_SECONDS.length;
 
-/** Fan one canonical event out to every active destination of the tenant. */
+/**
+ * Fan one canonical event out to every active destination of the tenant.
+ * Destinations that deduplicate keep only the first leg to arrive; the unique
+ * index does the work, so two simultaneous legs cannot both slip through.
+ * Returns how many rows were actually queued.
+ */
 export async function enqueue(tenantId, event, destinations) {
   if (!destinations.length) return 0;
   const values = [];
   const params = [];
   destinations.forEach((dest, i) => {
-    const base = i * 5;
-    values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`);
-    params.push(tenantId, dest.id, event.event_name, event.event_id, JSON.stringify(event));
+    const base = i * 6;
+    values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`);
+    params.push(
+      tenantId, dest.id, event.event_name, event.event_id,
+      JSON.stringify(event), dedupeKeyFor(dest.kind, event),
+    );
   });
-  await query(
-    `INSERT INTO events (tenant_id, destination_id, event_name, event_id, payload)
-     VALUES ${values.join(', ')}`,
+  const { rowCount } = await query(
+    `INSERT INTO events (tenant_id, destination_id, event_name, event_id, payload, dedupe_key)
+     VALUES ${values.join(', ')}
+     ON CONFLICT (destination_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`,
     params,
   );
-  return destinations.length;
+  return rowCount;
 }
 
 /**

@@ -85,12 +85,14 @@ export default async function collectRoutes(app, opts = {}) {
     if (!tenant) return reply.code(404).type('text/plain').send('// unknown host');
 
     const metaDest = tenant.destinations.find((d) => d.kind === 'meta');
+    const ga4Dest = tenant.destinations.find((d) => d.kind === 'ga4');
     reply
       .type('application/javascript; charset=utf-8')
       .header('cache-control', 'public, max-age=300')
       .send(loaderScript({
         endpoint: `https://${tenant.collector_host}/e`,
         pixelId: metaDest?.settings?.dataset_id || null,
+        measurementId: ga4Dest?.settings?.measurement_id || null,
       }));
   });
 

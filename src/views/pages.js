@@ -46,6 +46,36 @@ export function accountPage(user, minLength) {
   </div>`;
 }
 
+export function destinationForm(tenant, dest, schema) {
+  const fields = schema.map((f) => {
+    const stored = dest.settings?.[f.key] ?? '';
+    return `
+      <label for="${f.key}">${esc(f.label)}</label>
+      <input id="${f.key}" name="${f.key}" class="mono" type="${f.secret ? 'password' : 'text'}"
+             value="${f.secret ? '' : esc(stored)}" autocomplete="off"
+             placeholder="${f.secret && stored ? 'uložené — nechajte prázdne' : ''}">
+      ${f.secret && stored ? '<div class="hint">Prázdne pole ponechá uložený tajný kľúč.</div>' : ''}`;
+  }).join('');
+
+  return `
+  <h1>Upraviť destináciu</h1>
+  <p class="sub">${esc(tenant.name)} · ${esc(dest.kind)}</p>
+  <div class="panel" style="max-width:560px">
+    <form method="post" action="/admin/destinations/${dest.id}">
+      ${fields}
+      <div class="actions">
+        <button class="primary" type="submit">Uložiť</button>
+        <a class="btn" href="/admin/tenants/${tenant.id}">Späť</a>
+      </div>
+    </form>
+    ${dest.kind === 'meta' && dest.settings?.test_event_code ? `
+      <p class="hint" style="margin-top:18px;color:var(--warn)">
+        Kým je vyplnený test event code, Meta posiela serverové eventy do Test Events
+        a <strong>nezapočítava ich do kampaní</strong>. Po otestovaní pole vyprázdnite.
+      </p>` : ''}
+  </div>`;
+}
+
 export function tenantList(tenants) {
   const rows = tenants.map((t) => `
     <tr>
@@ -122,6 +152,7 @@ export function tenantDetail(t, destinations, events, schemas) {
       <td class="mono" style="color:var(--dim)">${keys}</td>
       <td>${d.active ? '<span class="pill ok">aktívna</span>' : '<span class="pill off">vypnutá</span>'}</td>
       <td style="text-align:right;white-space:nowrap">
+        <a class="btn" href="/admin/destinations/${d.id}/edit">Upraviť</a>
         <form class="inline" method="post" action="/admin/destinations/${d.id}/toggle"><button>${d.active ? 'Vypnúť' : 'Zapnúť'}</button></form>
         <form class="inline" method="post" action="/admin/destinations/${d.id}/delete"
               onsubmit="return confirm('Naozaj zmazať destináciu ${esc(d.kind)}?')"><button class="danger">Zmazať</button></form>

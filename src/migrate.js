@@ -47,6 +47,12 @@ CREATE INDEX IF NOT EXISTS events_claim_idx
 CREATE INDEX IF NOT EXISTS events_stale_idx ON events(status, created_at) WHERE status = 'sending';
 CREATE INDEX IF NOT EXISTS events_tenant_created_idx ON events(tenant_id, created_at DESC);
 
+-- Destinations that must not receive the same logical event twice (GA4 has no
+-- deduplication of its own) get a key here; Meta wants both legs and leaves it NULL.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS events_dedupe_idx
+  ON events(destination_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id            SERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,

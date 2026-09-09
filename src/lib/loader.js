@@ -5,13 +5,15 @@
  * event to the gateway with the SAME event_id, which is what lets Meta dedupe the
  * two legs into one conversion instead of counting it twice.
  */
-export function loaderScript({ endpoint, pixelId }) {
+export function loaderScript({ endpoint, pixelId, measurementId }) {
   return `(function (w, d) {
   'use strict';
   if (w.nwr && w.nwr.loaded) return;
 
   var ENDPOINT = ${JSON.stringify(endpoint)};
   var PIXEL_ID = ${JSON.stringify(pixelId)};
+  // Stream id half of the GA4 measurement id, which names the session cookie.
+  var GA_STREAM = ${JSON.stringify(measurementId ? String(measurementId).replace(/^G-/, '') : null)};
 
   function uuid() {
     if (w.crypto && w.crypto.randomUUID) return w.crypto.randomUUID();
@@ -24,6 +26,23 @@ export function loaderScript({ endpoint, pixelId }) {
   function cookie(name) {
     var m = d.cookie.match('(^|;)\\\\s*' + name + '\\\\s*=\\\\s*([^;]+)');
     return m ? decodeURIComponent(m.pop()) : null;
+  }
+
+  // GA4 attributes a Measurement Protocol hit to a Google Ads click only when it
+  // lands in the browser's existing session, so both ids have to travel with it.
+  function gaClientId() {
+    var raw = cookie('_ga');            // GA1.1.<client>.<timestamp>
+    if (!raw) return null;
+    var parts = raw.split('.');
+    return parts.length >= 4 ? parts.slice(-2).join('.') : null;
+  }
+
+  function gaSessionId() {
+    if (!GA_STREAM) return null;
+    var raw = cookie('_ga_' + GA_STREAM); // GS1.1.<session>.<count>....
+    if (!raw) return null;
+    var parts = raw.split('.');
+    return parts.length >= 3 ? parts[2] : null;
   }
 
   function post(body) {
@@ -62,7 +81,8 @@ export function loaderScript({ endpoint, pixelId }) {
       fbp: cookie('_fbp'),
       fbc: cookie('_fbc'),
       fbclid: new URLSearchParams(w.location.search).get('fbclid'),
-      ga_client_id: (cookie('_ga') || '').split('.').slice(-2).join('.') || null
+      ga_client_id: gaClientId(),
+      ga_session_id: gaSessionId()
     });
 
     return eventId;

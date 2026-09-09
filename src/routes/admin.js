@@ -9,7 +9,9 @@ import { invalidateTenantCache } from '../lib/tenants.js';
 import { enqueue } from '../lib/queue.js';
 import { newEventId } from '../lib/ids.js';
 import { page } from '../views/layout.js';
-import { accountPage, tenantForm, tenantList, tenantDetail, eventLog, loginPage } from '../views/pages.js';
+import {
+  accountPage, destinationForm, tenantForm, tenantList, tenantDetail, eventLog, loginPage,
+} from '../views/pages.js';
 
 const SESSION_COOKIE = 'nwr_admin';
 
@@ -187,6 +189,39 @@ export default async function adminRoutes(app) {
     );
     invalidateTenantCache();
     return redirect(reply, `/admin/tenants/${req.params.id}`, 'Destinácia pridaná.');
+  });
+
+  app.get('/admin/destinations/:id/edit', async (req, reply) => {
+    const dest = await one('SELECT * FROM destinations WHERE id = $1', [req.params.id]);
+    if (!dest) return reply.code(404).send('not found');
+    const tenant = await one('SELECT id, name FROM tenants WHERE id = $1', [dest.tenant_id]);
+    return reply.type('text/html').send(page({
+      title: `${tenant.name} · ${dest.kind}`, user: req.adminUser, flash: flashFrom(req.query),
+      body: destinationForm(tenant, dest, SCHEMAS[dest.kind] || []),
+    }));
+  });
+
+  app.post('/admin/destinations/:id', async (req, reply) => {
+    const b = req.body || {};
+    const dest = await one('SELECT * FROM destinations WHERE id = $1', [req.params.id]);
+    if (!dest) return reply.code(404).send('not found');
+
+    const settings = { ...(dest.settings || {}) };
+    for (const field of SCHEMAS[dest.kind] || []) {
+      const value = String(b[field.key] ?? '').trim();
+      if (field.secret && !value) continue;      // blank means keep the stored secret
+      if (value) settings[field.key] = value;
+      else delete settings[field.key];           // clearing an optional field is deliberate
+    }
+    for (const field of SCHEMAS[dest.kind] || []) {
+      if (field.required && !settings[field.key]) {
+        return redirect(reply, `/admin/destinations/${dest.id}/edit`, `Chýba pole: ${field.label}`, 'err');
+      }
+    }
+
+    await query('UPDATE destinations SET settings = $2 WHERE id = $1', [dest.id, JSON.stringify(settings)]);
+    invalidateTenantCache();
+    return redirect(reply, `/admin/tenants/${dest.tenant_id}`, 'Destinácia upravená.');
   });
 
   app.post('/admin/destinations/:id/toggle', async (req, reply) => {

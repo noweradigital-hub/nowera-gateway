@@ -131,3 +131,29 @@ test('generated loader is syntactically valid javascript', () => {
   assert.doesNotThrow(() => new Function(src));
   assert.match(src, /eventID: eventId/, 'browser leg must share the event id for dedupe');
 });
+
+test('only destinations without their own deduplication get a dedupe key', async () => {
+  const { dedupeKeyFor } = await import('../src/destinations/index.js');
+  const event = { event_name: 'Purchase', event_id: 'ord-1' };
+
+  // Meta collapses the browser and server hit itself using event_id, so both legs
+  // must reach it. GA4 has no such mechanism and would count two purchases.
+  assert.equal(dedupeKeyFor('meta', event), null);
+  assert.equal(dedupeKeyFor('ga4', event), 'Purchase:ord-1');
+
+  assert.equal(dedupeKeyFor('ga4', { event_name: 'Purchase' }), null, 'no event_id, nothing to collapse');
+});
+
+test('the loader reads the GA4 client and session cookies', () => {
+  const src = loaderScript({ endpoint: 'https://t.k.sk/e', pixelId: '1', measurementId: 'G-Q7G1FKXMED' });
+  assert.match(src, /var GA_STREAM = "Q7G1FKXMED"/, 'session cookie is named after the stream id');
+  assert.match(src, /cookie\('_ga_' \+ GA_STREAM\)/);
+  assert.match(src, /ga_client_id: gaClientId\(\)/);
+  assert.match(src, /ga_session_id: gaSessionId\(\)/);
+});
+
+test('the loader degrades safely when GA4 is not configured', () => {
+  const src = loaderScript({ endpoint: 'https://t.k.sk/e', pixelId: '1', measurementId: null });
+  assert.match(src, /var GA_STREAM = null/);
+  assert.doesNotThrow(() => new Function(src));
+});
