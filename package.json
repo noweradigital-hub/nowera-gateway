@@ -12,7 +12,7 @@
     "dev": "node --watch src/server.js",
     "migrate": "node src/migrate.js",
     "seed:admin": "node src/seed-admin.js",
-    "test": "node --experimental-test-module-mocks --test \"test/**/*.test.js\""
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

@@ -1,4 +1,4 @@
-import { test, mock, before, after } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 
@@ -14,19 +14,16 @@ const TENANT = {
   destinations: [{ id: 10, kind: 'meta', settings: { dataset_id: '1', access_token: 't' } }],
 };
 
-// Stand in for Postgres: the collector only needs tenant lookup and an insert.
+// Stand in for Postgres: the collector only needs a tenant lookup and an enqueue.
 const inserted = [];
-mock.module('../src/db.js', {
-  exports: {
-    pool: { end: async () => {} },
-    query: async (sql, params) => {
-      if (/INSERT INTO events/.test(sql)) inserted.push({ sql, params });
-      return { rows: [], rowCount: 0 };
-    },
-    one: async () => TENANT,
-    many: async (sql) => (/FROM destinations/.test(sql) ? TENANT.destinations : []),
+const stubs = {
+  tenantByHost: async (host) =>
+    (String(host).split(':')[0] === TENANT.collector_host ? TENANT : null),
+  enqueue: async (tenantId, event, destinations) => {
+    inserted.push({ tenantId, event, destinations });
+    return destinations.length;
   },
-});
+};
 
 let app;
 before(async () => {
@@ -38,7 +35,7 @@ before(async () => {
   app = Fastify({ logger: false, trustProxy: true });
   await app.register(cookie, { secret: 'x'.repeat(40) });
   await app.register(formbody);
-  await app.register(collectRoutes);
+  await app.register(collectRoutes, stubs);
   await app.ready();
 });
 after(async () => { await app?.close(); });

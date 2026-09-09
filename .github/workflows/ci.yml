@@ -17,17 +17,23 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is what the production image runs; the newer one catches API drift
+        # in Node itself before a release forces it on us.
+        node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - run: npm ci
 
-      # No database needed: the HTTP suite stubs src/db.js via module mocks.
+      # No database needed: the HTTP suite injects stubs into the routes.
       - run: npm test
 
   build:
@@ -40,7 +46,7 @@ jobs:
       # Lets GITHUB_TOKEN push to GHCR without a personal access token.
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: docker/setup-buildx-action@v3
 

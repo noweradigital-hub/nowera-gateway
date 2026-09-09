@@ -1,9 +1,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { normalizeEvent } from '../lib/event.js';
-import { enqueue } from '../lib/queue.js';
+import { enqueue as defaultEnqueue } from '../lib/queue.js';
 import { newFbp, resolveFbc } from '../lib/ids.js';
-import { originAllowed, tenantByHost } from '../lib/tenants.js';
+import { originAllowed, tenantByHost as defaultTenantByHost } from '../lib/tenants.js';
 import { loaderScript } from '../lib/loader.js';
 
 const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
@@ -57,7 +57,15 @@ function verifySignature(rawBody, signature) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export default async function collectRoutes(app) {
+/**
+ * Data access is injected rather than imported directly so the tests can drive
+ * these routes without a database — and without experimental module mocking,
+ * whose option names have already drifted between Node releases.
+ */
+export default async function collectRoutes(app, opts = {}) {
+  const tenantByHost = opts.tenantByHost || defaultTenantByHost;
+  const enqueue = opts.enqueue || defaultEnqueue;
+
   // Keep the raw body around so the HMAC is computed over exactly what was sent.
   app.addHook('preParsing', async (req, _reply, payload) => {
     if (req.routeOptions?.url !== '/s') return payload;
