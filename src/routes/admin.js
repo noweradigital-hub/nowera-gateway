@@ -226,7 +226,7 @@ export default async function adminRoutes(app) {
     const status = ['pending', 'sending', 'sent', 'dead'].includes(req.query.status) ? req.query.status : null;
     const tenantId = req.query.tenant ? Number(req.query.tenant) : null;
     const rows = await many(
-      `SELECT e.id, e.event_name, e.status, e.attempts, e.last_error, e.created_at,
+      `SELECT e.id, e.event_name, e.event_id, e.status, e.attempts, e.last_error, e.created_at,
               t.name AS tenant_name, t.id AS tenant_id, d.kind
          FROM events e
          JOIN tenants t ON t.id = e.tenant_id

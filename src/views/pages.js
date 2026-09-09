@@ -207,6 +207,7 @@ export function eventLog(rows, tenants, filters) {
   const body = rows.map((r) => `<tr>
       <td><a href="/admin/tenants/${r.tenant_id}">${esc(r.tenant_name)}</a></td>
       <td class="mono">${esc(r.event_name)}</td>
+      <td class="mono" style="color:var(--dim)" title="${esc(r.event_id)}">${esc(r.event_id || '—')}</td>
       <td>${esc(r.kind || '—')}</td>
       <td>${statusPill(r.status)}${r.attempts > 1 ? ` <span style="color:var(--dim)">×${r.attempts}</span>` : ''}</td>
       <td style="color:var(--dim);white-space:nowrap">${fmt(r.created_at)}</td>
@@ -226,7 +227,7 @@ export function eventLog(rows, tenants, filters) {
       <div style="flex:0"><button type="submit">Filtrovať</button></div>
     </form>
     ${rows.length ? `<table>
-      <thead><tr><th>Klient</th><th>Event</th><th>Cieľ</th><th>Stav</th><th>Čas</th><th>Chyba</th></tr></thead>
+      <thead><tr><th>Klient</th><th>Event</th><th>Event ID</th><th>Cieľ</th><th>Stav</th><th>Čas</th><th>Chyba</th></tr></thead>
       <tbody>${body}</tbody></table>` : '<div class="empty">Nič nezodpovedá filtru.</div>'}
   </div>`;
 }
