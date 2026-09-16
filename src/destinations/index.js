@@ -13,9 +13,23 @@ export const drivers = { meta, ga4 };
  * second purchase by a second user.
  */
 export const DELIVERY = {
-  meta: { dedupe: false },
-  ga4: { dedupe: true },
+  // Meta Ads is advertising, so it needs marketing consent.
+  meta: { dedupe: false, consent: 'marketing' },
+  // GA4 is analytics. Google Ads use of those hits is signalled separately in the
+  // payload (ad_user_data / ad_personalization), driven by marketing consent.
+  ga4: { dedupe: true, consent: 'statistics' },
 };
+
+/**
+ * Whether an event may be delivered to this kind of destination. An event that
+ * carries no consent information predates consent handling (or comes from a site
+ * that does not use it), and is delivered as before.
+ */
+export function consentAllows(kind, event) {
+  const required = DELIVERY[kind]?.consent;
+  if (!required || !event.consent) return true;
+  return event.consent[required] === true;
+}
 
 /** Key that collapses the two legs of one event, or null when both should go. */
 export function dedupeKeyFor(kind, event) {

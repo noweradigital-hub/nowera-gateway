@@ -1,0 +1,18 @@
+{
+	"$schema": "https://playground.wordpress.net/blueprint-schema.json",
+	"preferredVersions": { "php": "8.3", "wp": "latest" },
+	"features": { "networking": true },
+	"login": false,
+	"steps": [
+		{
+			"step": "installPlugin",
+			"pluginData": { "resource": "wordpress.org/plugins", "slug": "woocommerce" },
+			"options": { "activate": true }
+		},
+		{ "step": "activatePlugin", "pluginPath": "nowera-capi/nowera-capi.php" },
+		{
+			"step": "runPHP",
+			"code": "<?php require '/wordpress/wp-load.php'; delete_transient( '_wc_activation_redirect' ); update_option( 'woocommerce_onboarding_profile', array( 'skipped' => true ) ); update_option( 'woocommerce_currency', 'EUR' ); update_option( 'woocommerce_default_country', 'SK' ); update_option( 'permalink_structure', '' );"
+		}
+	]
+}

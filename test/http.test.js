@@ -156,3 +156,41 @@ test('an unsigned tampered body cannot ride on a valid signature', async () => {
   });
   assert.equal(res.statusCode, 401);
 });
+
+test('without marketing consent the gateway sets no marketing cookie and forwards no identifier', async () => {
+  inserted.length = 0;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: {
+      host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json',
+      cookie: '_fbp=fb.1.1.existing; _nwr_id=visitor-1',
+    },
+    payload: {
+      event_name: 'PageView',
+      event_source_url: 'https://klient.sk/?fbclid=CLICK',
+      consent: { marketing: false, statistics: true },
+    },
+  });
+  assert.equal(res.statusCode, 200);
+  const names = res.cookies.map((c) => c.name);
+  for (const n of ['_fbp', '_fbc', '_nwr_id']) assert.ok(!names.includes(n), `${n} must not be set`);
+
+  const ev = inserted.at(-1).event;
+  assert.equal(ev.context.fbp, null);
+  assert.equal(ev.context.fbc, null);
+  assert.equal(ev.user.external_id, undefined, 'visitor id is a marketing identifier too');
+  assert.deepEqual(ev.consent, { marketing: false, statistics: true });
+});
+
+test('with marketing consent the identifiers flow as before', async () => {
+  inserted.length = 0;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'PageView', consent: { marketing: true, statistics: true } },
+  });
+  const names = res.cookies.map((c) => c.name);
+  assert.ok(names.includes('_fbp'));
+  assert.ok(names.includes('_nwr_id'));
+  assert.ok(inserted.at(-1).event.user.external_id);
+});

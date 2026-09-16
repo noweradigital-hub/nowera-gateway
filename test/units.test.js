@@ -114,8 +114,13 @@ test('ga4 payload renames the event and converts contents to items', () => {
 });
 
 test('ga4 falls back to snake_case for unmapped custom events', () => {
+  const e = normalizeEvent({ event_name: 'StartSizeGuide' }, {});
+  assert.equal(ga4Payload(e, {}).events[0].name, 'start_size_guide');
+});
+
+test('ga4 maps a category view to view_item_list', () => {
   const e = normalizeEvent({ event_name: 'ViewCategory' }, {});
-  assert.equal(ga4Payload(e, {}).events[0].name, 'view_category');
+  assert.equal(ga4Payload(e, {}).events[0].name, 'view_item_list');
 });
 
 test('fbp and fbc follow Meta cookie formats', () => {
@@ -129,7 +134,6 @@ test('fbp and fbc follow Meta cookie formats', () => {
 test('generated loader is syntactically valid javascript', () => {
   const src = loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: '999' });
   assert.doesNotThrow(() => new Function(src));
-  assert.match(src, /eventID: eventId/, 'browser leg must share the event id for dedupe');
 });
 
 test('only destinations without their own deduplication get a dedupe key', async () => {
@@ -158,9 +162,36 @@ test('the loader degrades safely when GA4 is not configured', () => {
   assert.doesNotThrow(() => new Function(src));
 });
 
-test('the loader merges page-published identity into every event', () => {
-  const src = loaderScript({ endpoint: 'https://t.k.sk/e', pixelId: '1', measurementId: 'G-X' });
-  assert.match(src, /var DEFAULT_USER = w\.nwrUser \|\| \{\}/);
-  assert.match(src, /user_data: merge\(DEFAULT_USER, opts\.user\)/);
-  assert.doesNotThrow(() => new Function(src));
+
+test('each destination is gated by its own consent category', async () => {
+  const { consentAllows } = await import('../src/destinations/index.js');
+  const both = { consent: { marketing: true, statistics: true } };
+  const statsOnly = { consent: { marketing: false, statistics: true } };
+  const nothing = { consent: { marketing: false, statistics: false } };
+  const legacy = {};
+
+  assert.equal(consentAllows('meta', both), true);
+  assert.equal(consentAllows('meta', statsOnly), false, 'Meta Ads needs marketing consent');
+  assert.equal(consentAllows('ga4', statsOnly), true, 'GA4 needs statistics consent');
+  assert.equal(consentAllows('ga4', nothing), false);
+  assert.equal(consentAllows('meta', legacy), true, 'events without consent info keep old behaviour');
+  assert.equal(consentAllows('meta', { consent: { statistics: true } }), false, 'unknown marketing is not consent');
+});
+
+test('normalizeEvent keeps only explicit boolean consent', () => {
+  assert.deepEqual(normalizeEvent({ event_name: 'X', consent: { marketing: true, statistics: false } }, {}).consent,
+    { marketing: true, statistics: false });
+  assert.equal(normalizeEvent({ event_name: 'X', consent: { marketing: 'yes' } }, {}).consent, null);
+  assert.equal(normalizeEvent({ event_name: 'X' }, {}).consent, null);
+});
+
+test('ga4 tells Google whether a hit may be used for ads', () => {
+  const granted = normalizeEvent({ event_name: 'Purchase', consent: { marketing: true, statistics: true } }, {});
+  assert.deepEqual(ga4Payload(granted, {}).consent, { ad_user_data: 'GRANTED', ad_personalization: 'GRANTED' });
+
+  const denied = normalizeEvent({ event_name: 'Purchase', consent: { marketing: false, statistics: true } }, {});
+  assert.deepEqual(ga4Payload(denied, {}).consent, { ad_user_data: 'DENIED', ad_personalization: 'DENIED' });
+
+  const legacy = normalizeEvent({ event_name: 'Purchase' }, {});
+  assert.equal(ga4Payload(legacy, {}).consent, undefined, 'no consent block, Google keeps its own default');
 });

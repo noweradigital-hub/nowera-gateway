@@ -133,7 +133,13 @@ export default async function collectRoutes(app, opts = {}) {
       .header('access-control-allow-credentials', 'true');
 
     const body = req.body || {};
-    const { visitorId, ...identity } = ensureIdentity(req, reply, tenant, body);
+
+    // _fbp, _fbc and _nwr_id are marketing identifiers. When the site says
+    // marketing consent is missing, set none of them and forward none of them.
+    const marketingDenied = body.consent && body.consent.marketing === false;
+    const { visitorId, ...identity } = marketingDenied
+      ? { visitorId: null, fbp: null, fbc: null }
+      : ensureIdentity(req, reply, tenant, body);
 
     // Only as a fallback: a real customer id from the site is always better.
     if (visitorId && !body.user_data?.external_id && !body.user?.external_id) {

@@ -14,6 +14,7 @@ const EVENT_NAMES = {
   Purchase: 'purchase',
   Lead: 'generate_lead',
   Search: 'search',
+  ViewCategory: 'view_item_list',
   CompleteRegistration: 'sign_up',
   Subscribe: 'subscribe',
 };
@@ -56,6 +57,12 @@ export function buildPayload(event, settings) {
   };
   if (event.context?.gaSessionId) body.events[0].params.session_id = event.context.gaSessionId;
   if (event.user?.external_id) body.user_id = String(event.user.external_id);
+  // Tells Google whether this hit may be used for ads. Without it Google falls
+  // back to whatever the browser tag last said, and there is no browser tag here.
+  if (typeof event.consent?.marketing === 'boolean') {
+    const state = event.consent.marketing ? 'GRANTED' : 'DENIED';
+    body.consent = { ad_user_data: state, ad_personalization: state };
+  }
   if (settings.debug) body.debug = true;
   return body;
 }

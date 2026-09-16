@@ -22,6 +22,20 @@ function pickUser(raw = {}) {
 }
 
 /**
+ * Consent as sent by the loader or the plugin. Anything other than an explicit
+ * boolean is treated as unknown, and an event with no consent block at all
+ * keeps the pre-consent behaviour.
+ */
+function pickConsent(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  for (const key of ['marketing', 'statistics']) {
+    if (typeof raw[key] === 'boolean') out[key] = raw[key];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
  * Turn whatever arrived on the wire into the canonical shape every destination
  * driver consumes. Throws on input we refuse to guess about.
  */
@@ -43,6 +57,7 @@ export function normalizeEvent(input, context) {
     event_source_url: input.event_source_url || input.url || context.referer || null,
     action_source: input.action_source || context.actionSource || 'website',
     user: pickUser(input.user_data || input.user || {}),
+    consent: pickConsent(input.consent),
     properties: input.custom_data || input.properties || {},
     context: {
       ip: context.ip,
