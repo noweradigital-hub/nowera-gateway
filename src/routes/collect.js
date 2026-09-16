@@ -5,6 +5,7 @@ import { enqueue as defaultEnqueue } from '../lib/queue.js';
 import { newEventId, newFbp, resolveFbc } from '../lib/ids.js';
 import { originAllowed, tenantByHost as defaultTenantByHost } from '../lib/tenants.js';
 import { loaderScript } from '../lib/loader.js';
+import { normalizeConsent } from '../lib/consent.js';
 
 const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
 
@@ -102,6 +103,7 @@ export default async function collectRoutes(app, opts = {}) {
         endpoint: `https://${tenant.collector_host}/e`,
         pixelId: metaDest?.settings?.dataset_id || null,
         measurementId: ga4Dest?.settings?.measurement_id || null,
+        consent: normalizeConsent(tenant.consent_mode, tenant.consent_prefix),
       }));
   });
 

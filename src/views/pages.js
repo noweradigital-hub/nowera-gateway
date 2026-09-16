@@ -1,4 +1,5 @@
 import { esc } from './layout.js';
+import { CONSENT_MODES } from '../lib/consent.js';
 
 const fmt = (d) => (d ? new Date(d).toLocaleString('sk-SK', { dateStyle: 'short', timeStyle: 'medium' }) : '—');
 
@@ -122,6 +123,18 @@ export function tenantForm(t) {
       <label for="cookie_domain">Cookie doména</label>
       <input id="cookie_domain" name="cookie_domain" class="mono" value="${esc(t?.cookie_domain)}" placeholder=".klient.sk">
       <div class="hint">S bodkou na začiatku, aby cookie platila pre web aj collector.</div>
+
+      <div class="row">
+        <div><label for="consent_mode">Súhlas s cookies</label>
+          <select id="consent_mode" name="consent_mode">
+            ${Object.entries(CONSENT_MODES).map(([k, label]) =>
+              `<option value="${k}" ${(t?.consent_mode || 'none') === k ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+          </select></div>
+        <div><label for="consent_prefix">Prefix cookies (iný nástroj)</label>
+          <input id="consent_prefix" name="consent_prefix" class="mono" value="${esc(t?.consent_prefix || 'cmplz_')}"></div>
+      </div>
+      <div class="hint">Platí aj pre stránky z cache webu — nastavenie sa posiela priamo v <code>px.js</code>.
+        Meta dostane eventy len so súhlasom marketing (CookieScript: targeting), GA4 so štatistikou (performance).</div>
 
       ${t ? `<label style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <input type="checkbox" name="active" ${t.active ? 'checked' : ''} style="width:auto"> Aktívny

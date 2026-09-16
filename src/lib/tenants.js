@@ -17,7 +17,8 @@ export async function tenantByHost(hostHeader) {
   if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
 
   const tenant = await one(
-    `SELECT id, slug, name, collector_host, allowed_origins, cookie_domain
+    `SELECT id, slug, name, collector_host, allowed_origins, cookie_domain,
+            consent_mode, consent_prefix
        FROM tenants
       WHERE lower(collector_host) = $1 AND active = TRUE`,
     [host],

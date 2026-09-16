@@ -47,6 +47,11 @@ CREATE INDEX IF NOT EXISTS events_claim_idx
 CREATE INDEX IF NOT EXISTS events_stale_idx ON events(status, created_at) WHERE status = 'sending';
 CREATE INDEX IF NOT EXISTS events_tenant_created_idx ON events(tenant_id, created_at DESC);
 
+-- How the tenant's site asks for consent. Delivered inside px.js, so it applies
+-- even to pages the site serves from a full-page cache.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS consent_mode TEXT NOT NULL DEFAULT 'none';
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS consent_prefix TEXT NOT NULL DEFAULT 'cmplz_';
+
 -- Destinations that must not receive the same logical event twice (GA4 has no
 -- deduplication of its own) get a key here; Meta wants both legs and leaves it NULL.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;

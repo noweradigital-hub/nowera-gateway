@@ -7,7 +7,7 @@ import { loaderScript } from '../src/lib/loader.js';
  * every POST to the gateway and every fbq() call. Asserting behaviour rather than
  * source text is what catches a broken dedupe or a consent leak.
  */
-function browser({ cookie = '', page, user, consent, hasConsent, fbclid } = {}) {
+function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent } = {}) {
   const posts = [];
   const fbq = [];
   const listeners = {};
@@ -31,7 +31,7 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid } = {}) 
   if (hasConsent) window.cmplz_has_consent = hasConsent;
 
   const run = () => new Function('window', 'document', 'navigator',
-    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC' }),
+    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC', consent: tenantConsent }),
   )(window, document, {});
 
   const fire = (name, detail = {}) => (listeners[name] || []).forEach((fn) => fn({ detail }));
@@ -244,4 +244,40 @@ test('CookieScript: a garbled cookie counts as no consent, not as an error', () 
   const b = browser({ consent: { mode: 'cookiescript' }, cookie: 'CookieScriptConsent=%7Bnot-json' });
   assert.doesNotThrow(() => b.run());
   assert.equal(b.posts.length, 0);
+});
+
+// --------------------------------------------- consent set on the gateway
+
+test('a page served from cache is still gated when the gateway knows the consent tool', () => {
+  // The cached HTML predates the consent setting, so it carries no nwrConsent.
+  const b = browser({
+    tenantConsent: { mode: 'cookiescript', prefix: 'cmplz_' },
+    cookie: 'CookieScriptConsent=' + encodeURIComponent(JSON.stringify({ action: 'reject', categories: '["strict"]' })),
+    page: { type: 'product', data: {} },
+  });
+  b.run();
+  assert.equal(b.posts.length, 0, 'a rejected visitor on a cached page is not tracked');
+  assert.equal(b.fbq.length, 0);
+});
+
+test('the gateway setting wins over whatever an old cached page says', () => {
+  const b = browser({
+    tenantConsent: { mode: 'cookiescript', prefix: 'cmplz_' },
+    consent: { mode: 'custom', prefix: 'stale_' },
+    cookie: 'stale_marketing=allow',
+  });
+  b.run();
+  assert.equal(b.posts.length, 0, 'the stale page mode must not unlock tracking');
+});
+
+test('without a gateway setting the page value is used as before', () => {
+  const b = browser({ tenantConsent: { mode: 'none' }, consent: { mode: 'complianz' } });
+  b.run();
+  assert.equal(b.posts.length, 0, 'page asked for Complianz, nobody consented');
+});
+
+test('with neither setting nothing is gated', () => {
+  const b = browser({ tenantConsent: { mode: 'none' } });
+  b.run();
+  assert.equal(b.posts.length, 1);
 });

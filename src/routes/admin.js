@@ -9,6 +9,7 @@ import { invalidateTenantCache } from '../lib/tenants.js';
 import { enqueue } from '../lib/queue.js';
 import { newEventId } from '../lib/ids.js';
 import { page } from '../views/layout.js';
+import { normalizeConsent } from '../lib/consent.js';
 import {
   accountPage, destinationForm, tenantForm, tenantList, tenantDetail, eventLog, loginPage,
 } from '../views/pages.js';
@@ -129,11 +130,14 @@ export default async function adminRoutes(app) {
       return redirect(reply, '/admin/tenants/new', 'Slug smie obsahovať len malé písmená, čísla a pomlčky.', 'err');
     }
     try {
+      const consent = normalizeConsent(b.consent_mode, b.consent_prefix);
       const row = await one(
-        `INSERT INTO tenants (slug, name, collector_host, allowed_origins, cookie_domain, active)
-         VALUES ($1, $2, $3, $4, $5, TRUE) RETURNING id`,
+        `INSERT INTO tenants (slug, name, collector_host, allowed_origins, cookie_domain, active,
+                              consent_mode, consent_prefix)
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7) RETURNING id`,
         [slug, String(b.name || slug).trim(), String(b.collector_host || '').trim().toLowerCase(),
-         String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null],
+         String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
+         consent.mode, consent.prefix],
       );
       invalidateTenantCache();
       return redirect(reply, `/admin/tenants/${row.id}`, 'Klient vytvorený. Pridajte destináciu.');
@@ -158,12 +162,14 @@ export default async function adminRoutes(app) {
 
   app.post('/admin/tenants/:id', async (req, reply) => {
     const b = req.body || {};
+    const consent = normalizeConsent(b.consent_mode, b.consent_prefix);
     await query(
       `UPDATE tenants SET name = $2, collector_host = $3, allowed_origins = $4,
-              cookie_domain = $5, active = $6 WHERE id = $1`,
+              cookie_domain = $5, active = $6, consent_mode = $7, consent_prefix = $8
+        WHERE id = $1`,
       [req.params.id, String(b.name || '').trim(), String(b.collector_host || '').trim().toLowerCase(),
        String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
-       b.active === 'on'],
+       b.active === 'on', consent.mode, consent.prefix],
     );
     invalidateTenantCache();
     return redirect(reply, `/admin/tenants/${req.params.id}`, 'Uložené.');

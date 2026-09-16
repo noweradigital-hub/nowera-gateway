@@ -10,7 +10,7 @@
  * cache: PHP either would not run at all or would bake one event_id into the
  * cached HTML and collapse every visitor's view into a single event.
  */
-export function loaderScript({ endpoint, pixelId, measurementId }) {
+export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
   return `(function (w, d) {
   'use strict';
   if (w.nwr && w.nwr.loaded) return;
@@ -25,8 +25,14 @@ export function loaderScript({ endpoint, pixelId, measurementId }) {
   var DEFAULT_USER = w.nwrUser || {};
   // Cache-safe description of what this page is (product, category, search).
   var PAGE = w.nwrPage || null;
-  // How the site asks for consent. Absent or mode "none" keeps the old behaviour.
-  var CONSENT = w.nwrConsent || { mode: 'none' };
+  // How the site asks for consent. The gateway's own setting for this tenant
+  // wins, because it arrives with this script and so also covers pages the site
+  // served from its page cache, which carry whatever was true when cached. The
+  // page's value is only used when the gateway has none configured.
+  var TENANT_CONSENT = ${JSON.stringify(consent || { mode: 'none' })};
+  var CONSENT = (TENANT_CONSENT && TENANT_CONSENT.mode && TENANT_CONSENT.mode !== 'none')
+    ? TENANT_CONSENT
+    : (w.nwrConsent || { mode: 'none' });
 
   var META_STANDARD = {
     AddPaymentInfo: 1, AddToCart: 1, AddToWishlist: 1, CompleteRegistration: 1,

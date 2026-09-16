@@ -195,3 +195,16 @@ test('ga4 tells Google whether a hit may be used for ads', () => {
   const legacy = normalizeEvent({ event_name: 'Purchase' }, {});
   assert.equal(ga4Payload(legacy, {}).consent, undefined, 'no consent block, Google keeps its own default');
 });
+
+test('consent settings are normalised to known modes and safe prefixes', async () => {
+  const { normalizeConsent } = await import('../src/lib/consent.js');
+  assert.deepEqual(normalizeConsent('cookiescript', 'cmplz_'), { mode: 'cookiescript', prefix: 'cmplz_' });
+  assert.deepEqual(normalizeConsent('evil', 'x"</script>'), { mode: 'none', prefix: 'xscript' });
+  assert.deepEqual(normalizeConsent('__proto__', ''), { mode: 'none', prefix: 'cmplz_' });
+  assert.deepEqual(normalizeConsent(undefined, undefined), { mode: 'none', prefix: 'cmplz_' });
+});
+
+test('the loader cannot be broken out of by a tenant consent value', () => {
+  const src = loaderScript({ endpoint: 'https://t.k.sk/e', pixelId: '1', consent: { mode: '</script><script>alert(1)', prefix: 'x' } });
+  assert.doesNotThrow(() => new Function(src));
+});

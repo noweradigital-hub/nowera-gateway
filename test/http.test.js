@@ -11,6 +11,8 @@ const TENANT = {
   id: 1, slug: 'klient', name: 'Klient', collector_host: 't.klient.sk',
   allowed_origins: 'https://klient.sk,https://www.klient.sk',
   cookie_domain: '.klient.sk',
+  consent_mode: 'cookiescript',
+  consent_prefix: 'cmplz_',
   destinations: [{ id: 10, kind: 'meta', settings: { dataset_id: '1', access_token: 't' } }],
 };
 
@@ -193,4 +195,9 @@ test('with marketing consent the identifiers flow as before', async () => {
   assert.ok(names.includes('_fbp'));
   assert.ok(names.includes('_nwr_id'));
   assert.ok(inserted.at(-1).event.user.external_id);
+});
+
+test('px.js carries the tenant consent mode so cached pages are covered too', async () => {
+  const res = await app.inject({ method: 'GET', url: '/px.js', headers: { host: HOST } });
+  assert.match(res.body, /var TENANT_CONSENT = \{"mode":"cookiescript","prefix":"cmplz_"\}/);
 });
