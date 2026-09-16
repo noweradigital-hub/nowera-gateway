@@ -13,6 +13,16 @@ foreach ( array_filter( explode( ',', (string) ( $_GET['cookies'] ?? '' ) ) ) as
 	[ $k, $v ] = array_pad( explode( ':', $pair, 2 ), 2, '' );
 	$cookies[ $k ] = $v;
 }
+// ?cs=targeting|performance builds a CookieScript decision; ?cs=reject a rejection.
+if ( isset( $_GET['cs'] ) ) {
+	$cs = sanitize_text_field( wp_unslash( $_GET['cs'] ) );
+	$cookies['CookieScriptConsent'] = 'reject' === $cs
+		? nwr_cookiescript( array( 'strict' ), 'reject' )
+		: nwr_cookiescript( array_merge( array( 'strict' ), array_filter( explode( '|', $cs ) ) ) );
+}
+if ( isset( $_GET['cs_raw'] ) ) {
+	$cookies['CookieScriptConsent'] = wp_unslash( $_GET['cs_raw'] );
+}
 nwr_cookies( $cookies );
 
 $ids = get_option( 'nwr_test_ids' );

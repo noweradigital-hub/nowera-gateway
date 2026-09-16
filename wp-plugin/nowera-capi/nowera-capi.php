@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.2.0
+ * Version:      0.3.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -40,7 +40,7 @@ add_action( 'admin_init', function () {
 				'collector_host' => sanitize_text_field( $input['collector_host'] ?? '' ),
 				'ingest_secret'  => sanitize_text_field( $input['ingest_secret'] ?? '' ),
 				'load_script'    => empty( $input['load_script'] ) ? 0 : 1,
-				'consent_mode'   => in_array( $input['consent_mode'] ?? 'none', array( 'none', 'complianz', 'custom' ), true )
+				'consent_mode'   => in_array( $input['consent_mode'] ?? 'none', array( 'none', 'cookiescript', 'complianz', 'custom' ), true )
 					? $input['consent_mode']
 					: 'none',
 				'consent_prefix' => preg_replace( '/[^a-zA-Z0-9_\-]/', '', $input['consent_prefix'] ?? 'cmplz_' ) ?: 'cmplz_',
@@ -88,11 +88,13 @@ function nowera_capi_render_settings(): void {
 					<td>
 						<select id="nwr_consent" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[consent_mode]">
 							<option value="none" <?php selected( $s['consent_mode'], 'none' ); ?>>Nekontrolovať (meria sa vždy)</option>
+							<option value="cookiescript" <?php selected( $s['consent_mode'], 'cookiescript' ); ?>>CookieScript</option>
 							<option value="complianz" <?php selected( $s['consent_mode'], 'complianz' ); ?>>Complianz</option>
 							<option value="custom" <?php selected( $s['consent_mode'], 'custom' ); ?>>Iný nástroj (cookie s prefixom)</option>
 						</select>
 						<p class="description">
-							Meta dostane eventy len so súhlasom <strong>marketing</strong>, GA4 so súhlasom <strong>statistics</strong>.
+							Meta dostane eventy len so súhlasom <strong>marketing</strong>, GA4 so súhlasom <strong>statistics</strong>
+							(v CookieScripte kategórie <code>targeting</code> a <code>performance</code>).
 							Pri inom nástroji zavolajte po rozhodnutí návštevníka <code>nwr('consent')</code>.
 						</p>
 					</td>
@@ -176,12 +178,39 @@ function nowera_capi_has_consent( string $category ): bool {
 	if ( 'none' === $s['consent_mode'] ) {
 		return true;
 	}
-	// The WP Consent API is what Complianz and most other tools report into.
-	if ( function_exists( 'wp_has_consent' ) ) {
+
+	if ( 'cookiescript' === $s['consent_mode'] ) {
+		$map = array( 'marketing' => 'targeting', 'statistics' => 'performance' );
+		return isset( $map[ $category ] ) && in_array( $map[ $category ], nowera_capi_cookiescript_categories(), true );
+	}
+
+	// Complianz reports into the WP Consent API when that plugin is present.
+	if ( 'complianz' === $s['consent_mode'] && function_exists( 'wp_has_consent' ) ) {
 		return (bool) wp_has_consent( $category );
 	}
 	$name = $s['consent_prefix'] . $category;
 	return isset( $_COOKIE[ $name ] ) && 'allow' === sanitize_text_field( wp_unslash( $_COOKIE[ $name ] ) );
+}
+
+/**
+ * Categories the visitor accepted in CookieScript. Its cookie is JSON whose
+ * "categories" field is itself a JSON string, e.g.
+ *   {"action":"accept","categories":"[\"targeting\",\"performance\"]"}
+ * WordPress adds slashes to $_COOKIE, so it has to be unslashed before decoding.
+ */
+function nowera_capi_cookiescript_categories(): array {
+	if ( empty( $_COOKIE['CookieScriptConsent'] ) || ! is_string( $_COOKIE['CookieScriptConsent'] ) ) {
+		return array();
+	}
+	$data = json_decode( wp_unslash( $_COOKIE['CookieScriptConsent'] ), true );
+	if ( ! is_array( $data ) ) {
+		return array();
+	}
+	$categories = $data['categories'] ?? array();
+	if ( is_string( $categories ) ) {
+		$categories = json_decode( $categories, true );
+	}
+	return is_array( $categories ) ? array_values( array_filter( $categories, 'is_string' ) ) : array();
 }
 
 /**

@@ -18,7 +18,9 @@ async function html(path, cookie) {
   return res.text();
 }
 const setConsent = (mode) => json(`/nwr-test/set.php?consent=${mode}`);
-const fire = (event, cookies = '') => json(`/nwr-test/fire.php?event=${event}&cookies=${encodeURIComponent(cookies)}`);
+const fire = (event, cookies = '', extra = '') =>
+  json(`/nwr-test/fire.php?event=${event}&cookies=${encodeURIComponent(cookies)}${extra}`);
+const fireCs = (event, cs, cookies = '') => fire(event, cookies, `&cs=${encodeURIComponent(cs)}`);
 
 function inline(page, name) {
   const m = page.match(new RegExp(`window\\.${name}=(\\{.*?\\});`));
@@ -27,6 +29,14 @@ function inline(page, name) {
 
 let ids;
 before(async () => {
+  // Playground answers HTTP before its blueprint has finished activating
+  // WooCommerce, so wait for the plugins rather than for the port.
+  for (let i = 0; ; i++) {
+    const d = await json('/nwr-test/diag.php').catch(() => ({}));
+    if (d.woo_class && d.capi_loaded) break;
+    if (i > 90) throw new Error('WooCommerce never finished activating in Playground');
+    await new Promise((r) => setTimeout(r, 2000));
+  }
   ids = (await json('/nwr-test/setup.php'));
   await fetch(BASE + '/nwr-test/remember.php', { method: 'POST', body: JSON.stringify(ids) });
   await setConsent('none');
@@ -228,6 +238,89 @@ test('another consent tool works through its own cookie prefix', async () => {
     assert.deepEqual(sent[0].body.consent, { marketing: true, statistics: false });
     const none = await fire('add_to_cart', 'cmplz_marketing:allow');
     assert.equal(none.sent.length, 0, 'the Complianz cookie means nothing when another prefix is configured');
+  } finally {
+    await setConsent('none');
+  }
+});
+
+// --------------------------------------------------------- CookieScript
+
+test('CookieScript: the page tells the loader to read CookieScript', async () => {
+  await setConsent('cookiescript');
+  try {
+    assert.equal(inline(await html('/'), 'nwrConsent').mode, 'cookiescript');
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('CookieScript: no decision and a rejection both send nothing', async () => {
+  await setConsent('cookiescript');
+  try {
+    for (const ev of ['add_to_cart', 'checkout', 'payment_info', 'purchase']) {
+      assert.equal((await fire(ev, '_fbp:fb.1.1.2')).sent.length, 0, `${ev} without a decision`);
+      assert.equal((await fireCs(ev, 'reject', '_fbp:fb.1.1.2')).sent.length, 0, `${ev} after reject`);
+    }
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('CookieScript: targeting + performance sends everything', async () => {
+  await setConsent('cookiescript');
+  try {
+    const { sent } = await fireCs('purchase', 'targeting|performance', '_fbp:fb.1.1.2');
+    assert.equal(sent.length, 1);
+    const b = sent[0].body;
+    assert.deepEqual(b.consent, { marketing: true, statistics: true });
+    assert.equal(b.fbp, 'fb.1.1.2');
+    assert.equal(b.user_data.em, sha('jan.novak@example.com'));
+    assert.equal(sent[0].signature_valid, true);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('CookieScript: performance only reaches GA4 without contact details', async () => {
+  await setConsent('cookiescript');
+  try {
+    const { sent } = await fireCs('purchase', 'performance', '_fbp:fb.1.1.2');
+    const b = sent[0].body;
+    assert.deepEqual(b.consent, { marketing: false, statistics: true });
+    assert.equal(b.fbp, null);
+    assert.deepEqual(Object.keys(b.user_data), ['country']);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('CookieScript: targeting only still reaches Meta', async () => {
+  await setConsent('cookiescript');
+  try {
+    const { sent } = await fireCs('add_to_cart', 'targeting');
+    assert.deepEqual(sent[0].body.consent, { marketing: true, statistics: false });
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('CookieScript: a malformed cookie is treated as no consent, not a crash', async () => {
+  await setConsent('cookiescript');
+  try {
+    for (const raw of ['{not json', '{"categories":"not json"}', '{"categories":42}', '"just a string"']) {
+      const { sent } = await fire('add_to_cart', '', `&cs_raw=${encodeURIComponent(raw)}`);
+      assert.equal(sent.length, 0, `cookie ${raw}`);
+    }
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('CookieScript: a Complianz cookie means nothing in CookieScript mode', async () => {
+  await setConsent('cookiescript');
+  try {
+    const { sent } = await fire('add_to_cart', 'cmplz_marketing:allow,cmplz_statistics:allow');
+    assert.equal(sent.length, 0);
   } finally {
     await setConsent('none');
   }

@@ -18,5 +18,7 @@ nwr_out( array(
 	'has_prefix_input'   => (bool) preg_match( '/name="nowera_capi_settings\[consent_prefix\]"/', $html ),
 	'bogus_mode'         => call_user_func( $sanitize, array( 'consent_mode' => 'evil', 'consent_prefix' => 'x"<script>' ) ),
 	'custom_mode'        => call_user_func( $sanitize, array( 'consent_mode' => 'custom', 'consent_prefix' => 'my_' ) ),
+	'cookiescript_mode'  => call_user_func( $sanitize, array( 'consent_mode' => 'cookiescript' ) )['consent_mode'],
+	'has_cookiescript'   => (bool) preg_match( '/<option value="cookiescript"/', $html ),
 	'bytes'              => strlen( $html ),
 ) );

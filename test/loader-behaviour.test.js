@@ -34,7 +34,7 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid } = {}) 
     loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC' }),
   )(window, document, {});
 
-  const fire = (name) => (listeners[name] || []).forEach((fn) => fn({ detail: {} }));
+  const fire = (name, detail = {}) => (listeners[name] || []).forEach((fn) => fn({ detail }));
   return { window, document, posts, fbq, run, fire, listeners };
 }
 
@@ -158,4 +158,90 @@ test('page-published identity is merged into every event', () => {
   const b = browser({ user: { em: 'hash-of-email' } });
   b.run();
   assert.equal(b.posts[0].body.user_data.em, 'hash-of-email');
+});
+
+// ------------------------------------------------------------ CookieScript
+
+// Exactly how CookieScript stores its decision: JSON, with categories as a
+// JSON string inside it, URL-encoded by js-cookie.
+const csCookie = (categories, action = 'accept') =>
+  'CookieScriptConsent=' + encodeURIComponent(JSON.stringify({
+    action, categories: JSON.stringify(categories), key: 'k',
+  }));
+
+test('CookieScript: nothing is sent before the visitor decides', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, page: { type: 'product', data: {} } });
+  b.run();
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.fbq.length, 0);
+  for (const e of ['CookieScriptAccept', 'CookieScriptAcceptAll', 'CookieScriptReject', 'CookieScriptCurrentState']) {
+    assert.ok(b.listeners[e], `listens for ${e}`);
+  }
+});
+
+test('CookieScript: a visitor who rejected earlier is never tracked', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, cookie: csCookie(['strict'], 'reject') });
+  b.run();
+  b.fire('CookieScriptLoaded');
+  b.fire('CookieScriptCurrentState', { action: 'reject', categories: ['strict'] });
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.fbq.length, 0, 'no pixel for a rejected visitor');
+});
+
+test('CookieScript: a returning visitor who accepted is tracked from the cookie alone', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, cookie: csCookie(['strict', 'targeting', 'performance']) });
+  b.run();
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: true });
+  assert.deepEqual(b.fbq[0], ['init', 'PIX']);
+});
+
+test('CookieScript: its live state wins over a stale cookie', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, cookie: csCookie(['strict', 'targeting']) });
+  b.window.CookieScript = { instance: { currentState: () => ({ action: 'reject', categories: ['strict'] }) } };
+  b.run();
+  assert.equal(b.posts.length, 0);
+});
+
+test('CookieScript: accepting in the banner releases waiting events at once', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, page: { type: 'product', data: {} } });
+  b.run();
+  assert.equal(b.posts.length, 0);
+  // The event carries the choice even if the cookie has not been written yet.
+  b.fire('CookieScriptAccept', { categories: ['strict', 'targeting'] });
+  assert.deepEqual(b.posts.map((p) => p.body.event_name), ['PageView', 'ViewContent']);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: false });
+  assert.equal(tracked(b.fbq)[0][3].eventID, b.posts[0].body.event_id);
+});
+
+test('CookieScript: accept-all releases events for every destination', () => {
+  const b = browser({ consent: { mode: 'cookiescript' } });
+  b.run();
+  b.fire('CookieScriptAcceptAll');
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: true });
+});
+
+test('CookieScript: statistics only sends no pixel and no marketing identifiers', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, cookie: '_fbp=fb.1.1.2' });
+  b.run();
+  b.fire('CookieScriptAccept', { categories: ['strict', 'performance'] });
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: false, statistics: true });
+  assert.equal(b.posts[0].body.fbp, undefined);
+  assert.equal(b.fbq.length, 0);
+});
+
+test('CookieScript: rejecting in the banner drops the waiting events', () => {
+  const b = browser({ consent: { mode: 'cookiescript' } });
+  b.run();
+  b.fire('CookieScriptReject');
+  b.fire('CookieScriptCurrentState', { action: 'reject', categories: ['strict'] });
+  assert.equal(b.posts.length, 0);
+});
+
+test('CookieScript: a garbled cookie counts as no consent, not as an error', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, cookie: 'CookieScriptConsent=%7Bnot-json' });
+  assert.doesNotThrow(() => b.run());
+  assert.equal(b.posts.length, 0);
 });

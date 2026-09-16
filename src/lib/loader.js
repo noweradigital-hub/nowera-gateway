@@ -54,13 +54,49 @@ export function loaderScript({ endpoint, pixelId, measurementId }) {
     return CONSENT && CONSENT.mode && CONSENT.mode !== 'none';
   }
 
+  // CookieScript names its categories differently.
+  var CS_CATEGORY = { marketing: 'targeting', statistics: 'performance' };
+  var CS_ALL = ['strict', 'targeting', 'performance', 'functionality', 'unclassified'];
+  // Latest state CookieScript announced. Its events carry the decision itself,
+  // which is safer than re-reading a cookie that may not be written yet.
+  var csAnnounced = null;
+
+  function cookieScriptCategories() {
+    if (csAnnounced) return csAnnounced;
+    try {
+      var cs = w.CookieScript && w.CookieScript.instance;
+      if (cs && typeof cs.currentState === 'function') {
+        var st = cs.currentState();
+        if (st && st.categories && st.categories.length) return st.categories;
+      }
+    } catch (e) {}
+    // It may load after us; on a returning visit its cookie already says.
+    // The cookie is JSON whose "categories" field is itself a JSON string.
+    var raw = cookie('CookieScriptConsent');
+    if (!raw) return [];
+    try {
+      var data = JSON.parse(raw);
+      var cats = typeof data.categories === 'string' ? JSON.parse(data.categories) : data.categories;
+      return Object.prototype.toString.call(cats) === '[object Array]' ? cats : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
   function hasConsent(category) {
     if (!consentActive()) return true;
-    // Complianz's own check knows about opt-out regions, Do Not Track and bots.
-    if (typeof w.cmplz_has_consent === 'function') {
-      try { return !!w.cmplz_has_consent(category); } catch (e) {}
+
+    if (CONSENT.mode === 'cookiescript') {
+      return cookieScriptCategories().indexOf(CS_CATEGORY[category]) !== -1;
     }
-    // Complianz may load after us; on a returning visit its cookie already says.
+
+    if (CONSENT.mode === 'complianz') {
+      // Complianz's own check knows about opt-out regions, Do Not Track and bots.
+      if (typeof w.cmplz_has_consent === 'function') {
+        try { return !!w.cmplz_has_consent(category); } catch (e) {}
+      }
+    }
+    // Complianz may load after us, and any other tool is read by its cookie prefix.
     return cookie((CONSENT.prefix || 'cmplz_') + category) === 'allow';
   }
 
@@ -196,10 +232,29 @@ export function loaderScript({ endpoint, pixelId, measurementId }) {
     return ev.id;
   }
 
-  if (consentActive()) {
+  if (CONSENT.mode === 'complianz') {
     // Complianz announces both the initial state and every later change.
     d.addEventListener('cmplz_fire_categories', flush);
     d.addEventListener('cmplz_status_change', flush);
+  }
+
+  if (CONSENT.mode === 'cookiescript') {
+    var remember = function (cats) {
+      return function (e) {
+        var announced = typeof cats === 'function' ? cats(e) : cats;
+        if (announced) csAnnounced = announced;
+        flush();
+      };
+    };
+    var detailCategories = function (e) {
+      var c = e && e.detail && e.detail.categories;
+      return Object.prototype.toString.call(c) === '[object Array]' ? c : null;
+    };
+    d.addEventListener('CookieScriptAccept', remember(detailCategories));
+    d.addEventListener('CookieScriptAcceptAll', remember(CS_ALL));
+    d.addEventListener('CookieScriptReject', remember(['strict']));
+    d.addEventListener('CookieScriptCurrentState', remember(detailCategories));
+    d.addEventListener('CookieScriptLoaded', remember(null));
   }
 
   var queued = (w.nwr && w.nwr.q) || [];

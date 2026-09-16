@@ -33,5 +33,8 @@ First boot downloads WordPress and WooCommerce and takes a minute or two.
   into the page. Assert on the plugin's own `<script>`, not the whole HTML.
 - WordPress hides fatals behind "critical error"; the bootstrap disables that
   handler and prints `NWR_FATAL {...}` instead.
+- Playground answers HTTP before the blueprint has activated WooCommerce, so
+  "port is open" is not "ready". The suite polls `diag.php` until both plugins
+  are loaded.
 
 These scripts are test-only and must never be deployed.

@@ -52,12 +52,25 @@ function nwr_settings( array $overrides = array() ): void {
 	), $overrides ) );
 }
 
-/** Pretend the visitor sent these cookies with the request being simulated. */
+/**
+ * Pretend the visitor sent these cookies with the request being simulated.
+ * WordPress slashes $_COOKIE on a real request, so do the same here — that is
+ * what catches a missing wp_unslash() before a json_decode().
+ */
 function nwr_cookies( array $cookies ): void {
-	foreach ( array( 'cmplz_marketing', 'cmplz_statistics', '_fbp', '_fbc', '_ga', '_nwr_id', 'my_marketing' ) as $k ) {
+	foreach ( array( 'cmplz_marketing', 'cmplz_statistics', '_fbp', '_fbc', '_ga', '_nwr_id', 'my_marketing', 'CookieScriptConsent' ) as $k ) {
 		unset( $_COOKIE[ $k ] );
 	}
 	foreach ( $cookies as $k => $v ) {
-		$_COOKIE[ $k ] = $v;
+		$_COOKIE[ $k ] = wp_slash( $v );
 	}
+}
+
+/** The CookieScriptConsent cookie exactly as CookieScript writes it. */
+function nwr_cookiescript( array $categories, string $action = 'accept' ): string {
+	return wp_json_encode( array(
+		'action'     => $action,
+		'categories' => wp_json_encode( $categories ),
+		'key'        => 'test-key',
+	) );
 }
