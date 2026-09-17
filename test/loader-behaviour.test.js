@@ -45,7 +45,7 @@ function cookieJar(initial) {
  * every POST to the gateway and every fbq() call. Asserting behaviour rather than
  * source text is what catches a broken dedupe or a consent leak.
  */
-function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk' } = {}) {
+function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk', referrer = '' } = {}) {
   const posts = [];
   const fbq = [];
   const listeners = {};
@@ -53,6 +53,7 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
   const jar = cookieJar(cookie);
 
   const document = {
+    referrer,
     get cookie() { return jar.get(); },
     set cookie(text) { jar.set(text); },
     addEventListener: (name, fn) => { (listeners[name] ||= []).push(fn); },
@@ -447,4 +448,14 @@ test('Complianz: a deny cookie removes the stored identifiers', () => {
   const b = browser({ consent: { mode: 'complianz' }, cookie: 'cmplz_marketing=deny; _nwr_ud=x' });
   b.run();
   assert.equal(b.jar.value('_nwr_ud'), undefined);
+});
+
+test('the page referrer travels with every event, and is left out when there is none', () => {
+  const b = browser({ referrer: 'https://www.google.com/', page: { type: 'product', data: {} } });
+  b.run();
+  assert.deepEqual(b.posts.map((p) => p.body.referrer_url), ['https://www.google.com/', 'https://www.google.com/']);
+
+  const direct = browser();
+  direct.run();
+  assert.equal('referrer_url' in direct.posts[0].body, false);
 });

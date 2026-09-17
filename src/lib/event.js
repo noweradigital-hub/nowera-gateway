@@ -36,6 +36,22 @@ function pickConsent(raw) {
 }
 
 /**
+ * The referrer of the page the event happened on, cut to scheme, host and path:
+ * a same-site referrer can carry order keys or search terms in its query string.
+ */
+function pickReferrer(raw) {
+  if (typeof raw !== 'string' || !raw || raw.length > 2048) return null;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  return `${url.origin}${url.pathname}`;
+}
+
+/**
  * Turn whatever arrived on the wire into the canonical shape every destination
  * driver consumes. Throws on input we refuse to guess about.
  */
@@ -55,6 +71,7 @@ export function normalizeEvent(input, context) {
     event_id: String(input.event_id || newEventId()),
     event_time: eventTime,
     event_source_url: input.event_source_url || input.url || context.referer || null,
+    referrer_url: pickReferrer(input.referrer_url),
     action_source: input.action_source || context.actionSource || 'website',
     user: pickUser(input.user_data || input.user || {}),
     consent: pickConsent(input.consent),

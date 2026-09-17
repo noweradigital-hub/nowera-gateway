@@ -7,12 +7,21 @@ import { buildUserData } from '../lib/hash.js';
  */
 const PERMANENT_CODES = new Set([100, 190, 200, 803]);
 
+// Meta's accepted values for custom_data.customer_segmentation.
+const CUSTOMER_SEGMENTS = new Set([
+  'new_customer_to_business', 'new_customer_to_business_line',
+  'new_customer_to_product_area', 'new_customer_to_medium',
+  'existing_customer_to_business', 'existing_customer_to_business_line',
+  'existing_customer_to_product_area', 'existing_customer_to_medium',
+  'customer_in_loyalty_program',
+]);
+
 function buildCustomData(props = {}) {
   const out = {};
   const copy = [
     'value', 'currency', 'content_name', 'content_category', 'content_ids',
     'content_type', 'contents', 'num_items', 'order_id', 'search_string',
-    'status', 'predicted_ltv',
+    'status', 'predicted_ltv', 'customer_segmentation',
   ];
   for (const key of copy) {
     if (props[key] !== undefined && props[key] !== null && props[key] !== '') {
@@ -20,6 +29,10 @@ function buildCustomData(props = {}) {
     }
   }
   if (out.value !== undefined) out.value = Number(out.value);
+  // An unknown value would make Meta reject the whole event.
+  if (out.customer_segmentation !== undefined && !CUSTOMER_SEGMENTS.has(out.customer_segmentation)) {
+    delete out.customer_segmentation;
+  }
   return out;
 }
 
@@ -34,6 +47,7 @@ export function buildPayload(event, settings) {
   // into one conversion. Without it every event is counted twice.
   if (event.event_id) data.event_id = event.event_id;
   if (event.event_source_url) data.event_source_url = event.event_source_url;
+  if (event.referrer_url) data.referrer_url = event.referrer_url;
 
   const custom = buildCustomData(event.properties);
   if (Object.keys(custom).length) data.custom_data = custom;

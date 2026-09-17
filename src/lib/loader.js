@@ -351,6 +351,8 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       event_id: ev.id,
       event_time: ev.time,
       event_source_url: ev.url,
+      // The page's own referrer; the gateway keeps only its origin and path.
+      referrer_url: d.referrer || undefined,
       custom_data: ev.props,
       // Contact details are for advertising; without that consent only the
       // country may travel, as on the site's own server events.

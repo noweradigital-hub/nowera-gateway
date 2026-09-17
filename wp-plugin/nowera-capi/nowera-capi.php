@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.4.0
+ * Version:      0.5.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -527,6 +527,71 @@ function nowera_capi_client_ip(): string {
 	return '';
 }
 
+/**
+ * The referrer of the page this request renders, for events fired during a
+ * full page load (checkout, thank-you page). An AJAX or REST call's referrer is
+ * the page itself, not the one before it, so those get none. Query string and
+ * fragment are dropped: on a same-site referrer they can hold order keys.
+ */
+function nowera_capi_page_referrer( ?string $event_url ): ?string {
+	if ( empty( $_SERVER['HTTP_REFERER'] ) || wp_doing_ajax() || wp_doing_cron() || ( defined( 'REST_REQUEST' ) && REST_REQUEST ) ) {
+		return null;
+	}
+	$parts = wp_parse_url( esc_url_raw( wp_unslash( $_SERVER['HTTP_REFERER'] ) ) );
+	if ( empty( $parts['scheme'] ) || empty( $parts['host'] ) || ! in_array( $parts['scheme'], array( 'http', 'https' ), true ) ) {
+		return null;
+	}
+	$referrer = $parts['scheme'] . '://' . $parts['host'] . ( isset( $parts['port'] ) ? ':' . $parts['port'] : '' ) . ( $parts['path'] ?? '/' );
+	if ( $event_url && strtok( $event_url, '?#' ) === $referrer ) {
+		return null; // the page referring to itself, e.g. a form posted back
+	}
+	return $referrer;
+}
+
+/**
+ * Whether the buyer has ordered before: an earlier order under the same account
+ * or billing email that was not abandoned, failed or cancelled. Custom statuses
+ * (shipped, delivered…) count, since they come after payment.
+ */
+function nowera_capi_customer_segment( \WC_Order $order ): ?string {
+	$email       = (string) $order->get_billing_email();
+	$customer_id = (int) $order->get_customer_id();
+	if ( '' === $email && ! $customer_id ) {
+		return null;
+	}
+
+	$skip     = array( 'wc-pending', 'wc-failed', 'wc-cancelled', 'wc-checkout-draft' );
+	$statuses = array_values( array_diff( array_keys( wc_get_order_statuses() ), $skip ) );
+	$args     = array(
+		'type'    => 'shop_order',
+		'status'  => $statuses,
+		'exclude' => array( $order->get_id() ),
+		'limit'   => 1,
+		'return'  => 'ids',
+	);
+	$created = $order->get_date_created();
+	if ( $created ) {
+		$args['date_created'] = '<' . $created->getTimestamp();
+	}
+
+	$lookups = array();
+	if ( $customer_id ) {
+		$lookups[] = array( 'customer_id' => $customer_id );
+	}
+	if ( '' !== $email ) {
+		$lookups[] = array( 'billing_email' => $email );
+		if ( strtolower( $email ) !== $email ) {
+			$lookups[] = array( 'billing_email' => strtolower( $email ) );
+		}
+	}
+	foreach ( $lookups as $lookup ) {
+		if ( wc_get_orders( array_merge( $args, $lookup ) ) ) {
+			return 'existing_customer_to_business';
+		}
+	}
+	return 'new_customer_to_business';
+}
+
 /** Send one event to the gateway. Non-blocking: never delays the page for the visitor. */
 function nowera_capi_send( string $event_name, string $event_id, array $user, array $props, ?string $url = null ): void {
 	$s = nowera_capi_settings();
@@ -552,7 +617,8 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 		}
 	}
 
-	$ga = nowera_capi_ga_ids();
+	$ga         = nowera_capi_ga_ids();
+	$source_url = $url ?: home_url( add_query_arg( array() ) );
 
 	$payload = array(
 		'event_name'        => $event_name,
@@ -560,7 +626,8 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 		'event_time'        => time(),
 		'ga_client_id'      => $ga['client_id'],
 		'ga_session_id'     => $ga['session_id'],
-		'event_source_url'  => $url ?: home_url( add_query_arg( array() ) ),
+		'event_source_url'  => $source_url,
+		'referrer_url'      => nowera_capi_page_referrer( $source_url ),
 		'action_source'     => 'website',
 		'user_data'         => $hashed,
 		'custom_data'       => $props,
@@ -643,6 +710,11 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		'content_type' => 'product',
 		'num_items'    => $order->get_item_count(),
 	);
+	// New or returning buyer, for campaigns that optimise for new customers.
+	$segment = nowera_capi_customer_segment( $order );
+	if ( $segment ) {
+		$custom_data['customer_segmentation'] = $segment;
+	}
 
 	nowera_capi_send(
 		'Purchase',

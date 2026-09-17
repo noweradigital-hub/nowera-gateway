@@ -183,6 +183,30 @@ test('Purchase is sent once, with catalog ids, even when the thank-you page is r
   assert.deepEqual(JSON.parse(legs[0][1]), b.custom_data);
 });
 
+test('Purchase tells Meta whether the buyer is new or returning', async () => {
+  const email = `Novy.${Date.now()}@Example.com`;
+  const segment = async (extra) => (await fire('purchase', '', extra)).sent[0].body.custom_data.customer_segmentation;
+
+  assert.equal(await segment(`&email=${encodeURIComponent(email)}`), 'new_customer_to_business');
+  assert.equal(await segment(`&email=${encodeURIComponent('x' + email)}&prior=failed`), 'new_customer_to_business',
+    'a failed earlier order is not a purchase');
+  assert.equal(await segment(`&email=${encodeURIComponent('y' + email)}&prior=completed`), 'existing_customer_to_business',
+    'found even though the earlier order stored the email in lower case');
+  assert.equal(await segment(`&email=${encodeURIComponent('z' + email)}&prior=on-hold`), 'existing_customer_to_business');
+});
+
+test('server events on a full page load carry the referrer, without its query', async () => {
+  const ref = encodeURIComponent('https://shop.test/kosik/?coupon=ZLAVA#top');
+  const page = await fire('checkout', '', `&ref=${ref}`);
+  assert.equal(page.sent[0].body.referrer_url, 'https://shop.test/kosik/');
+
+  const ajax = await fire('checkout', '', `&ajax=1&ref=${ref}`);
+  assert.equal(ajax.sent[0].body.referrer_url, null, 'an AJAX call only knows the page itself');
+
+  const direct = await fire('checkout');
+  assert.equal(direct.sent[0].body.referrer_url, null);
+});
+
 // ------------------------------------------------ returning customers
 
 const csCookie = (categories, action = 'accept') =>

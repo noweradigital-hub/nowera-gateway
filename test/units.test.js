@@ -97,6 +97,28 @@ test('meta payload carries event_id, hashed user data and numeric value', () => 
   assert.equal(body.test_event_code, 'TEST1');
 });
 
+test('meta payload carries the page referrer without its query string', () => {
+  const ev = normalizeEvent({
+    event_name: 'PageView',
+    referrer_url: 'https://klient.sk/pokladna/?key=wc_order_secret#platba',
+  }, { ip: '1.2.3.4', userAgent: 'UA' });
+  assert.equal(metaPayload(ev, {}).data[0].referrer_url, 'https://klient.sk/pokladna/');
+
+  for (const bad of ['javascript:alert(1)', 'not a url', '', 42, 'https://x.sk/' + 'a'.repeat(3000)]) {
+    const e = normalizeEvent({ event_name: 'PageView', referrer_url: bad }, {});
+    assert.equal(metaPayload(e, {}).data[0].referrer_url, undefined, `dropped: ${String(bad).slice(0, 20)}`);
+  }
+});
+
+test('meta payload keeps a valid customer segment and drops anything else', () => {
+  const withSegment = (value) => metaPayload(normalizeEvent({
+    event_name: 'Purchase', custom_data: { value: 10, currency: 'EUR', customer_segmentation: value },
+  }, {}), {}).data[0].custom_data.customer_segmentation;
+  assert.equal(withSegment('new_customer_to_business'), 'new_customer_to_business');
+  assert.equal(withSegment('existing_customer_to_business'), 'existing_customer_to_business');
+  assert.equal(withSegment('vip'), undefined, 'Meta rejects unknown values');
+});
+
 test('meta payload omits test_event_code when not configured', () => {
   const body = metaPayload(sample, { dataset_id: '1', access_token: 't' });
   assert.ok(!('test_event_code' in body));

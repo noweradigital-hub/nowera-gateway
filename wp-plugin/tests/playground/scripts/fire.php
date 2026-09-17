@@ -7,6 +7,8 @@
  *   &ud=<json>   the stored returning-customer cookie (its JSON has commas)
  *   ?event=order_url|order_url_old  only create an order and return its thank-you URL
  *   ?event=login                    run wp_login for the test customer
+ *   &ref=<url>   the request's HTTP referer;  &ajax=1  pretend it is an AJAX call
+ *   &email=<address>&prior=<status>  purchase: buyer email, and an earlier order in that status
  */
 require __DIR__ . '/_bootstrap.php';
 delete_option( 'nwr_test_captured' );
@@ -31,6 +33,13 @@ if ( isset( $_GET['ud'] ) ) {
 }
 nwr_cookies( $cookies );
 
+if ( isset( $_GET['ref'] ) ) {
+	$_SERVER['HTTP_REFERER'] = wp_unslash( $_GET['ref'] );
+}
+if ( ! empty( $_GET['ajax'] ) ) {
+	add_filter( 'wp_doing_ajax', '__return_true' );
+}
+
 $ids = get_option( 'nwr_test_ids' );
 $event = sanitize_key( $_GET['event'] ?? '' );
 
@@ -38,12 +47,12 @@ if ( ! did_action( 'woocommerce_load_cart_from_session' ) && function_exists( 'w
 	wc_load_cart();
 }
 
-function nwr_order( array $ids ): WC_Order {
+function nwr_order( array $ids, string $email = 'Jan.Novak@Example.com' ): WC_Order {
 	$order = wc_create_order();
 	$order->add_product( wc_get_product( $ids['simple'] ), 2 );
 	$order->add_product( wc_get_product( $ids['variations'][1] ), 1 );
 	$order->set_address( array(
-		'first_name' => 'Ján', 'last_name' => 'Novák', 'email' => 'Jan.Novak@Example.com',
+		'first_name' => 'Ján', 'last_name' => 'Novák', 'email' => $email,
 		'phone' => '+421 903 123 456', 'city' => 'Banská Bystrica', 'postcode' => '974 01', 'country' => 'SK',
 	), 'billing' );
 	$order->calculate_totals();
@@ -97,7 +106,15 @@ switch ( $event ) {
 		do_action( 'wp_login', $user->user_login, $user );
 		break;
 	case 'purchase':
-		$order = nwr_order( $ids );
+		$email = isset( $_GET['email'] ) ? sanitize_email( wp_unslash( $_GET['email'] ) ) : 'Jan.Novak@Example.com';
+		if ( ! empty( $_GET['prior'] ) ) {
+			// An earlier order by the same buyer, stored with the email in lower case.
+			$prior = nwr_order( $ids, strtolower( $email ) );
+			$prior->set_status( sanitize_key( $_GET['prior'] ) );
+			$prior->set_date_created( time() - HOUR_IN_SECONDS );
+			$prior->save();
+		}
+		$order = nwr_order( $ids, $email );
 		remove_all_actions( 'wp_footer' ); // keep only the browser leg the thank-you hook queues
 		ob_start();
 		do_action( 'woocommerce_thankyou', $order->get_id() );
