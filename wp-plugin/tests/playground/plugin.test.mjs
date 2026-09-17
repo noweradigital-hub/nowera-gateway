@@ -168,13 +168,19 @@ test('the block checkout also triggers AddPaymentInfo', async () => {
 });
 
 test('Purchase is sent once, with catalog ids, even when the thank-you page is reloaded', async () => {
-  const { sent } = await fire('purchase');
+  const { sent, footer } = await fire('purchase');
   assert.equal(sent.length, 1);
   const b = sent[0].body;
   assert.equal(b.event_name, 'Purchase');
   assert.match(b.event_id, /^ord-\d+$/);
   assert.deepEqual(b.custom_data.content_ids, [String(ids.simple), String(ids.variations[1])]);
   assert.equal(b.custom_data.num_items, 3);
+
+  // The browser leg must carry the same products: Meta may keep the pixel copy.
+  const legs = [...footer.matchAll(/window\.nwr\("track","Purchase",(.*?),\{eventID:(".*?")\}\);<\/script>/g)];
+  assert.equal(legs.length, 1);
+  assert.equal(JSON.parse(legs[0][2]), b.event_id);
+  assert.deepEqual(JSON.parse(legs[0][1]), b.custom_data);
 });
 
 // ------------------------------------------------------------- consent

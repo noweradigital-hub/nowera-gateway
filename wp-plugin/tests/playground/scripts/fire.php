@@ -45,6 +45,7 @@ function nwr_order( array $ids ): WC_Order {
 	return $order;
 }
 
+$footer = '';
 switch ( $event ) {
 	case 'add_to_cart':
 		WC()->cart->empty_cart();
@@ -74,10 +75,14 @@ switch ( $event ) {
 		break;
 	case 'purchase':
 		$order = nwr_order( $ids );
+		remove_all_actions( 'wp_footer' ); // keep only the browser leg the thank-you hook queues
 		ob_start();
 		do_action( 'woocommerce_thankyou', $order->get_id() );
 		do_action( 'woocommerce_thankyou', $order->get_id() ); // refresh of the thank-you page
 		ob_end_clean();
+		ob_start();
+		do_action( 'wp_footer' );
+		$footer = ob_get_clean();
 		break;
 	default:
 		http_response_code( 400 );
@@ -90,4 +95,4 @@ foreach ( $captured as &$c ) {
 	$c['signature_valid'] = hash_equals( hash_hmac( 'sha256', $c['raw'], NWR_TEST_SECRET ), (string) $c['signature'] );
 	unset( $c['raw'] );
 }
-nwr_out( array( 'event' => $event, 'sent' => $captured ) );
+nwr_out( array( 'event' => $event, 'sent' => $captured, 'footer' => $footer ) );

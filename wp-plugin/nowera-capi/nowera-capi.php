@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.3.0
+ * Version:      0.3.1
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -518,19 +518,21 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		);
 	}
 
+	$custom_data = array(
+		'value'        => (float) $order->get_total(),
+		'currency'     => $order->get_currency(),
+		'order_id'     => $order->get_id(),
+		'content_ids'  => $content_ids,
+		'contents'     => $contents,
+		'content_type' => 'product',
+		'num_items'    => $order->get_item_count(),
+	);
+
 	nowera_capi_send(
 		'Purchase',
 		$event_id,
 		nowera_capi_user_from_order( $order ),
-		array(
-			'value'        => (float) $order->get_total(),
-			'currency'     => $order->get_currency(),
-			'order_id'     => $order->get_id(),
-			'content_ids'  => $content_ids,
-			'contents'     => $contents,
-			'content_type' => 'product',
-			'num_items'    => $order->get_item_count(),
-		),
+		$custom_data,
 		$order->get_checkout_order_received_url()
 	);
 
@@ -538,13 +540,13 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 	$order->save();
 
 	// Browser leg with the same event_id, so Meta collapses the two into one conversion.
-	add_action( 'wp_footer', function () use ( $event_id, $order ) {
+	// It carries the same products: when Meta keeps the pixel copy, that copy must
+	// still match the catalog.
+	add_action( 'wp_footer', function () use ( $event_id, $custom_data ) {
 		printf(
 			'<script>window.nwr=window.nwr||function(){(window.nwr.q=window.nwr.q||[]).push(arguments)};' .
-			'window.nwr("track","Purchase",{value:%s,currency:%s,order_id:%d},{eventID:%s});</script>' . "\n",
-			wp_json_encode( (float) $order->get_total() ),
-			wp_json_encode( $order->get_currency() ),
-			$order->get_id(),
+			'window.nwr("track","Purchase",%s,{eventID:%s});</script>' . "\n",
+			wp_json_encode( $custom_data ),
 			wp_json_encode( $event_id )
 		);
 	} );
