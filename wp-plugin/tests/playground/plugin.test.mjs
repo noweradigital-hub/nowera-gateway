@@ -183,6 +183,83 @@ test('Purchase is sent once, with catalog ids, even when the thank-you page is r
   assert.deepEqual(JSON.parse(legs[0][1]), b.custom_data);
 });
 
+// ------------------------------------------------ returning customers
+
+const csCookie = (categories, action = 'accept') =>
+  'CookieScriptConsent=' + encodeURIComponent(JSON.stringify({ action, categories: JSON.stringify(categories), key: 'k' }));
+const storedCookie = (res) => (res.headers.getSetCookie() || []).find((c) => c.startsWith('_nwr_ud='));
+const storedFrom = (res) => {
+  const c = storedCookie(res);
+  return c ? JSON.parse(decodeURIComponent(c.split(';')[0].slice('_nwr_ud='.length))) : null;
+};
+
+test('the thank-you page of a fresh order stores the buyer, hashed, for later visits', async () => {
+  const { received_url: url } = await fire('order_url');
+  const res = await fetch(url, { redirect: 'manual' });
+  const ud = storedFrom(res);
+  assert.ok(ud, `cookie set on ${url}`);
+  assert.equal(ud.em, sha('jan.novak@example.com'));
+  assert.equal(ud.ph, sha('421903123456'));
+  assert.equal(ud.ct, sha('banskábystrica'));
+  assert.equal(ud.external_id, undefined, 'the visitor id stays the only external_id');
+  assert.ok(Object.values(ud).every((v) => /^[a-f0-9]{64}$/.test(v)), 'nothing in plaintext');
+  const raw = storedCookie(res);
+  assert.match(raw, /Max-Age=7776000/i, '90 days');
+  assert.doesNotMatch(raw, /HttpOnly/i, 'px.js has to read it');
+  assert.match(res.headers.get('cache-control') || '', /no-cache|no-store/, 'never page-cached');
+});
+
+test('a wrong order key or an old order stores nothing', async () => {
+  const { received_url: url } = await fire('order_url');
+  const forged = await fetch(url.replace(/key=[^&]+/, 'key=wc_order_forged'), { redirect: 'manual' });
+  assert.equal(storedCookie(forged), undefined);
+
+  const { received_url: old } = await fire('order_url_old');
+  assert.equal(storedCookie(await fetch(old, { redirect: 'manual' })), undefined);
+});
+
+test('without marketing consent the thank-you page stores nothing', async () => {
+  const { received_url: url } = await fire('order_url');
+  await setConsent('cookiescript');
+  try {
+    const stats = await fetch(url, { redirect: 'manual', headers: { cookie: csCookie(['strict', 'performance']) } });
+    assert.equal(storedCookie(stats), undefined);
+    const undecided = await fetch(url, { redirect: 'manual' });
+    assert.equal(storedCookie(undecided), undefined);
+    const yes = await fetch(url, { redirect: 'manual', headers: { cookie: csCookie(['strict', 'targeting']) } });
+    assert.ok(storedCookie(yes), 'stored once targeting is accepted');
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('a login stores the account billing identity', async () => {
+  const res = await fetch(`${BASE}/nwr-test/fire.php?event=login`);
+  const ud = storedFrom(res);
+  assert.ok(ud, 'cookie set on login');
+  assert.equal(ud.em, sha('fakturacia@example.com'), 'billing email wins over the account email');
+  assert.equal(ud.ph, sha('903123456'));
+  assert.equal(ud.fn, sha('ján'));
+});
+
+test('a returning guest: server events carry the stored identity, only with marketing consent', async () => {
+  const ud = JSON.stringify({ em: sha('stored@example.com'), ph: sha('421900000000'), junk: sha('x'), fn: 'plain' });
+  const { sent } = await fire('add_to_cart', '', `&ud=${encodeURIComponent(ud)}`);
+  const u = sent[0].body.user_data;
+  assert.equal(u.em, sha('stored@example.com'));
+  assert.equal(u.ph, sha('421900000000'));
+  assert.equal(u.junk, undefined);
+  assert.equal(u.fn, undefined, 'a non-hash value in the cookie is ignored');
+
+  await setConsent('cookiescript');
+  try {
+    const { sent: stats } = await fire('add_to_cart', '', `&cs=performance&ud=${encodeURIComponent(ud)}`);
+    assert.equal(stats[0].body.user_data.em, undefined);
+  } finally {
+    await setConsent('none');
+  }
+});
+
 // ------------------------------------------------------------- consent
 
 test('with Complianz and no decision yet nothing leaves the site', async () => {

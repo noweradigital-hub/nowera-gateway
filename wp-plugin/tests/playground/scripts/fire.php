@@ -4,6 +4,9 @@
  * cookies taken from the query string, and returns what reached the gateway.
  *   ?event=add_to_cart|add_to_cart_variation|checkout|payment_info|purchase
  *   &cookies=cmplz_marketing:allow,_fbp:fb.1.1.2
+ *   &ud=<json>   the stored returning-customer cookie (its JSON has commas)
+ *   ?event=order_url|order_url_old  only create an order and return its thank-you URL
+ *   ?event=login                    run wp_login for the test customer
  */
 require __DIR__ . '/_bootstrap.php';
 delete_option( 'nwr_test_captured' );
@@ -22,6 +25,9 @@ if ( isset( $_GET['cs'] ) ) {
 }
 if ( isset( $_GET['cs_raw'] ) ) {
 	$cookies['CookieScriptConsent'] = wp_unslash( $_GET['cs_raw'] );
+}
+if ( isset( $_GET['ud'] ) ) {
+	$cookies['_nwr_ud'] = wp_unslash( $_GET['ud'] );
 }
 nwr_cookies( $cookies );
 
@@ -72,6 +78,23 @@ switch ( $event ) {
 	case 'payment_info_block':
 		$order = nwr_order( $ids );
 		do_action( 'woocommerce_store_api_checkout_order_processed', $order );
+		break;
+	case 'order_url':
+	case 'order_url_old':
+		$order = nwr_order( $ids );
+		if ( 'order_url_old' === $event ) {
+			$order->set_date_created( time() - 3 * DAY_IN_SECONDS );
+			$order->save();
+		}
+		nwr_out( array( 'order' => $order->get_id(), 'received_url' => $order->get_checkout_order_received_url() ) );
+		exit;
+	case 'login':
+		$customer = new WC_Customer( $ids['user'] );
+		$customer->set_billing_email( 'Fakturacia@Example.com' );
+		$customer->set_billing_phone( '0903 123 456' );
+		$customer->save();
+		$user = get_user_by( 'id', $ids['user'] );
+		do_action( 'wp_login', $user->user_login, $user );
 		break;
 	case 'purchase':
 		$order = nwr_order( $ids );

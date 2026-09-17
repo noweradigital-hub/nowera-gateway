@@ -10,13 +10,16 @@
  * cache: PHP either would not run at all or would bake one event_id into the
  * cached HTML and collapse every visitor's view into a single event.
  */
-export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
+export function loaderScript({ endpoint, pixelId, measurementId, consent, cookieDomain }) {
   return `(function (w, d) {
   'use strict';
   if (w.nwr && w.nwr.loaded) return;
 
   var ENDPOINT = ${JSON.stringify(endpoint)};
   var PIXEL_ID = ${JSON.stringify(pixelId)};
+  // Where the gateway writes its own cookies, so both sides share one visitor id.
+  var COOKIE_DOMAIN = ${JSON.stringify(cookieDomain || null)};
+  var ID_MAX_AGE = 90 * 86400;
   // Stream id half of the GA4 measurement id, which names the session cookie.
   var GA_STREAM = ${JSON.stringify(measurementId ? String(measurementId).replace(/^G-/, '') : null)};
   // A page can publish already-hashed identifiers for a signed-in visitor, which
@@ -52,6 +55,85 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
   function cookie(name) {
     var m = d.cookie.match('(^|;)\\\\s*' + name + '\\\\s*=\\\\s*([^;]+)');
     return m ? decodeURIComponent(m.pop()) : null;
+  }
+
+  // The configured domain only applies when this page is actually under it;
+  // otherwise the browser would silently drop the cookie.
+  function cookieDomain() {
+    if (!COOKIE_DOMAIN) return null;
+    var bare = String(COOKIE_DOMAIN).replace(/^\\./, '');
+    var host = String(w.location.hostname || '');
+    return host === bare || host.slice(-bare.length - 1) === '.' + bare ? COOKIE_DOMAIN : null;
+  }
+
+  function writeCookie(name, value, maxAge, domain) {
+    var c = name + '=' + encodeURIComponent(value) + '; path=/; max-age=' + maxAge + '; samesite=lax';
+    if (domain) c += '; domain=' + domain;
+    if (w.location.protocol === 'https:') c += '; secure';
+    d.cookie = c;
+  }
+
+  function dropCookie(name) {
+    writeCookie(name, '', 0);
+    var domain = cookieDomain();
+    if (domain) writeCookie(name, '', 0, domain);
+  }
+
+  // Synchronous SHA-256. The pixel needs the hashed visitor id before its first
+  // event, and crypto.subtle only offers an async digest.
+  var SHA_K = [];
+  var SHA_H = [];
+  (function () {
+    var frac = function (x) { return ((x - Math.floor(x)) * 4294967296) >>> 0; };
+    for (var n = 2, found = 0; found < 64; n++) {
+      var prime = true;
+      for (var f = 2; f * f <= n; f++) if (n % f === 0) { prime = false; break; }
+      if (!prime) continue;
+      if (found < 8) SHA_H[found] = frac(Math.sqrt(n));
+      SHA_K[found] = frac(Math.cbrt ? Math.cbrt(n) : Math.pow(n, 1 / 3));
+      found++;
+    }
+  })();
+
+  function sha256(text) {
+    var bytes = unescape(encodeURIComponent(String(text)));
+    var bitLength = bytes.length * 8;
+    bytes += '\\x80';
+    while (bytes.length % 64 !== 56) bytes += '\\x00';
+    var words = [];
+    var i;
+    for (i = 0; i < bytes.length; i++) words[i >> 2] |= bytes.charCodeAt(i) << (24 - (i % 4) * 8);
+    words.push(Math.floor(bitLength / 4294967296) | 0, bitLength | 0);
+
+    var H = SHA_H.slice();
+    var W = [];
+    for (var off = 0; off < words.length; off += 16) {
+      var A = H[0], B = H[1], C = H[2], D = H[3], E = H[4], F = H[5], G = H[6], X = H[7];
+      for (i = 0; i < 64; i++) {
+        if (i < 16) {
+          W[i] = words[off + i] | 0;
+        } else {
+          var p = W[i - 15];
+          var q = W[i - 2];
+          W[i] = (W[i - 16]
+            + (((p >>> 7) | (p << 25)) ^ ((p >>> 18) | (p << 14)) ^ (p >>> 3))
+            + W[i - 7]
+            + (((q >>> 17) | (q << 15)) ^ ((q >>> 19) | (q << 13)) ^ (q >>> 10))) | 0;
+        }
+        var t1 = (X
+          + (((E >>> 6) | (E << 26)) ^ ((E >>> 11) | (E << 21)) ^ ((E >>> 25) | (E << 7)))
+          + ((E & F) ^ (~E & G))
+          + SHA_K[i] + W[i]) | 0;
+        var t2 = ((((A >>> 2) | (A << 30)) ^ ((A >>> 13) | (A << 19)) ^ ((A >>> 22) | (A << 10)))
+          + ((A & B) ^ (A & C) ^ (B & C))) | 0;
+        X = G; G = F; F = E; E = (D + t1) | 0; D = C; C = B; B = A; A = (t1 + t2) | 0;
+      }
+      H[0] = (H[0] + A) | 0; H[1] = (H[1] + B) | 0; H[2] = (H[2] + C) | 0; H[3] = (H[3] + D) | 0;
+      H[4] = (H[4] + E) | 0; H[5] = (H[5] + F) | 0; H[6] = (H[6] + G) | 0; H[7] = (H[7] + X) | 0;
+    }
+    var hex = '';
+    for (i = 0; i < 8; i++) hex += ('00000000' + (H[i] >>> 0).toString(16)).slice(-8);
+    return hex;
   }
 
   // ---- consent -----------------------------------------------------------
@@ -110,6 +192,24 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
     return { marketing: hasConsent('marketing'), statistics: hasConsent('statistics') };
   }
 
+  // An explicit "no" to marketing, as opposed to no decision yet.
+  function marketingRefused() {
+    if (!consentActive()) return false;
+    if (CONSENT.mode === 'cookiescript') {
+      var cats = cookieScriptCategories();
+      return cats.length > 0 && cats.indexOf(CS_CATEGORY.marketing) === -1;
+    }
+    return cookie((CONSENT.prefix || 'cmplz_') + 'marketing') === 'deny';
+  }
+
+  // Withdrawn consent also removes the identifiers we stored for advertising.
+  function forgetIfRefused() {
+    if (!marketingRefused()) return;
+    visitor = null;
+    if (cookie('_nwr_ud') !== null) dropCookie('_nwr_ud');
+    if (cookie('_nwr_id') !== null) dropCookie('_nwr_id');
+  }
+
   // ---- identity ----------------------------------------------------------
 
   // GA4 attributes a Measurement Protocol hit to a Google Ads click only when it
@@ -135,6 +235,56 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
     for (k in base) if (Object.prototype.hasOwnProperty.call(base, k)) out[k] = base[k];
     for (k in extra) if (Object.prototype.hasOwnProperty.call(extra, k)) out[k] = extra[k];
     return out;
+  }
+
+  // One id per browser, shared by the pixel, the gateway and the site's own
+  // server events. Created here when missing, so even the very first page view
+  // carries the same external_id on both legs.
+  var VALID_ID = /^[A-Za-z0-9_-]{8,64}$/;
+  var visitor = null;
+  function visitorId() {
+    if (visitor) return visitor;
+    var existing = cookie('_nwr_id');
+    visitor = existing && VALID_ID.test(existing) ? existing : uuid();
+    if (visitor !== existing) writeCookie('_nwr_id', visitor, ID_MAX_AGE, cookieDomain());
+    return visitor;
+  }
+
+  var MATCH_KEYS = ['em', 'ph', 'fn', 'ln', 'ge', 'db', 'ct', 'st', 'zp', 'country', 'external_id'];
+  var HASHED = /^[a-f0-9]{64}$/i;
+
+  function hashedOnly(data, skip) {
+    var out = {};
+    for (var i = 0; i < MATCH_KEYS.length; i++) {
+      var k = MATCH_KEYS[i];
+      if (k !== skip && typeof data[k] === 'string' && HASHED.test(data[k])) out[k] = data[k].toLowerCase();
+    }
+    return out;
+  }
+
+  // Hashed contact details the site stored after a purchase or a login, so a
+  // returning customer is recognised on every later page, cached ones included.
+  function storedUser() {
+    var raw = cookie('_nwr_ud');
+    if (!raw) return {};
+    try {
+      var data = JSON.parse(raw);
+      return data && typeof data === 'object' ? hashedOnly(data, 'external_id') : {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  // What the page says about a signed-in visitor beats what was stored earlier.
+  function identity(extra) {
+    return merge(merge(storedUser(), DEFAULT_USER), extra || {});
+  }
+
+  function pixelMatching() {
+    var m = hashedOnly(identity());
+    // Same normalisation as the gateway applies to external_id: trim, then hash.
+    if (!m.external_id) m.external_id = sha256(String(visitorId()).replace(/^\\s+|\\s+$/g, ''));
+    return m;
   }
 
   // ---- transport ---------------------------------------------------------
@@ -172,7 +322,8 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
         s = b.getElementsByTagName(e)[0]; s.parentNode.insertBefore(t, s);
       }(w, d, 'script', 'https://connect.facebook.net/en_US/fbevents.js');
     }
-    w.fbq('init', PIXEL_ID);
+    // Advanced matching: only hashed values, identical to what the server leg sends.
+    w.fbq('init', PIXEL_ID, pixelMatching());
   }
 
   // ---- tracking ----------------------------------------------------------
@@ -201,18 +352,30 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
       event_time: ev.time,
       event_source_url: ev.url,
       custom_data: ev.props,
-      user_data: merge(DEFAULT_USER, ev.user),
+      // Contact details are for advertising; without that consent only the
+      // country may travel, as on the site's own server events.
+      user_data: c.marketing ? identity(ev.user) : countryOnly(identity(ev.user)),
       ga_client_id: gaClientId(),
       ga_session_id: gaSessionId()
     };
     // Marketing identifiers only travel when marketing is allowed.
     if (c.marketing) {
+      body.visitor_id = visitorId();
       body.fbp = cookie('_fbp');
       body.fbc = cookie('_fbc');
       body.fbclid = new URLSearchParams(w.location.search).get('fbclid');
     }
     if (consentActive()) body.consent = c;
     post(body);
+  }
+
+  function countryOnly(user) {
+    return user.country ? { country: user.country } : {};
+  }
+
+  function onConsentChange() {
+    forgetIfRefused();
+    flush();
   }
 
   function flush() {
@@ -240,8 +403,8 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
 
   if (CONSENT.mode === 'complianz') {
     // Complianz announces both the initial state and every later change.
-    d.addEventListener('cmplz_fire_categories', flush);
-    d.addEventListener('cmplz_status_change', flush);
+    d.addEventListener('cmplz_fire_categories', onConsentChange);
+    d.addEventListener('cmplz_status_change', onConsentChange);
   }
 
   if (CONSENT.mode === 'cookiescript') {
@@ -249,7 +412,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
       return function (e) {
         var announced = typeof cats === 'function' ? cats(e) : cats;
         if (announced) csAnnounced = announced;
-        flush();
+        onConsentChange();
       };
     };
     var detailCategories = function (e) {
@@ -269,10 +432,11 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent }) {
     if (cmd === 'track') return track.apply(null, args);
     if (cmd === 'id') return uuid();
     // Any other consent tool can call nwr('consent') after the visitor decides.
-    if (cmd === 'consent') return flush();
+    if (cmd === 'consent') return onConsentChange();
   };
   w.nwr.loaded = true;
 
+  forgetIfRefused();
   track('PageView');
 
   if (PAGE && PAGE.type) {

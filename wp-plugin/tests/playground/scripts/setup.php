@@ -4,6 +4,11 @@ require __DIR__ . '/_bootstrap.php';
 nwr_settings();
 delete_option( 'nwr_test_captured' );
 
+// The thank-you page lives under the checkout page.
+if ( wc_get_page_id( 'checkout' ) <= 0 || ! get_post( wc_get_page_id( 'checkout' ) ) ) {
+	WC_Install::create_pages();
+}
+
 // Idempotent: the suite calls this on every run against the same Playground.
 $existing = get_option( 'nwr_test_ids' );
 if ( $existing && wc_get_product( $existing['simple'] ) ) {

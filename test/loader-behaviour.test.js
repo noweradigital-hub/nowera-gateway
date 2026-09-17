@@ -1,25 +1,70 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { loaderScript } from '../src/lib/loader.js';
+
+const sha = (v) => createHash('sha256').update(v).digest('hex');
+
+/**
+ * document.cookie with browser semantics: each write sets one cookie, attributes
+ * are not cookies, max-age=0 deletes. Several name=value pairs in one write are
+ * accepted as a test shortcut.
+ */
+const ATTRIBUTES = new Set(['path', 'domain', 'max-age', 'expires', 'secure', 'samesite', 'httponly']);
+function cookieJar(initial) {
+  const jar = new Map();
+  const writes = [];
+  const parse = (text, record) => {
+    const parts = String(text).split(';').map((x) => x.trim()).filter(Boolean);
+    const attrs = {};
+    const pairs = [];
+    for (const part of parts) {
+      const eq = part.indexOf('=');
+      const name = (eq === -1 ? part : part.slice(0, eq)).trim();
+      const value = eq === -1 ? '' : part.slice(eq + 1);
+      if (ATTRIBUTES.has(name.toLowerCase())) attrs[name.toLowerCase()] = value;
+      else pairs.push([name, value]);
+    }
+    for (const [name, value] of pairs) {
+      if (record) writes.push({ name, value: decodeURIComponent(value), ...attrs });
+      if (attrs['max-age'] === '0') jar.delete(name);
+      else jar.set(name, value);
+    }
+  };
+  if (initial) parse(initial, false);
+  return {
+    writes,
+    get: () => [...jar].map(([k, v]) => `${k}=${v}`).join('; '),
+    set: (text) => parse(text, true),
+    value: (name) => (jar.has(name) ? decodeURIComponent(jar.get(name)) : undefined),
+  };
+}
 
 /**
  * Runs the real loader against a minimal fake browser and records what it does:
  * every POST to the gateway and every fbq() call. Asserting behaviour rather than
  * source text is what catches a broken dedupe or a consent leak.
  */
-function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent } = {}) {
+function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk' } = {}) {
   const posts = [];
   const fbq = [];
   const listeners = {};
   let counter = 0;
+  const jar = cookieJar(cookie);
 
   const document = {
-    cookie,
+    get cookie() { return jar.get(); },
+    set cookie(text) { jar.set(text); },
     addEventListener: (name, fn) => { (listeners[name] ||= []).push(fn); },
   };
   const window = {
-    location: { href: 'https://klient.sk/produkt/x/' + (fbclid ? `?fbclid=${fbclid}` : ''), search: fbclid ? `?fbclid=${fbclid}` : '' },
-    crypto: { randomUUID: () => `id-${++counter}` },
+    location: {
+      href: `https://${hostname}/produkt/x/` + (fbclid ? `?fbclid=${fbclid}` : ''),
+      search: fbclid ? `?fbclid=${fbclid}` : '',
+      hostname,
+      protocol: 'https:',
+    },
+    crypto: { randomUUID: () => `rnd-${String(++counter).padStart(6, '0')}` },
     fetch: (url, opts) => { posts.push({ url, body: JSON.parse(opts.body) }); return Promise.resolve(); },
     // A pre-existing fbq makes the loader skip injecting fbevents.js, so we can
     // record exactly which pixel calls it makes.
@@ -31,12 +76,14 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
   if (hasConsent) window.cmplz_has_consent = hasConsent;
 
   const run = () => new Function('window', 'document', 'navigator',
-    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC', consent: tenantConsent }),
+    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC', consent: tenantConsent, cookieDomain }),
   )(window, document, {});
 
   const fire = (name, detail = {}) => (listeners[name] || []).forEach((fn) => fn({ detail }));
-  return { window, document, posts, fbq, run, fire, listeners };
+  return { window, document, posts, fbq, run, fire, listeners, jar };
 }
+
+const isInit = (call) => call[0] === 'init' && call[1] === 'PIX';
 
 const tracked = (fbq) => fbq.filter((c) => c[0] === 'track' || c[0] === 'trackCustom');
 
@@ -47,7 +94,7 @@ test('without consent handling it fires PageView at once, on both legs, with one
   assert.equal(b.posts[0].body.event_name, 'PageView');
   assert.equal(b.posts[0].body.consent, undefined, 'no consent block when the site does not manage consent');
 
-  assert.deepEqual(b.fbq[0], ['init', 'PIX']);
+  assert.ok(isInit(b.fbq[0]), 'pixel initialised before its first event');
   const [pv] = tracked(b.fbq);
   assert.equal(pv[1], 'PageView');
   assert.equal(pv[3].eventID, b.posts[0].body.event_id, 'shared id is what lets Meta dedupe');
@@ -103,7 +150,7 @@ test('accepting marketing later releases the waiting events with their original 
 
   assert.deepEqual(b.posts.map((p) => p.body.event_name), ['PageView', 'ViewContent']);
   assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: true });
-  assert.deepEqual(b.fbq[0], ['init', 'PIX']);
+  assert.ok(isInit(b.fbq[0]));
   assert.equal(tracked(b.fbq)[0][3].eventID, b.posts[0].body.event_id);
 
   b.fire('cmplz_status_change');
@@ -193,7 +240,7 @@ test('CookieScript: a returning visitor who accepted is tracked from the cookie 
   b.run();
   assert.equal(b.posts.length, 1);
   assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: true });
-  assert.deepEqual(b.fbq[0], ['init', 'PIX']);
+  assert.ok(isInit(b.fbq[0]));
 });
 
 test('CookieScript: its live state wins over a stale cookie', () => {
@@ -280,4 +327,124 @@ test('with neither setting nothing is gated', () => {
   const b = browser({ tenantConsent: { mode: 'none' } });
   b.run();
   assert.equal(b.posts.length, 1);
+});
+
+// ------------------------------------------- external_id and stored identity
+
+const HASH = (c) => c.repeat(64);
+
+test('a first visit creates the visitor id and both legs carry the same one', () => {
+  const b = browser({ page: { type: 'product', data: {} }, cookieDomain: '.klient.sk' });
+  b.run();
+  const vid = b.jar.value('_nwr_id');
+  assert.match(vid, /^rnd-/);
+  const write = b.jar.writes.find((w) => w.name === '_nwr_id');
+  assert.equal(write.domain, '.klient.sk', 'written where the gateway and the site both read it');
+  assert.equal(write['max-age'], String(90 * 86400));
+
+  assert.deepEqual(b.fbq[0][2], { external_id: sha(vid) }, 'pixel gets the hashed id the gateway will hash too');
+  assert.deepEqual(b.posts.map((p) => p.body.visitor_id), [vid, vid]);
+  assert.equal(b.jar.writes.filter((w) => w.name === '_nwr_id').length, 1, 'created once per page');
+});
+
+test('an existing visitor id is reused, not rewritten', () => {
+  const b = browser({ cookie: '_nwr_id=9b1b2f0e-4c1d-4a57-9d0e-0b5a3c1f8e21' });
+  b.run();
+  assert.equal(b.posts[0].body.visitor_id, '9b1b2f0e-4c1d-4a57-9d0e-0b5a3c1f8e21');
+  assert.equal(b.fbq[0][2].external_id, sha('9b1b2f0e-4c1d-4a57-9d0e-0b5a3c1f8e21'));
+  assert.equal(b.jar.writes.length, 0);
+});
+
+test('a malformed visitor id is replaced', () => {
+  const b = browser({ cookie: '_nwr_id=%3Cscript%3E' });
+  b.run();
+  assert.match(b.posts[0].body.visitor_id, /^rnd-/);
+});
+
+test('the cookie domain is only used on pages under it', () => {
+  const b = browser({ cookieDomain: '.klient.sk', hostname: 'klient-staging.example' });
+  b.run();
+  const write = b.jar.writes.find((w) => w.name === '_nwr_id');
+  assert.equal(write.domain, undefined, 'a foreign domain would make the browser drop the cookie');
+});
+
+test('stored hashed contact details reach the pixel and the gateway', () => {
+  const stored = encodeURIComponent(JSON.stringify({
+    em: HASH('a'), ph: HASH('b'), country: HASH('c'),
+    fn: 'plaintext-is-ignored', external_id: HASH('d'), junk: HASH('e'),
+  }));
+  const b = browser({ cookie: `_nwr_id=visitor-0001; _nwr_ud=${stored}` });
+  b.run();
+  assert.deepEqual(b.fbq[0][2], {
+    em: HASH('a'), ph: HASH('b'), country: HASH('c'), external_id: sha('visitor-0001'),
+  });
+  assert.deepEqual(b.posts[0].body.user_data, { em: HASH('a'), ph: HASH('b'), country: HASH('c') });
+});
+
+test('a garbled stored identity is ignored', () => {
+  const b = browser({ cookie: '_nwr_ud=%7Bnope' });
+  assert.doesNotThrow(() => b.run());
+  assert.deepEqual(Object.keys(b.fbq[0][2]), ['external_id']);
+});
+
+test('a signed-in visitor: the page identity wins over the stored one', () => {
+  const stored = encodeURIComponent(JSON.stringify({ em: HASH('a'), ph: HASH('b') }));
+  const b = browser({ cookie: `_nwr_ud=${stored}`, user: { em: HASH('f'), external_id: HASH('1') } });
+  b.run();
+  assert.deepEqual(b.fbq[0][2], { em: HASH('f'), ph: HASH('b'), external_id: HASH('1') });
+  assert.equal(b.posts[0].body.user_data.em, HASH('f'));
+  assert.equal(b.posts[0].body.user_data.external_id, HASH('1'));
+});
+
+test('statistics-only consent sends no visitor id and no contact details', () => {
+  const stored = encodeURIComponent(JSON.stringify({ em: HASH('a'), country: HASH('c') }));
+  const b = browser({
+    consent: { mode: 'complianz' },
+    cookie: `cmplz_statistics=allow; _nwr_ud=${stored}`,
+    user: { em: HASH('f'), external_id: HASH('1') },
+  });
+  b.run();
+  assert.equal(b.posts.length, 1);
+  assert.equal(b.posts[0].body.visitor_id, undefined);
+  assert.deepEqual(b.posts[0].body.user_data, { country: HASH('c') });
+  assert.equal(b.jar.writes.length, 0, 'no identifier is created without marketing consent');
+});
+
+test('CookieScript: refusing marketing removes the stored identifiers', () => {
+  const stored = encodeURIComponent(JSON.stringify({ em: HASH('a') }));
+  const b = browser({
+    consent: { mode: 'cookiescript' },
+    cookieDomain: '.klient.sk',
+    cookie: `${csCookie(['strict', 'targeting'])}; _nwr_id=visitor-0001; _nwr_ud=${stored}`,
+  });
+  b.run();
+  assert.ok(b.jar.value('_nwr_ud'), 'kept while marketing is allowed');
+  assert.ok(b.jar.value('_nwr_id'), 'kept while marketing is allowed');
+
+  b.fire('CookieScriptAccept', { categories: ['strict', 'performance'] });
+  assert.equal(b.jar.value('_nwr_ud'), undefined);
+  assert.equal(b.jar.value('_nwr_id'), undefined);
+  const drops = b.jar.writes.filter((w) => w['max-age'] === '0').map((w) => `${w.name}@${w.domain || 'host'}`);
+  assert.deepEqual(drops.sort(), ['_nwr_id@.klient.sk', '_nwr_id@host', '_nwr_ud@.klient.sk', '_nwr_ud@host']);
+});
+
+test('CookieScript: a returning visitor who refused earlier loses leftovers on the next page', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, cookie: `${csCookie(['strict'], 'reject')}; _nwr_ud=x; _nwr_id=visitor-0001` });
+  b.run();
+  assert.equal(b.jar.value('_nwr_ud'), undefined);
+  assert.equal(b.jar.value('_nwr_id'), undefined);
+  assert.equal(b.posts.length, 0);
+});
+
+test('no decision yet is not a refusal', () => {
+  const b = browser({ consent: { mode: 'cookiescript' }, cookie: '_nwr_ud=x; _nwr_id=visitor-0001' });
+  b.run();
+  assert.equal(b.jar.value('_nwr_ud'), 'x');
+  assert.equal(b.jar.value('_nwr_id'), 'visitor-0001');
+});
+
+test('Complianz: a deny cookie removes the stored identifiers', () => {
+  const b = browser({ consent: { mode: 'complianz' }, cookie: 'cmplz_marketing=deny; _nwr_ud=x' });
+  b.run();
+  assert.equal(b.jar.value('_nwr_ud'), undefined);
 });

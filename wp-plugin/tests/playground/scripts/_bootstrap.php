@@ -58,7 +58,7 @@ function nwr_settings( array $overrides = array() ): void {
  * what catches a missing wp_unslash() before a json_decode().
  */
 function nwr_cookies( array $cookies ): void {
-	foreach ( array( 'cmplz_marketing', 'cmplz_statistics', '_fbp', '_fbc', '_ga', '_nwr_id', 'my_marketing', 'CookieScriptConsent' ) as $k ) {
+	foreach ( array( 'cmplz_marketing', 'cmplz_statistics', '_fbp', '_fbc', '_ga', '_nwr_id', 'my_marketing', 'CookieScriptConsent', '_nwr_ud' ) as $k ) {
 		unset( $_COOKIE[ $k ] );
 	}
 	foreach ( $cookies as $k => $v ) {

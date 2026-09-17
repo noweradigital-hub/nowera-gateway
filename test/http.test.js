@@ -201,3 +201,39 @@ test('px.js carries the tenant consent mode so cached pages are covered too', as
   const res = await app.inject({ method: 'GET', url: '/px.js', headers: { host: HOST } });
   assert.match(res.body, /var TENANT_CONSENT = \{"mode":"cookiescript","prefix":"cmplz_"\}/);
 });
+
+test('the visitor id from the loader wins over the gateway cookie', async () => {
+  inserted.length = 0;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: {
+      host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json',
+      cookie: '_nwr_id=older-cookie-id',
+    },
+    payload: { event_name: 'PageView', visitor_id: 'rnd-from-page-01' },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(inserted.at(-1).event.user.external_id, 'rnd-from-page-01', 'same id the pixel was given');
+  const cookie = res.cookies.find((c) => c.name === '_nwr_id');
+  assert.equal(cookie.value, 'rnd-from-page-01');
+  assert.equal(cookie.domain, '.klient.sk');
+});
+
+test('a malformed visitor id from the page is ignored', async () => {
+  inserted.length = 0;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: {
+      host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json',
+      cookie: '_nwr_id=older-cookie-id',
+    },
+    payload: { event_name: 'PageView', visitor_id: '<script>alert(1)</script>' },
+  });
+  assert.equal(inserted.at(-1).event.user.external_id, 'older-cookie-id');
+  assert.ok(!res.cookies.some((c) => c.name === '_nwr_id'), 'unchanged cookie is not rewritten');
+});
+
+test('px.js tells the loader which cookie domain the gateway writes to', async () => {
+  const res = await app.inject({ method: 'GET', url: '/px.js', headers: { host: HOST } });
+  assert.match(res.body, /var COOKIE_DOMAIN = "\.klient\.sk";/);
+});

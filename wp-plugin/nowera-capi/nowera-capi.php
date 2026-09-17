@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.3.1
+ * Version:      0.4.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -13,6 +13,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION = 'nowera_capi_settings';
+
+/** Contact fields kept, hashed, in the _nwr_ud cookie for returning customers. */
+const NOWERA_CAPI_STORED_KEYS = array( 'em', 'ph', 'fn', 'ln', 'ct', 'st', 'zp', 'country' );
 
 /* -------------------------------------------------------------------------
  * Settings
@@ -392,6 +395,119 @@ function nowera_capi_ga_ids(): array {
 	return array( 'client_id' => $client_id, 'session_id' => $session_id );
 }
 
+/* -------------------------------------------------------------------------
+ * Returning customers
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Hashed contact details stored after a purchase or a login. Read by px.js on
+ * every later page (cached ones too) and by the server events below, so a
+ * returning customer is recognised before they type anything.
+ */
+function nowera_capi_stored_user(): array {
+	if ( empty( $_COOKIE['_nwr_ud'] ) || ! is_string( $_COOKIE['_nwr_ud'] ) ) {
+		return array();
+	}
+	$data = json_decode( wp_unslash( $_COOKIE['_nwr_ud'] ), true );
+	if ( ! is_array( $data ) ) {
+		return array();
+	}
+	$out = array();
+	foreach ( NOWERA_CAPI_STORED_KEYS as $key ) {
+		if ( isset( $data[ $key ] ) && is_string( $data[ $key ] ) && preg_match( '/^[a-f0-9]{64}$/i', $data[ $key ] ) ) {
+			$out[ $key ] = strtolower( $data[ $key ] );
+		}
+	}
+	return $out;
+}
+
+/**
+ * Store the hashed identity for later visits. Only with marketing consent, and
+ * only when there is an email or a phone: a name alone identifies nobody.
+ */
+function nowera_capi_remember_user( array $raw ): void {
+	$s = nowera_capi_settings();
+	if ( empty( $s['collector_host'] ) || headers_sent() || ! nowera_capi_has_consent( 'marketing' ) ) {
+		return;
+	}
+	$hashed = array();
+	foreach ( NOWERA_CAPI_STORED_KEYS as $key ) {
+		$digest = isset( $raw[ $key ] ) ? nowera_capi_hash( $key, $raw[ $key ] ) : null;
+		if ( $digest !== null ) {
+			$hashed[ $key ] = $digest;
+		}
+	}
+	if ( empty( $hashed['em'] ) && empty( $hashed['ph'] ) ) {
+		return;
+	}
+
+	// A response that sets a personal cookie must never be served from a page cache.
+	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+		define( 'DONOTCACHEPAGE', true );
+	}
+	do_action( 'litespeed_control_set_nocache', 'nowera-capi: returning-customer cookie' );
+	nocache_headers();
+
+	$value = wp_json_encode( $hashed );
+	setcookie( '_nwr_ud', $value, array(
+		'expires'  => time() + 90 * DAY_IN_SECONDS,
+		'path'     => '/',
+		'secure'   => is_ssl(),
+		'httponly' => false, // px.js reads it
+		'samesite' => 'Lax',
+	) );
+	$_COOKIE['_nwr_ud'] = wp_slash( $value );
+}
+
+// The thank-you page of a fresh order: the buyer's own contact details. The order
+// key proves the link came from checkout, the age check keeps an old forwarded
+// link from tagging somebody else's browser.
+add_action( 'template_redirect', function () {
+	if ( ! function_exists( 'is_order_received_page' ) || ! is_order_received_page() ) {
+		return;
+	}
+	$order_id = absint( get_query_var( 'order-received' ) );
+	$key      = isset( $_GET['key'] ) ? wc_clean( wp_unslash( $_GET['key'] ) ) : '';
+	$order    = $order_id ? wc_get_order( $order_id ) : false;
+	if ( ! $order || '' === $key || ! hash_equals( $order->get_order_key(), (string) $key ) ) {
+		return;
+	}
+	$created = $order->get_date_created();
+	if ( ! $created || $created->getTimestamp() < time() - DAY_IN_SECONDS ) {
+		return;
+	}
+	nowera_capi_remember_user( nowera_capi_user_from_order( $order ) );
+}, 5 );
+
+// A login: the account's billing details, which are usually the ones ads know.
+add_action( 'wp_login', function ( $login, $user ) {
+	if ( ! $user instanceof \WP_User ) {
+		return;
+	}
+	$raw = array(
+		'em' => $user->user_email,
+		'fn' => $user->first_name,
+		'ln' => $user->last_name,
+	);
+	if ( class_exists( 'WC_Customer' ) ) {
+		try {
+			$customer = new \WC_Customer( $user->ID );
+			$raw      = array_merge( $raw, array_filter( array(
+				'em'      => $customer->get_billing_email(),
+				'ph'      => $customer->get_billing_phone(),
+				'fn'      => $customer->get_billing_first_name(),
+				'ln'      => $customer->get_billing_last_name(),
+				'ct'      => $customer->get_billing_city(),
+				'zp'      => $customer->get_billing_postcode(),
+				'country' => $customer->get_billing_country(),
+			) ) );
+		} catch ( \Exception $e ) {
+			// No customer record: the account fields above are still useful.
+		}
+	}
+	nowera_capi_remember_user( $raw );
+}, 10, 2 );
+
 /** First-party visitor id set by the gateway; often a guest's only stable identifier. */
 function nowera_capi_visitor_id(): ?string {
 	return empty( $_COOKIE['_nwr_id'] )
@@ -627,6 +743,10 @@ function nowera_capi_current_user(): array {
 			'country' => $customer->get_billing_country(),
 		);
 	}
+
+	// A returning customer: what this session knows wins, the stored identity
+	// fills the gaps (usually everything, for a guest who has not typed yet).
+	$data = array_merge( nowera_capi_stored_user(), array_filter( $data ) );
 
 	if ( empty( $data['external_id'] ) ) {
 		$visitor = nowera_capi_visitor_id();

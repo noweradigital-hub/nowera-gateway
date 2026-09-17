@@ -34,16 +34,21 @@ function clientIp(req) {
   return req.ip;
 }
 
+const VISITOR_ID = /^[A-Za-z0-9_-]{8,64}$/;
+
 function ensureIdentity(req, reply, tenant, body = {}) {
   const cookies = req.cookies || {};
 
   // A first-party id that survives across sessions. Meta hashes it as external_id
   // and it is often the only stable identifier a guest checkout ever produces.
-  let visitorId = cookies._nwr_id || null;
-  if (!visitorId) {
-    visitorId = newEventId();
-    persistCookie(reply, tenant, '_nwr_id', visitorId);
-  }
+  // The loader's copy wins: it is the one the pixel was initialised with and the
+  // one the site's own server events read, whatever the cookie domain setting.
+  const fromPage = typeof body.visitor_id === 'string' && VISITOR_ID.test(body.visitor_id)
+    ? body.visitor_id
+    : null;
+  let visitorId = fromPage || cookies._nwr_id || null;
+  if (!visitorId) visitorId = newEventId();
+  if (visitorId !== cookies._nwr_id) persistCookie(reply, tenant, '_nwr_id', visitorId);
 
   let fbp = cookies._fbp || body.fbp || null;
   if (!fbp) {
@@ -104,6 +109,7 @@ export default async function collectRoutes(app, opts = {}) {
         pixelId: metaDest?.settings?.dataset_id || null,
         measurementId: ga4Dest?.settings?.measurement_id || null,
         consent: normalizeConsent(tenant.consent_mode, tenant.consent_prefix),
+        cookieDomain: tenant.cookie_domain || null,
       }));
   });
 
