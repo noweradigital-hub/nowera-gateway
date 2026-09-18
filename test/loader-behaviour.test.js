@@ -459,3 +459,12 @@ test('the page referrer travels with every event, and is left out when there is 
   direct.run();
   assert.equal('referrer_url' in direct.posts[0].body, false);
 });
+
+test('every event says when it was sent, so the gateway can fix a wrong device clock', () => {
+  const b = browser();
+  b.run();
+  const body = b.posts[0].body;
+  assert.equal(typeof body.sent_at, 'number');
+  assert.ok(Math.abs(body.sent_at - Math.floor(Date.now() / 1000)) <= 2);
+  assert.ok(body.sent_at >= body.event_time);
+});

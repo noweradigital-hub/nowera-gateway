@@ -350,6 +350,8 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       event_name: ev.name,
       event_id: ev.id,
       event_time: ev.time,
+      // Lets the gateway put this event on its own clock, whatever this device thinks the time is.
+      sent_at: Math.floor(Date.now() / 1000),
       event_source_url: ev.url,
       // The page's own referrer; the gateway keeps only its origin and path.
       referrer_url: d.referrer || undefined,

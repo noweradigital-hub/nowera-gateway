@@ -6,6 +6,7 @@ import { newEventId, newFbp, resolveFbc } from '../lib/ids.js';
 import { originAllowed, tenantByHost as defaultTenantByHost } from '../lib/tenants.js';
 import { loaderScript } from '../lib/loader.js';
 import { normalizeConsent } from '../lib/consent.js';
+import { isBot } from '../lib/bots.js';
 
 const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
 
@@ -140,6 +141,12 @@ export default async function collectRoutes(app, opts = {}) {
       .header('access-control-allow-origin', origin)
       .header('access-control-allow-credentials', 'true');
 
+    // A crawler is not a customer: answer it, but keep it out of the data and
+    // give it no identity cookies.
+    if (isBot(req.headers['user-agent'])) {
+      return reply.send({ ok: true, filtered: 'bot' });
+    }
+
     const body = req.body || {};
 
     // _fbp, _fbc and _nwr_id are marketing identifiers. When the site says
@@ -184,6 +191,10 @@ export default async function collectRoutes(app, opts = {}) {
     }
 
     const body = req.body || {};
+    if (isBot(body.client_user_agent || req.headers['user-agent'])) {
+      return reply.send({ ok: true, filtered: 'bot' });
+    }
+
     let event;
     try {
       event = normalizeEvent(body, {
@@ -193,7 +204,13 @@ export default async function collectRoutes(app, opts = {}) {
         referer: null,
         actionSource: body.action_source || 'website',
         fbp: body.fbp || req.cookies?._fbp || null,
-        fbc: body.fbc || req.cookies?._fbc || null,
+        // The site may hold no _fbc cookie yet and still be serving the very
+        // landing page that carries ?fbclid=.
+        fbc: resolveFbc({
+          cookie: body.fbc || req.cookies?._fbc || null,
+          fbclid: body.fbclid,
+          url: body.event_source_url,
+        }),
         gaClientId: body.ga_client_id || null,
         gaSessionId: body.ga_session_id || null,
       });

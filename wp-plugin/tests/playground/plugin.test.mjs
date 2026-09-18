@@ -140,6 +140,36 @@ test('adding a variation reports the variation, which is what the catalog holds'
   assert.equal(sent[0].body.custom_data.value, 30);
 });
 
+test('an ad click without the loader still leaves the click id behind', async () => {
+  const cookieFor = async (path, headers = {}) =>
+    (await fetch(`${BASE}${path}`, { headers, redirect: 'manual' })).headers.getSetCookie()
+      .find((c) => c.startsWith('_fbc='));
+
+  const set = await cookieFor('/?fbclid=CLICK-abc_123');
+  assert.match(set, /^_fbc=fb\.1\.\d{13}\.CLICK-abc_123/);
+  assert.match(set, /Max-Age=7776000/i);
+  assert.doesNotMatch(set, /HttpOnly/i, 'the Meta pixel reads it too');
+
+  assert.equal(await cookieFor('/?fbclid=CLICK2', { cookie: '_fbc=fb.1.1.EARLIER' }), undefined,
+    'an existing click id is never overwritten');
+  assert.equal(await cookieFor('/'), undefined);
+  assert.equal(await cookieFor('/?fbclid=%3Cscript%3E'), undefined, 'only a plausible click id');
+
+  await setConsent('cookiescript');
+  try {
+    assert.equal(await cookieFor('/?fbclid=CLICK3', { cookie: csCookie(['strict', 'performance']) }), undefined,
+      'no marketing consent, no click id');
+    assert.ok(await cookieFor('/?fbclid=CLICK4', { cookie: csCookie(['strict', 'targeting']) }));
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('the click id in the landing url travels with server events too', async () => {
+  const { sent } = await fire('checkout', '', '&fbclid=CLICK-in-url');
+  assert.equal(sent[0].body.fbclid, 'CLICK-in-url');
+});
+
 test('InitiateCheckout lists what is in the cart', async () => {
   const { sent } = await fire('checkout');
   assert.equal(sent.length, 1);
@@ -159,6 +189,17 @@ test('AddPaymentInfo is sent once per order with full billing identity', async (
   assert.equal(b.user_data.zp, sha('97401'));
   assert.deepEqual(b.custom_data.content_ids, [String(ids.simple), String(ids.variations[1])]);
   assert.equal(sent[0].signature_valid, true);
+});
+
+test('InitiateCheckout is sent from the browser as well, with one shared id', async () => {
+  const { sent, footer } = await fire('checkout');
+  const b = sent[0].body;
+  assert.equal(b.event_name, 'InitiateCheckout');
+
+  const legs = [...footer.matchAll(/window\.nwr\("track","InitiateCheckout",(.*?),\{eventID:(".*?")\}\);<\/script>/g)];
+  assert.equal(legs.length, 1);
+  assert.equal(JSON.parse(legs[0][2]), b.event_id, 'one id, so Meta counts one checkout');
+  assert.deepEqual(JSON.parse(legs[0][1]), b.custom_data);
 });
 
 test('the block checkout also triggers AddPaymentInfo', async () => {

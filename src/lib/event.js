@@ -61,7 +61,16 @@ export function normalizeEvent(input, context) {
   if (!/^[A-Za-z0-9_ ]{1,64}$/.test(name)) throw new Error('event_name has invalid characters');
 
   const nowSeconds = Math.floor(Date.now() / 1000);
-  let eventTime = Number(input.event_time) || nowSeconds;
+  const claimedTime = Number(input.event_time);
+  let eventTime = claimedTime || nowSeconds;
+  // The browser stamps an event with its own clock. When it also says when it
+  // sent the request, keep the delay it measured but put it on our clock — a
+  // device whose clock is days out would otherwise look like a days-old event,
+  // which is exactly what Meta reports as poor data freshness.
+  const sentAt = Number(input.sent_at);
+  if (Number.isFinite(claimedTime) && Number.isFinite(sentAt) && sentAt > 0) {
+    eventTime = nowSeconds - Math.min(Math.max(sentAt - claimedTime, 0), MAX_AGE_SECONDS);
+  }
   // Clocks on client machines drift; clamp rather than let the destination reject it.
   if (eventTime > nowSeconds + 60) eventTime = nowSeconds;
   if (eventTime < nowSeconds - MAX_AGE_SECONDS) eventTime = nowSeconds - MAX_AGE_SECONDS;

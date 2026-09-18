@@ -237,3 +237,49 @@ test('px.js tells the loader which cookie domain the gateway writes to', async (
   const res = await app.inject({ method: 'GET', url: '/px.js', headers: { host: HOST } });
   assert.match(res.body, /var COOKIE_DOMAIN = "\.klient\.sk";/);
 });
+
+test('a crawler gets a polite answer and nothing else', async () => {
+  inserted.length = 0;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: {
+      host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json',
+      'user-agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+    },
+    payload: { event_name: 'PageView', consent: { marketing: true, statistics: true } },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { ok: true, filtered: 'bot' });
+  assert.equal(inserted.length, 0, 'nothing queued');
+  assert.equal(res.cookies.length, 0, 'no identity cookie for a crawler');
+
+  const botPayload = JSON.stringify({ event_name: 'PageView', client_user_agent: 'AhrefsBot/7.0' });
+  const server = await app.inject({
+    method: 'POST', url: '/s',
+    headers: {
+      host: HOST, 'content-type': 'application/json',
+      'x-nwr-signature': createHmac('sha256', 'ingest-secret').update(botPayload).digest('hex'),
+    },
+    payload: botPayload,
+  });
+  assert.equal(server.statusCode, 200);
+  assert.equal(inserted.length, 0);
+});
+
+test('the click id is derived from the landing url when the site has no cookie yet', async () => {
+  inserted.length = 0;
+  const payload = JSON.stringify({
+    event_name: 'InitiateCheckout',
+    event_source_url: 'https://klient.sk/pokladna/?fbclid=CLICK123',
+  });
+  const res = await app.inject({
+    method: 'POST', url: '/s',
+    headers: {
+      host: HOST, 'content-type': 'application/json',
+      'x-nwr-signature': createHmac('sha256', 'ingest-secret').update(payload).digest('hex'),
+    },
+    payload,
+  });
+  assert.equal(res.statusCode, 200);
+  assert.match(inserted.at(-1).event.context.fbc, /^fb\.1\.\d+\.CLICK123$/);
+});

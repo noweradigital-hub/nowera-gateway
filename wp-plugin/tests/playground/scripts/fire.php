@@ -75,9 +75,13 @@ switch ( $event ) {
 		WC()->cart->add_to_cart( $ids['simple'], 1 );
 		WC()->cart->add_to_cart( $ids['variable'], 1, $ids['variations'][1] );
 		delete_option( 'nwr_test_captured' ); // only the checkout event, not the add_to_cart ones
+		remove_all_actions( 'wp_footer' ); // keep only the browser leg this hook queues
 		ob_start(); // Woo prints the coupon toggle on this hook
 		do_action( 'woocommerce_before_checkout_form', WC()->checkout() );
 		ob_end_clean();
+		ob_start();
+		do_action( 'wp_footer' );
+		$footer = ob_get_clean();
 		break;
 	case 'payment_info':
 		$order = nwr_order( $ids );

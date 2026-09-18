@@ -6,6 +6,7 @@ import { buildUserData, hashField } from '../src/lib/hash.js';
 import { normalizeEvent } from '../src/lib/event.js';
 import { buildPayload as metaPayload } from '../src/destinations/meta.js';
 import { buildPayload as ga4Payload } from '../src/destinations/ga4.js';
+import { isBot } from '../src/lib/bots.js';
 import { loaderScript } from '../src/lib/loader.js';
 import { newFbp, resolveFbc } from '../src/lib/ids.js';
 
@@ -229,4 +230,46 @@ test('consent settings are normalised to known modes and safe prefixes', async (
 test('the loader cannot be broken out of by a tenant consent value', () => {
   const src = loaderScript({ endpoint: 'https://t.k.sk/e', pixelId: '1', consent: { mode: '</script><script>alert(1)', prefix: 'x' } });
   assert.doesNotThrow(() => new Function(src));
+});
+
+test('a device with a wrong clock does not look like a stale event', () => {
+  const now = Math.floor(Date.now() / 1000);
+  // Phone clock three days behind, event sent two seconds after it happened.
+  const skewed = normalizeEvent({ event_name: 'PageView', event_time: now - 3 * 86400, sent_at: now - 3 * 86400 + 2 }, {});
+  assert.ok(Math.abs(skewed.event_time - (now - 2)) <= 2, 'placed on our clock, delay kept');
+
+  // A real wait: consent given ten minutes after the page view.
+  const waited = normalizeEvent({ event_name: 'PageView', event_time: now - 600, sent_at: now }, {});
+  assert.ok(Math.abs(waited.event_time - (now - 600)) <= 2, 'a genuine delay survives');
+
+  // An old loader sends no sent_at, so the previous clamping still applies.
+  const legacy = normalizeEvent({ event_name: 'PageView', event_time: now - 120 }, {});
+  assert.equal(legacy.event_time, now - 120);
+  assert.ok(normalizeEvent({ event_name: 'PageView', event_time: now + 99999 }, {}).event_time <= now + 60);
+});
+
+test('crawlers are recognised, real browsers are not', () => {
+  const bots = [
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+    'Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)',
+    'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+    'meta-externalagent/1.1',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)',
+    'curl/8.4.0',
+    'python-requests/2.31.0',
+    'Mozilla/5.0 (compatible; SemrushBot/7~bl)',
+    'Mozilla/5.0 (compatible; Bytespider; https://zhanzhang.toutiao.com/)',
+  ];
+  for (const ua of bots) assert.equal(isBot(ua), true, ua.slice(0, 40));
+
+  const people = [
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15',
+    'Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0',
+  ];
+  for (const ua of people) assert.equal(isBot(ua), false, ua.slice(0, 40));
+  assert.equal(isBot(undefined), false);
 });

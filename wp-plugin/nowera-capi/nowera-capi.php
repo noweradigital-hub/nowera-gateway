@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.5.0
+ * Version:      0.6.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -459,10 +459,52 @@ function nowera_capi_remember_user( array $raw ): void {
 	$_COOKIE['_nwr_ud'] = wp_slash( $value );
 }
 
+/**
+ * A visitor arriving from a Meta ad carries ?fbclid=. The loader normally turns
+ * it into the _fbc cookie; this is the fallback for when it cannot run — the
+ * click id is what ties the later purchase back to the ad.
+ */
+function nowera_capi_capture_fbclid(): void {
+	if ( empty( $_GET['fbclid'] ) || isset( $_COOKIE['_fbc'] ) || headers_sent() ) {
+		return;
+	}
+	if ( ! nowera_capi_has_consent( 'marketing' ) ) {
+		return;
+	}
+	$fbclid = sanitize_text_field( wp_unslash( $_GET['fbclid'] ) );
+	if ( ! preg_match( '/^[A-Za-z0-9._-]{1,500}$/', $fbclid ) ) {
+		return;
+	}
+
+	// Meta's own shape: fb.<subdomain index>.<created at, ms>.<click id>.
+	$value  = 'fb.1.' . ( time() * 1000 ) . '.' . $fbclid;
+	$host   = (string) wp_parse_url( home_url(), PHP_URL_HOST );
+	$domain = ( defined( 'COOKIE_DOMAIN' ) && COOKIE_DOMAIN ) ? COOKIE_DOMAIN : '.' . preg_replace( '/^www\./', '', $host );
+
+	// This response now carries one visitor's click id, so it must not be cached.
+	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+		define( 'DONOTCACHEPAGE', true );
+	}
+	do_action( 'litespeed_control_set_nocache', 'nowera-capi: click id cookie' );
+	nocache_headers();
+
+	setcookie( '_fbc', $value, array(
+		'expires'  => time() + 90 * DAY_IN_SECONDS,
+		'path'     => '/',
+		'domain'   => $domain,
+		'secure'   => is_ssl(),
+		'httponly' => false, // the Meta pixel reads it too
+		'samesite' => 'Lax',
+	) );
+	$_COOKIE['_fbc'] = $value;
+}
+
 // The thank-you page of a fresh order: the buyer's own contact details. The order
 // key proves the link came from checkout, the age check keeps an old forwarded
 // link from tagging somebody else's browser.
 add_action( 'template_redirect', function () {
+	nowera_capi_capture_fbclid();
+
 	if ( ! function_exists( 'is_order_received_page' ) || ! is_order_received_page() ) {
 		return;
 	}
@@ -633,6 +675,8 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 		'custom_data'       => $props,
 		'fbp'               => ( $marketing && isset( $_COOKIE['_fbp'] ) ) ? sanitize_text_field( wp_unslash( $_COOKIE['_fbp'] ) ) : null,
 		'fbc'               => ( $marketing && isset( $_COOKIE['_fbc'] ) ) ? sanitize_text_field( wp_unslash( $_COOKIE['_fbc'] ) ) : null,
+		// No cookie yet on the very landing page the ad click opened.
+		'fbclid'            => ( $marketing && ! empty( $_GET['fbclid'] ) ) ? sanitize_text_field( wp_unslash( $_GET['fbclid'] ) ) : null,
 		'client_ip_address' => nowera_capi_client_ip(),
 		'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '',
 	);
@@ -654,6 +698,23 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 	if ( is_wp_error( $response ) ) {
 		error_log( '[nowera-capi] ' . $response->get_error_message() );
 	}
+}
+
+/**
+ * The browser half of a server event: same event_id and same products, so Meta
+ * collapses the two into one conversion and the pixel's own identifiers (fbp,
+ * fbc, user agent) count towards the match.
+ */
+function nowera_capi_browser_leg( string $event_name, string $event_id, array $custom_data ): void {
+	add_action( 'wp_footer', function () use ( $event_name, $event_id, $custom_data ) {
+		printf(
+			'<script>window.nwr=window.nwr||function(){(window.nwr.q=window.nwr.q||[]).push(arguments)};' .
+			'window.nwr("track",%s,%s,{eventID:%s});</script>' . "\n",
+			wp_json_encode( $event_name ),
+			wp_json_encode( $custom_data ),
+			wp_json_encode( $event_id )
+		);
+	} );
 }
 
 /** Identity fields we can read from the logged-in user or a Woo order. */
@@ -727,17 +788,7 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 	$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
 	$order->save();
 
-	// Browser leg with the same event_id, so Meta collapses the two into one conversion.
-	// It carries the same products: when Meta keeps the pixel copy, that copy must
-	// still match the catalog.
-	add_action( 'wp_footer', function () use ( $event_id, $custom_data ) {
-		printf(
-			'<script>window.nwr=window.nwr||function(){(window.nwr.q=window.nwr.q||[]).push(arguments)};' .
-			'window.nwr("track","Purchase",%s,{eventID:%s});</script>' . "\n",
-			wp_json_encode( $custom_data ),
-			wp_json_encode( $event_id )
-		);
-	} );
+	nowera_capi_browser_leg( 'Purchase', $event_id, $custom_data );
 }, 10, 1 );
 
 add_action( 'woocommerce_add_to_cart', function ( $cart_item_key, $product_id, $quantity, $variation_id = 0 ) {
@@ -772,19 +823,18 @@ add_action( 'woocommerce_before_checkout_form', function () {
 			$ids[] = nowera_capi_content_id( $line['data'] );
 		}
 	}
-	nowera_capi_send(
-		'InitiateCheckout',
-		wp_generate_uuid4(),
-		nowera_capi_current_user(),
-		array(
-			'value'        => (float) WC()->cart->get_total( 'edit' ),
-			'currency'     => get_woocommerce_currency(),
-			'num_items'    => WC()->cart->get_cart_contents_count(),
-			'content_ids'  => array_values( array_unique( $ids ) ),
-			'content_type' => 'product',
-		),
-		wc_get_checkout_url()
+	$event_id    = wp_generate_uuid4();
+	$custom_data = array(
+		'value'        => (float) WC()->cart->get_total( 'edit' ),
+		'currency'     => get_woocommerce_currency(),
+		'num_items'    => WC()->cart->get_cart_contents_count(),
+		'content_ids'  => array_values( array_unique( $ids ) ),
+		'content_type' => 'product',
 	);
+
+	nowera_capi_send( 'InitiateCheckout', $event_id, nowera_capi_current_user(), $custom_data, wc_get_checkout_url() );
+	// The checkout page is never cached, so the browser leg can share this id.
+	nowera_capi_browser_leg( 'InitiateCheckout', $event_id, $custom_data );
 } );
 
 /**
