@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.6.0
+ * Version:      0.7.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -634,17 +634,22 @@ function nowera_capi_customer_segment( \WC_Order $order ): ?string {
 	return 'new_customer_to_business';
 }
 
-/** Send one event to the gateway. Non-blocking: never delays the page for the visitor. */
-function nowera_capi_send( string $event_name, string $event_id, array $user, array $props, ?string $url = null ): void {
+/**
+ * Send one event to the gateway. Non-blocking: never delays the page for the
+ * visitor. Returns what happened, so a caller can record it on the order:
+ * 'marketing' (Meta will get it), 'statistics' (only GA4 may), 'none' (the
+ * visitor gave no consent) or 'not_configured'.
+ */
+function nowera_capi_send( string $event_name, string $event_id, array $user, array $props, ?string $url = null ): string {
 	$s = nowera_capi_settings();
 	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) ) {
-		return;
+		return 'not_configured';
 	}
 
 	$marketing  = nowera_capi_has_consent( 'marketing' );
 	$statistics = nowera_capi_has_consent( 'statistics' );
 	if ( ! $marketing && ! $statistics ) {
-		return; // nobody may receive this event
+		return 'none'; // nobody may receive this event
 	}
 	if ( ! $marketing ) {
 		// Contact details and the visitor id are only for advertising use.
@@ -698,6 +703,20 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 	if ( is_wp_error( $response ) ) {
 		error_log( '[nowera-capi] ' . $response->get_error_message() );
 	}
+
+	return $marketing ? 'marketing' : 'statistics';
+}
+
+/** Plain-language outcome of a Purchase, written to the order so it can be checked later. */
+function nowera_capi_record_outcome( \WC_Order $order, string $outcome ): void {
+	$notes = array(
+		'marketing'      => 'Purchase odoslaný do Mety aj GA4 (súhlas: marketing).',
+		'statistics'     => 'Purchase odoslaný len pre štatistiku — bez marketingového súhlasu ho Meta nedostane.',
+		'none'           => 'Purchase neodoslaný — návštevník nedal súhlas s cookies.',
+		'not_configured' => 'Purchase neodoslaný — plugin nemá vyplnený collector alebo kľúč.',
+	);
+	$order->update_meta_data( '_nowera_capi_purchase_consent', $outcome );
+	$order->add_order_note( 'Nowera CAPI: ' . ( $notes[ $outcome ] ?? $outcome ) );
 }
 
 /**
@@ -777,7 +796,7 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		$custom_data['customer_segmentation'] = $segment;
 	}
 
-	nowera_capi_send(
+	$outcome = nowera_capi_send(
 		'Purchase',
 		$event_id,
 		nowera_capi_user_from_order( $order ),
@@ -785,7 +804,13 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		$order->get_checkout_order_received_url()
 	);
 
-	$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
+	nowera_capi_record_outcome( $order, $outcome );
+	// Only a delivered event closes the order for good. Without consent the
+	// visitor may still accept the banner on this very page, and then a reload
+	// (or the browser leg waiting in the loader) still reports the purchase.
+	if ( 'marketing' === $outcome || 'statistics' === $outcome ) {
+		$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
+	}
 	$order->save();
 
 	nowera_capi_browser_leg( 'Purchase', $event_id, $custom_data );

@@ -118,7 +118,7 @@ switch ( $event ) {
 			$prior->set_date_created( time() - HOUR_IN_SECONDS );
 			$prior->save();
 		}
-		$order = nwr_order( $ids, $email );
+		$order = ! empty( $_GET['reuse'] ) ? wc_get_order( absint( $_GET['reuse'] ) ) : nwr_order( $ids, $email );
 		remove_all_actions( 'wp_footer' ); // keep only the browser leg the thank-you hook queues
 		ob_start();
 		do_action( 'woocommerce_thankyou', $order->get_id() );
@@ -127,6 +127,16 @@ switch ( $event ) {
 		ob_start();
 		do_action( 'wp_footer' );
 		$footer = ob_get_clean();
+		$fresh    = wc_get_order( $order->get_id() ); // what the plugin wrote to it
+		$purchase = array(
+			'order'   => $fresh->get_id(),
+			'consent' => $fresh->get_meta( '_nowera_capi_purchase_consent' ),
+			'sent'    => (bool) $fresh->get_meta( '_nowera_capi_purchase_sent' ),
+			'notes'   => array_map(
+				function ( $n ) { return $n->content; },
+				wc_get_order_notes( array( 'order_id' => $fresh->get_id(), 'limit' => 3 ) )
+			),
+		);
 		break;
 	default:
 		http_response_code( 400 );
@@ -139,4 +149,4 @@ foreach ( $captured as &$c ) {
 	$c['signature_valid'] = hash_equals( hash_hmac( 'sha256', $c['raw'], NWR_TEST_SECRET ), (string) $c['signature'] );
 	unset( $c['raw'] );
 }
-nwr_out( array( 'event' => $event, 'sent' => $captured, 'footer' => $footer ) );
+nwr_out( array( 'event' => $event, 'sent' => $captured, 'footer' => $footer, 'purchase' => $purchase ?? null ) );

@@ -20,7 +20,7 @@ async function html(path, cookie) {
 const setConsent = (mode) => json(`/nwr-test/set.php?consent=${mode}`);
 const fire = (event, cookies = '', extra = '') =>
   json(`/nwr-test/fire.php?event=${event}&cookies=${encodeURIComponent(cookies)}${extra}`);
-const fireCs = (event, cs, cookies = '') => fire(event, cookies, `&cs=${encodeURIComponent(cs)}`);
+const fireCs = (event, cs, cookies = '', extra = '') => fire(event, cookies, `&cs=${encodeURIComponent(cs)}${extra}`);
 
 function inline(page, name) {
   const m = page.match(new RegExp(`window\\.${name}=(\\{.*?\\});`));
@@ -246,6 +246,36 @@ test('server events on a full page load carry the referrer, without its query', 
 
   const direct = await fire('checkout');
   assert.equal(direct.sent[0].body.referrer_url, null);
+});
+
+test('every order records whether its Purchase was reported, and why not', async () => {
+  const withConsent = await fire('purchase');
+  assert.equal(withConsent.purchase.consent, 'marketing');
+  assert.equal(withConsent.purchase.sent, true);
+  assert.match(withConsent.purchase.notes.join(' '), /Nowera CAPI: Purchase odoslaný do Mety/);
+
+  await setConsent('cookiescript');
+  try {
+    const statsOnly = await fireCs('purchase', 'performance');
+    assert.equal(statsOnly.purchase.consent, 'statistics');
+    assert.equal(statsOnly.sent.length, 1, 'GA4 may still have it');
+    assert.match(statsOnly.purchase.notes.join(' '), /bez marketingového súhlasu/);
+
+    // No decision at all: nothing leaves the site and the order stays open, so
+    // accepting the banner on the thank-you page still reports the purchase.
+    const undecided = await fire('purchase');
+    assert.equal(undecided.purchase.consent, 'none');
+    assert.equal(undecided.purchase.sent, false);
+    assert.equal(undecided.sent.length, 0);
+    assert.match(undecided.purchase.notes.join(' '), /nedal súhlas/);
+
+    const recovered = await fireCs('purchase', 'targeting', '', `&reuse=${undecided.purchase.order}`);
+    assert.equal(recovered.purchase.order, undecided.purchase.order);
+    assert.equal(recovered.purchase.consent, 'marketing');
+    assert.equal(recovered.sent.length, 1, 'the same order is reported once it may be');
+  } finally {
+    await setConsent('none');
+  }
 });
 
 // ------------------------------------------------ returning customers
