@@ -136,6 +136,11 @@ export function tenantForm(t) {
       <div class="hint">Platí aj pre stránky z cache webu — nastavenie sa posiela priamo v <code>px.js</code>.
         Meta dostane eventy len so súhlasom marketing (CookieScript: targeting), GA4 so štatistikou (performance).</div>
 
+      <label for="keep_path">Cookie keeper (cesta na webe klienta)</label>
+      <input id="keep_path" name="keep_path" class="mono" value="${esc(t ? (t.keep_path || '') : '/wp-content/plugins/nowera-capi/keep.php')}" placeholder="/wp-content/plugins/nowera-capi/keep.php">
+      <div class="hint">Súbor z pluginu nowera-capi, ktorý obnovuje cookies zo servera webu — Safari ich potom drží 90 dní namiesto 7.
+        Nechajte prázdne pri webe bez pluginu.</div>
+
       ${t ? `<label style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <input type="checkbox" name="active" ${t.active ? 'checked' : ''} style="width:auto"> Aktívny
       </label>` : ''}

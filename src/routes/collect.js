@@ -111,6 +111,7 @@ export default async function collectRoutes(app, opts = {}) {
         measurementId: ga4Dest?.settings?.measurement_id || null,
         consent: normalizeConsent(tenant.consent_mode, tenant.consent_prefix),
         cookieDomain: tenant.cookie_domain || null,
+        keepPath: tenant.keep_path || null,
       }));
   });
 

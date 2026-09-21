@@ -39,3 +39,9 @@ test('tenant-supplied text is escaped', () => {
   assert.ok(!evil.includes('<img src=x'));
   assert.ok(evil.includes('&lt;img src=x'));
 });
+
+test('the tenant form offers the cookie keeper path, prefilled for new tenants', async () => {
+  const { tenantForm } = await import('../src/views/pages.js');
+  assert.match(tenantForm(null), /name="keep_path"[^>]*value="\/wp-content\/plugins\/nowera-capi\/keep\.php"/);
+  assert.match(tenantForm({ ...tenant, keep_path: null }), /name="keep_path"[^>]*value=""/, 'a cleared path stays cleared');
+});

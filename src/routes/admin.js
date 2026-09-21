@@ -9,7 +9,7 @@ import { invalidateTenantCache } from '../lib/tenants.js';
 import { enqueue } from '../lib/queue.js';
 import { newEventId } from '../lib/ids.js';
 import { page } from '../views/layout.js';
-import { normalizeConsent } from '../lib/consent.js';
+import { normalizeConsent, normalizeKeepPath } from '../lib/consent.js';
 import {
   accountPage, destinationForm, tenantForm, tenantList, tenantDetail, eventLog, loginPage,
 } from '../views/pages.js';
@@ -133,11 +133,11 @@ export default async function adminRoutes(app) {
       const consent = normalizeConsent(b.consent_mode, b.consent_prefix);
       const row = await one(
         `INSERT INTO tenants (slug, name, collector_host, allowed_origins, cookie_domain, active,
-                              consent_mode, consent_prefix)
-         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7) RETURNING id`,
+                              consent_mode, consent_prefix, keep_path)
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8) RETURNING id`,
         [slug, String(b.name || slug).trim(), String(b.collector_host || '').trim().toLowerCase(),
          String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
-         consent.mode, consent.prefix],
+         consent.mode, consent.prefix, normalizeKeepPath(b.keep_path)],
       );
       invalidateTenantCache();
       return redirect(reply, `/admin/tenants/${row.id}`, 'Klient vytvorený. Pridajte destináciu.');
@@ -165,11 +165,12 @@ export default async function adminRoutes(app) {
     const consent = normalizeConsent(b.consent_mode, b.consent_prefix);
     await query(
       `UPDATE tenants SET name = $2, collector_host = $3, allowed_origins = $4,
-              cookie_domain = $5, active = $6, consent_mode = $7, consent_prefix = $8
+              cookie_domain = $5, active = $6, consent_mode = $7, consent_prefix = $8,
+              keep_path = $9
         WHERE id = $1`,
       [req.params.id, String(b.name || '').trim(), String(b.collector_host || '').trim().toLowerCase(),
        String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
-       b.active === 'on', consent.mode, consent.prefix],
+       b.active === 'on', consent.mode, consent.prefix, normalizeKeepPath(b.keep_path)],
     );
     invalidateTenantCache();
     return redirect(reply, `/admin/tenants/${req.params.id}`, 'Uložené.');

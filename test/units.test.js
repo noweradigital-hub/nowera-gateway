@@ -7,6 +7,7 @@ import { normalizeEvent } from '../src/lib/event.js';
 import { buildPayload as metaPayload } from '../src/destinations/meta.js';
 import { buildPayload as ga4Payload } from '../src/destinations/ga4.js';
 import { isBot } from '../src/lib/bots.js';
+import { normalizeKeepPath } from '../src/lib/consent.js';
 import { loaderScript } from '../src/lib/loader.js';
 import { newFbp, resolveFbc } from '../src/lib/ids.js';
 
@@ -272,4 +273,11 @@ test('crawlers are recognised, real browsers are not', () => {
   ];
   for (const ua of people) assert.equal(isBot(ua), false, ua.slice(0, 40));
   assert.equal(isBot(undefined), false);
+});
+
+test('the keeper path stays on the site\u2019s own origin', () => {
+  assert.equal(normalizeKeepPath(' /wp-content/plugins/nowera-capi/keep.php '), '/wp-content/plugins/nowera-capi/keep.php');
+  for (const bad of ['', 'https://evil.example/keep.php', '//evil.example/keep.php', 'keep.php', '/a b.php', '/x"><script>', null, undefined]) {
+    assert.equal(normalizeKeepPath(bad), null, String(bad));
+  }
 });

@@ -45,7 +45,7 @@ function cookieJar(initial) {
  * every POST to the gateway and every fbq() call. Asserting behaviour rather than
  * source text is what catches a broken dedupe or a consent leak.
  */
-function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk', referrer = '', keep, storage } = {}) {
+function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk', referrer = '', keep, storage, tenantKeep } = {}) {
   const posts = [];
   const gets = [];
   const fbq = [];
@@ -64,6 +64,7 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
       href: `https://${hostname}/produkt/x/` + (fbclid ? `?fbclid=${fbclid}` : ''),
       search: fbclid ? `?fbclid=${fbclid}` : '',
       hostname,
+      origin: `https://${hostname}`,
       protocol: 'https:',
     },
     crypto: { randomUUID: () => `rnd-${String(++counter).padStart(6, '0')}` },
@@ -86,7 +87,7 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
   if (hasConsent) window.cmplz_has_consent = hasConsent;
 
   const run = () => new Function('window', 'document', 'navigator',
-    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC', consent: tenantConsent, cookieDomain }),
+    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC', consent: tenantConsent, cookieDomain, keepPath: tenantKeep }),
   )(window, document, {});
 
   const fire = (name, detail = {}) => (listeners[name] || []).forEach((fn) => fn({ detail }));
@@ -517,4 +518,17 @@ test('no refresh without marketing consent or without a published endpoint', asy
   plain.run();
   await settle();
   assert.equal(plain.gets.length, 0, 'a site without the plugin publishes no endpoint');
+});
+
+test('a page cached before the site published the keeper still uses it, via the gateway setting', async () => {
+  const b = browser({ tenantKeep: '/wp-content/plugins/nowera-capi/keep.php' });
+  b.run();
+  await settle();
+  assert.equal(b.gets.length, 1);
+  assert.equal(b.gets[0].url, 'https://klient.sk/wp-content/plugins/nowera-capi/keep.php', 'always the page\u2019s own origin');
+
+  const own = browser({ tenantKeep: '/gateway/default.php', keep: KEEP });
+  own.run();
+  await settle();
+  assert.equal(own.gets[0].url, KEEP, 'what the page publishes wins');
 });

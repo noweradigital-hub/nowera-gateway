@@ -10,7 +10,7 @@
  * cache: PHP either would not run at all or would bake one event_id into the
  * cached HTML and collapse every visitor's view into a single event.
  */
-export function loaderScript({ endpoint, pixelId, measurementId, consent, cookieDomain }) {
+export function loaderScript({ endpoint, pixelId, measurementId, consent, cookieDomain, keepPath }) {
   return `(function (w, d) {
   'use strict';
   if (w.nwr && w.nwr.loaded) return;
@@ -31,7 +31,11 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   // The site's own endpoint that re-sets our identifiers from its server —
   // Safari keeps those 90 days, but only 7 when JavaScript or a tracking
   // subdomain on another server wrote them. Published by the nowera-capi plugin.
-  var KEEP = typeof w.nwrKeep === 'string' ? w.nwrKeep : null;
+  // The gateway's copy covers pages cached before the site began publishing it
+  // (some sites keep a page cached for a year).
+  var TENANT_KEEP = ${JSON.stringify(keepPath || null)};
+  var KEEP = typeof w.nwrKeep === 'string' ? w.nwrKeep
+    : (TENANT_KEEP && w.location.origin ? w.location.origin + TENANT_KEEP : null);
   // How the site asks for consent. The gateway's own setting for this tenant
   // wins, because it arrives with this script and so also covers pages the site
   // served from its page cache, which carry whatever was true when cached. The

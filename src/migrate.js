@@ -52,6 +52,11 @@ CREATE INDEX IF NOT EXISTS events_tenant_created_idx ON events(tenant_id, create
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS consent_mode TEXT NOT NULL DEFAULT 'none';
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS consent_prefix TEXT NOT NULL DEFAULT 'cmplz_';
 
+-- Path of the nowera-capi cookie keeper on the client's own site, also delivered
+-- inside px.js so pages from a long-lived page cache use it too. The default fills
+-- the existing tenants, which all run the WordPress plugin that ships it.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS keep_path TEXT DEFAULT '/wp-content/plugins/nowera-capi/keep.php';
+
 -- Destinations that must not receive the same logical event twice (GA4 has no
 -- deduplication of its own) get a key here; Meta wants both legs and leaves it NULL.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;

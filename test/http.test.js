@@ -12,6 +12,7 @@ const TENANT = {
   allowed_origins: 'https://klient.sk,https://www.klient.sk',
   cookie_domain: '.klient.sk',
   consent_mode: 'cookiescript',
+  keep_path: '/wp-content/plugins/nowera-capi/keep.php',
   consent_prefix: 'cmplz_',
   destinations: [{ id: 10, kind: 'meta', settings: { dataset_id: '1', access_token: 't' } }],
 };
@@ -282,4 +283,9 @@ test('the click id is derived from the landing url when the site has no cookie y
   });
   assert.equal(res.statusCode, 200);
   assert.match(inserted.at(-1).event.context.fbc, /^fb\.1\.\d+\.CLICK123$/);
+});
+
+test('px.js carries the cookie keeper path, for pages cached before the site published it', async () => {
+  const res = await app.inject({ method: 'GET', url: '/px.js', headers: { host: HOST } });
+  assert.match(res.body, /var TENANT_KEEP = "\/wp-content\/plugins\/nowera-capi\/keep\.php";/);
 });
