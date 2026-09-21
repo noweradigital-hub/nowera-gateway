@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.7.0
+ * Version:      0.8.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -140,6 +140,10 @@ add_action( 'wp_head', function () {
 	if ( $page ) {
 		$config[] = 'window.nwrPage=' . wp_json_encode( $page ) . ';';
 	}
+
+	// This site's own endpoint that re-sets our identifiers from its server,
+	// which Safari keeps for 90 days instead of 7. Same for every visitor.
+	$config[] = 'window.nwrKeep=' . wp_json_encode( plugins_url( 'keep.php', __FILE__ ) ) . ';';
 
 	// Hashed identifiers only for signed-in customers, whose pages are never
 	// served from the shared page cache. For a guest this line could be cached
@@ -635,19 +639,46 @@ function nowera_capi_customer_segment( \WC_Order $order ): ?string {
 }
 
 /**
+ * What the current request tells us about the visitor: consent, and the
+ * identifiers that may travel with it. An event built later, when the visitor
+ * is gone (a payment confirmed by the gateway), passes a stored copy instead.
+ */
+function nowera_capi_request_context(): array {
+	$marketing  = nowera_capi_has_consent( 'marketing' );
+	$statistics = nowera_capi_has_consent( 'statistics' );
+	$ga         = nowera_capi_ga_ids();
+	$cookie     = function ( string $name ) use ( $marketing ) {
+		return ( $marketing && isset( $_COOKIE[ $name ] ) ) ? sanitize_text_field( wp_unslash( $_COOKIE[ $name ] ) ) : null;
+	};
+	return array(
+		'marketing'     => $marketing,
+		'statistics'    => $statistics,
+		'fbp'           => $cookie( '_fbp' ),
+		'fbc'           => $cookie( '_fbc' ),
+		// No cookie yet on the very landing page the ad click opened.
+		'fbclid'        => ( $marketing && ! empty( $_GET['fbclid'] ) ) ? sanitize_text_field( wp_unslash( $_GET['fbclid'] ) ) : null,
+		'ga_client_id'  => $ga['client_id'],
+		'ga_session_id' => $ga['session_id'],
+		'ip'            => nowera_capi_client_ip(),
+		'ua'            => isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '',
+	);
+}
+
+/**
  * Send one event to the gateway. Non-blocking: never delays the page for the
  * visitor. Returns what happened, so a caller can record it on the order:
  * 'marketing' (Meta will get it), 'statistics' (only GA4 may), 'none' (the
  * visitor gave no consent) or 'not_configured'.
  */
-function nowera_capi_send( string $event_name, string $event_id, array $user, array $props, ?string $url = null ): string {
+function nowera_capi_send( string $event_name, string $event_id, array $user, array $props, ?string $url = null, ?array $ctx = null ): string {
 	$s = nowera_capi_settings();
 	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) ) {
 		return 'not_configured';
 	}
 
-	$marketing  = nowera_capi_has_consent( 'marketing' );
-	$statistics = nowera_capi_has_consent( 'statistics' );
+	$ctx        = $ctx ?? nowera_capi_request_context();
+	$marketing  = ! empty( $ctx['marketing'] );
+	$statistics = ! empty( $ctx['statistics'] );
 	if ( ! $marketing && ! $statistics ) {
 		return 'none'; // nobody may receive this event
 	}
@@ -664,26 +695,24 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 		}
 	}
 
-	$ga         = nowera_capi_ga_ids();
 	$source_url = $url ?: home_url( add_query_arg( array() ) );
 
 	$payload = array(
 		'event_name'        => $event_name,
 		'event_id'          => $event_id,
-		'event_time'        => time(),
-		'ga_client_id'      => $ga['client_id'],
-		'ga_session_id'     => $ga['session_id'],
+		'event_time'        => isset( $ctx['event_time'] ) ? (int) $ctx['event_time'] : time(),
+		'ga_client_id'      => $ctx['ga_client_id'] ?? null,
+		'ga_session_id'     => $ctx['ga_session_id'] ?? null,
 		'event_source_url'  => $source_url,
-		'referrer_url'      => nowera_capi_page_referrer( $source_url ),
+		'referrer_url'      => array_key_exists( 'referrer_url', $ctx ) ? $ctx['referrer_url'] : nowera_capi_page_referrer( $source_url ),
 		'action_source'     => 'website',
 		'user_data'         => $hashed,
 		'custom_data'       => $props,
-		'fbp'               => ( $marketing && isset( $_COOKIE['_fbp'] ) ) ? sanitize_text_field( wp_unslash( $_COOKIE['_fbp'] ) ) : null,
-		'fbc'               => ( $marketing && isset( $_COOKIE['_fbc'] ) ) ? sanitize_text_field( wp_unslash( $_COOKIE['_fbc'] ) ) : null,
-		// No cookie yet on the very landing page the ad click opened.
-		'fbclid'            => ( $marketing && ! empty( $_GET['fbclid'] ) ) ? sanitize_text_field( wp_unslash( $_GET['fbclid'] ) ) : null,
-		'client_ip_address' => nowera_capi_client_ip(),
-		'client_user_agent' => isset( $_SERVER['HTTP_USER_AGENT'] ) ? sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ) : '',
+		'fbp'               => $marketing ? ( $ctx['fbp'] ?? null ) : null,
+		'fbc'               => $marketing ? ( $ctx['fbc'] ?? null ) : null,
+		'fbclid'            => $marketing ? ( $ctx['fbclid'] ?? null ) : null,
+		'client_ip_address' => $ctx['ip'] ?? '',
+		'client_user_agent' => $ctx['ua'] ?? '',
 	);
 	if ( 'none' !== $s['consent_mode'] ) {
 		$payload['consent'] = array( 'marketing' => $marketing, 'statistics' => $statistics );
@@ -708,15 +737,77 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 }
 
 /** Plain-language outcome of a Purchase, written to the order so it can be checked later. */
-function nowera_capi_record_outcome( \WC_Order $order, string $outcome ): void {
+function nowera_capi_record_outcome( \WC_Order $order, string $outcome, bool $after_payment = false ): void {
 	$notes = array(
 		'marketing'      => 'Purchase odoslaný do Mety aj GA4 (súhlas: marketing).',
 		'statistics'     => 'Purchase odoslaný len pre štatistiku — bez marketingového súhlasu ho Meta nedostane.',
 		'none'           => 'Purchase neodoslaný — návštevník nedal súhlas s cookies.',
 		'not_configured' => 'Purchase neodoslaný — plugin nemá vyplnený collector alebo kľúč.',
 	);
+	$note = $notes[ $outcome ] ?? $outcome;
+	if ( $after_payment ) {
+		$note = 'Po potvrdení platby (zákazník sa nevrátil na web): ' . $note;
+	}
 	$order->update_meta_data( '_nowera_capi_purchase_consent', $outcome );
-	$order->add_order_note( 'Nowera CAPI: ' . ( $notes[ $outcome ] ?? $outcome ) );
+	$order->add_order_note( 'Nowera CAPI: ' . $note );
+}
+
+/**
+ * Keep what the checkout request knew about the buyer. When the payment gateway
+ * confirms the order later and the buyer never returns to the thank-you page,
+ * that confirmation arrives without the buyer's cookies — this is all we have.
+ * Marketing identifiers are kept only if the buyer allowed marketing.
+ */
+function nowera_capi_remember_checkout_context( \WC_Order $order ): void {
+	if ( $order->get_meta( '_nowera_capi_ctx' ) ) {
+		return;
+	}
+	$ctx  = nowera_capi_request_context();
+	$keep = array(
+		'marketing'     => (bool) $ctx['marketing'],
+		'statistics'    => (bool) $ctx['statistics'],
+		'ga_client_id'  => $ctx['ga_client_id'],
+		'ga_session_id' => $ctx['ga_session_id'],
+	);
+	if ( $ctx['marketing'] ) {
+		$keep['fbp']     = $ctx['fbp'];
+		$keep['fbc']     = $ctx['fbc'];
+		$keep['visitor'] = nowera_capi_visitor_id();
+	}
+	$order->update_meta_data( '_nowera_capi_ctx', $keep );
+}
+
+/** Purchase custom_data, shared by the thank-you page and the after-payment path. */
+function nowera_capi_purchase_data( \WC_Order $order ): array {
+	$contents    = array();
+	$content_ids = array();
+	foreach ( $order->get_items() as $item ) {
+		$product = $item->get_product();
+		$id      = $product ? nowera_capi_content_id( $product ) : (string) ( $item->get_variation_id() ?: $item->get_product_id() );
+		$content_ids[] = $id;
+		$contents[]    = array(
+			'id'         => $id,
+			'item_name'  => $item->get_name(),
+			'quantity'   => $item->get_quantity(),
+			'item_price' => $order->get_item_total( $item, false, true ),
+		);
+	}
+
+	$custom_data = array(
+		'value'        => (float) $order->get_total(),
+		'currency'     => $order->get_currency(),
+		'order_id'     => $order->get_id(),
+		'content_ids'  => $content_ids,
+		'contents'     => $contents,
+		'content_type' => 'product',
+		'num_items'    => $order->get_item_count(),
+	);
+	// New or returning buyer, for campaigns that optimise for new customers.
+	$segment = nowera_capi_customer_segment( $order );
+	if ( $segment ) {
+		$custom_data['customer_segmentation'] = $segment;
+	}
+	return $custom_data;
 }
 
 /**
@@ -766,35 +857,8 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		return;
 	}
 
-	$event_id = 'ord-' . $order->get_id();
-	$contents = array();
-	$content_ids = array();
-	foreach ( $order->get_items() as $item ) {
-		$product = $item->get_product();
-		$id      = $product ? nowera_capi_content_id( $product ) : (string) ( $item->get_variation_id() ?: $item->get_product_id() );
-		$content_ids[] = $id;
-		$contents[]    = array(
-			'id'         => $id,
-			'item_name'  => $item->get_name(),
-			'quantity'   => $item->get_quantity(),
-			'item_price' => $order->get_item_total( $item, false, true ),
-		);
-	}
-
-	$custom_data = array(
-		'value'        => (float) $order->get_total(),
-		'currency'     => $order->get_currency(),
-		'order_id'     => $order->get_id(),
-		'content_ids'  => $content_ids,
-		'contents'     => $contents,
-		'content_type' => 'product',
-		'num_items'    => $order->get_item_count(),
-	);
-	// New or returning buyer, for campaigns that optimise for new customers.
-	$segment = nowera_capi_customer_segment( $order );
-	if ( $segment ) {
-		$custom_data['customer_segmentation'] = $segment;
-	}
+	$event_id    = 'ord-' . $order->get_id();
+	$custom_data = nowera_capi_purchase_data( $order );
 
 	$outcome = nowera_capi_send(
 		'Purchase',
@@ -815,6 +879,67 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 
 	nowera_capi_browser_leg( 'Purchase', $event_id, $custom_data );
 }, 10, 1 );
+
+/**
+ * A paid order whose buyer never came back to the thank-you page (common with
+ * 24pay's redirect) would never be reported. Wait half an hour first: if the
+ * thank-you page does load, it reports the purchase with fresher consent.
+ */
+function nowera_capi_schedule_purchase_fallback( $order_id ): void {
+	$order = wc_get_order( $order_id );
+	if ( ! $order || ! function_exists( 'as_schedule_single_action' ) ) {
+		return;
+	}
+	if ( $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_purchase_consent' ) || ! $order->get_meta( '_nowera_capi_ctx' ) ) {
+		return; // already reported, already decided, or never went through our checkout
+	}
+	$args = array( (int) $order->get_id() );
+	if ( ! as_next_scheduled_action( 'nowera_capi_purchase_fallback', $args, 'nowera-capi' ) ) {
+		as_schedule_single_action( time() + 30 * MINUTE_IN_SECONDS, 'nowera_capi_purchase_fallback', $args, 'nowera-capi' );
+	}
+}
+add_action( 'woocommerce_payment_complete', 'nowera_capi_schedule_purchase_fallback' );
+add_action( 'woocommerce_order_status_processing', 'nowera_capi_schedule_purchase_fallback' );
+add_action( 'woocommerce_order_status_completed', 'nowera_capi_schedule_purchase_fallback' );
+
+add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
+	$order = wc_get_order( $order_id );
+	if ( ! $order || $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_purchase_consent' ) ) {
+		return; // the thank-you page got there first
+	}
+	$stored = $order->get_meta( '_nowera_capi_ctx' );
+	if ( ! is_array( $stored ) ) {
+		return;
+	}
+
+	// Consent and identifiers as they were at checkout; address and browser as
+	// WooCommerce stored them with the order; the time of the payment itself.
+	$paid = $order->get_date_paid() ?: $order->get_date_created();
+	$ctx  = array(
+		'marketing'     => ! empty( $stored['marketing'] ),
+		'statistics'    => ! empty( $stored['statistics'] ),
+		'fbp'           => $stored['fbp'] ?? null,
+		'fbc'           => $stored['fbc'] ?? null,
+		'fbclid'        => null,
+		'ga_client_id'  => $stored['ga_client_id'] ?? null,
+		'ga_session_id' => $stored['ga_session_id'] ?? null,
+		'ip'            => (string) $order->get_customer_ip_address(),
+		'ua'            => (string) $order->get_customer_user_agent(),
+		'event_time'    => $paid ? $paid->getTimestamp() : time(),
+		'referrer_url'  => null,
+	);
+	$user = nowera_capi_user_from_order( $order );
+	if ( ! $order->get_customer_id() && ! empty( $stored['visitor'] ) ) {
+		$user['external_id'] = (string) $stored['visitor']; // no visitor cookie in this request
+	}
+
+	$outcome = nowera_capi_send( 'Purchase', 'ord-' . $order->get_id(), $user, nowera_capi_purchase_data( $order ), $order->get_checkout_order_received_url(), $ctx );
+	nowera_capi_record_outcome( $order, $outcome, true );
+	if ( 'marketing' === $outcome || 'statistics' === $outcome ) {
+		$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
+	}
+	$order->save();
+} );
 
 add_action( 'woocommerce_add_to_cart', function ( $cart_item_key, $product_id, $quantity, $variation_id = 0 ) {
 	$product = wc_get_product( $variation_id ?: $product_id );
@@ -912,7 +1037,13 @@ function nowera_capi_current_user(): array {
  */
 function nowera_capi_add_payment_info( $order ): void {
 	$order = $order instanceof \WC_Order ? $order : wc_get_order( $order );
-	if ( ! $order || $order->get_meta( '_nowera_capi_payment_info_sent' ) ) {
+	if ( ! $order ) {
+		return;
+	}
+	// The last moment the buyer is certainly on the site: keep what we know.
+	nowera_capi_remember_checkout_context( $order );
+	if ( $order->get_meta( '_nowera_capi_payment_info_sent' ) ) {
+		$order->save_meta_data();
 		return;
 	}
 

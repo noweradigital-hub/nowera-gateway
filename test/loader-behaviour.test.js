@@ -45,8 +45,9 @@ function cookieJar(initial) {
  * every POST to the gateway and every fbq() call. Asserting behaviour rather than
  * source text is what catches a broken dedupe or a consent leak.
  */
-function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk', referrer = '' } = {}) {
+function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk', referrer = '', keep, storage } = {}) {
   const posts = [];
+  const gets = [];
   const fbq = [];
   const listeners = {};
   let counter = 0;
@@ -66,7 +67,15 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
       protocol: 'https:',
     },
     crypto: { randomUUID: () => `rnd-${String(++counter).padStart(6, '0')}` },
-    fetch: (url, opts) => { posts.push({ url, body: JSON.parse(opts.body) }); return Promise.resolve(); },
+    fetch: (url, opts = {}) => {
+      if (opts.body) posts.push({ url, body: JSON.parse(opts.body) });
+      else gets.push({ url, opts });
+      return Promise.resolve();
+    },
+    localStorage: storage === null
+      ? { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } }
+      : (() => { const m = new Map(Object.entries(storage || {})); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), map: m }; })(),
+    nwrKeep: keep,
     // A pre-existing fbq makes the loader skip injecting fbevents.js, so we can
     // record exactly which pixel calls it makes.
     fbq: (...args) => fbq.push(args),
@@ -81,7 +90,7 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
   )(window, document, {});
 
   const fire = (name, detail = {}) => (listeners[name] || []).forEach((fn) => fn({ detail }));
-  return { window, document, posts, fbq, run, fire, listeners, jar };
+  return { window, document, posts, gets, fbq, run, fire, listeners, jar };
 }
 
 const isInit = (call) => call[0] === 'init' && call[1] === 'PIX';
@@ -467,4 +476,45 @@ test('every event says when it was sent, so the gateway can fix a wrong device c
   assert.equal(typeof body.sent_at, 'number');
   assert.ok(Math.abs(body.sent_at - Math.floor(Date.now() / 1000)) <= 2);
   assert.ok(body.sent_at >= body.event_time);
+});
+
+// ------------------------------------------------------------ cookie keeper
+
+const settle = () => new Promise((r) => setImmediate(r));
+const KEEP = 'https://klient.sk/wp-content/plugins/nowera-capi/keep.php';
+
+test('with marketing consent the site is asked to re-set the identifiers, once', async () => {
+  const b = browser({ keep: KEEP, page: { type: 'product', data: {} } });
+  b.run();
+  await settle();
+  assert.equal(b.gets.length, 1, 'one call although two events were sent');
+  assert.equal(b.gets[0].url, KEEP);
+  assert.equal(b.gets[0].opts.credentials, 'same-origin', 'cookies go only to the site itself');
+  assert.equal(b.window.localStorage.getItem('nwr_kept'), new Date().toISOString().slice(0, 10));
+});
+
+test('the identifiers are refreshed at most once a day', async () => {
+  const b = browser({ keep: KEEP, storage: { nwr_kept: new Date().toISOString().slice(0, 10) } });
+  b.run();
+  await settle();
+  assert.equal(b.gets.length, 0);
+});
+
+test('blocked storage still means one refresh per page, not one per event', async () => {
+  const b = browser({ keep: KEEP, storage: null, page: { type: 'product', data: {} } });
+  b.run();
+  await settle();
+  assert.equal(b.gets.length, 1);
+});
+
+test('no refresh without marketing consent or without a published endpoint', async () => {
+  const stats = browser({ keep: KEEP, consent: { mode: 'complianz' }, cookie: 'cmplz_statistics=allow' });
+  stats.run();
+  await settle();
+  assert.equal(stats.gets.length, 0, 'statistics-only visitors keep nothing');
+
+  const plain = browser();
+  plain.run();
+  await settle();
+  assert.equal(plain.gets.length, 0, 'a site without the plugin publishes no endpoint');
 });

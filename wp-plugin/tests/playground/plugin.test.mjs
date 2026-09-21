@@ -278,6 +278,75 @@ test('every order records whether its Purchase was reported, and why not', async
   }
 });
 
+test('a buyer who pays but never returns to the site is still reported, from checkout data', async () => {
+  const { sent, purchase } = await fire('paid_no_return', '_fbp:fb.1.1700000000000.1234567890,_nwr_id:visitor-abcdef12');
+  assert.equal(purchase.scheduled, true, 'queued for half an hour later');
+  assert.equal(sent.length, 1);
+  const b = sent[0].body;
+  assert.equal(b.event_name, 'Purchase');
+  assert.equal(b.event_id, `ord-${purchase.order}`, 'same id the thank-you page would have used');
+  assert.equal(b.fbp, 'fb.1.1700000000000.1234567890', 'browser id remembered from checkout');
+  assert.equal(b.client_ip_address, '203.0.113.9');
+  assert.match(b.client_user_agent, /TestSafari/);
+  assert.equal(b.user_data.external_id, sha('visitor-abcdef12'));
+  assert.equal(b.user_data.em, sha('jan.novak@example.com'));
+  assert.ok(b.custom_data.value > 0);
+  assert.ok(Math.abs(b.event_time - Date.now() / 1000) < 120, 'timed at the payment');
+  assert.equal(purchase.sent, true);
+  assert.match(purchase.notes.join(' '), /Po potvrdení platby/);
+});
+
+test('when the thank-you page did load, the payment confirmation adds nothing', async () => {
+  const { sent, purchase } = await fire('paid_with_return', '_fbp:fb.1.1700000000000.1234567890');
+  assert.equal(purchase.scheduled, false);
+  assert.equal(sent.length, 0, 'reported once, by the thank-you page');
+  assert.equal(purchase.consent, 'marketing');
+});
+
+test('a buyer without consent at checkout is not reported after payment either', async () => {
+  await setConsent('cookiescript');
+  try {
+    const { sent, purchase } = await fire('paid_no_return', '_fbp:fb.1.1700000000000.1234567890');
+    assert.equal(sent.length, 0);
+    assert.equal(purchase.consent, 'none');
+    assert.equal(purchase.sent, false);
+    assert.match(purchase.notes.join(' '), /Po potvrdení platby.*nedal súhlas/);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+// ------------------------------------------------------------ cookie keeper
+
+test('pages publish where px.js can refresh the identifiers', async () => {
+  assert.match(await html('/'), /window\.nwrKeep="[^"]*nowera-capi\\?\/keep\.php"/);
+});
+
+test('the cookie keeper writes the visitor\u2019s own identifiers back for 90 days', async () => {
+  const ud = encodeURIComponent(JSON.stringify({ em: 'a'.repeat(64) }));
+  const res = await fetch(`${BASE}/wp-content/plugins/nowera-capi/keep.php`, {
+    headers: { cookie: `_fbp=fb.1.1700000000000.1234567890; _fbc=fb.1.1700000000000.IwAR-abc_1; _nwr_id=visitor-abcdef12; _nwr_ud=${ud}; other=1` },
+  });
+  assert.equal(res.status, 204);
+  assert.match(res.headers.get('cache-control') || '', /no-store/);
+  const set = res.headers.getSetCookie();
+  assert.deepEqual(set.map((c) => c.split('=')[0]).sort(), ['_fbc', '_fbp', '_nwr_id', '_nwr_ud'], 'nothing else is touched');
+  for (const c of set) {
+    assert.match(c, /Max-Age=7776000/i);
+    assert.doesNotMatch(c, /HttpOnly/i, 'the pixel and px.js must still read them');
+    assert.doesNotMatch(c, /Domain=/i, 'an IP host gets host-only cookies');
+  }
+  assert.ok(set.find((c) => c.startsWith('_fbp=fb.1.1700000000000.1234567890;')), 'value unchanged');
+});
+
+test('the cookie keeper ignores anything that is not an identifier', async () => {
+  const res = await fetch(`${BASE}/wp-content/plugins/nowera-capi/keep.php`, {
+    headers: { cookie: '_fbp=%3Cscript%3E; _nwr_id=x; _fbc=fb.1.1.nope nope' },
+  });
+  assert.equal(res.status, 204);
+  assert.deepEqual(res.headers.getSetCookie(), []);
+});
+
 // ------------------------------------------------ returning customers
 
 const csCookie = (categories, action = 'accept') =>

@@ -28,6 +28,10 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   var DEFAULT_USER = w.nwrUser || {};
   // Cache-safe description of what this page is (product, category, search).
   var PAGE = w.nwrPage || null;
+  // The site's own endpoint that re-sets our identifiers from its server —
+  // Safari keeps those 90 days, but only 7 when JavaScript or a tracking
+  // subdomain on another server wrote them. Published by the nowera-capi plugin.
+  var KEEP = typeof w.nwrKeep === 'string' ? w.nwrKeep : null;
   // How the site asks for consent. The gateway's own setting for this tenant
   // wins, because it arrives with this script and so also covers pages the site
   // served from its page cache, which carry whatever was true when cached. The
@@ -289,7 +293,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
 
   // ---- transport ---------------------------------------------------------
 
-  function post(body) {
+  function post(body, then) {
     var payload = JSON.stringify(body);
     // keepalive lets a Purchase survive the navigation away from the checkout page.
     if (w.fetch) {
@@ -300,10 +304,26 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
         credentials: 'include',
         keepalive: true,
         mode: 'cors'
-      }).catch(function () {});
+      }).then(function () { if (then) then(); }).catch(function () {});
     } else if (navigator.sendBeacon) {
       navigator.sendBeacon(ENDPOINT, new Blob([payload], { type: 'application/json' }));
     }
+  }
+
+  // Once a day, after the gateway answered (it may have just created _fbp or
+  // _fbc), ask the site to write the identifiers again from its own server.
+  var kept = false;
+  function keepCookies() {
+    if (!KEEP || kept || !w.fetch) return;
+    kept = true;
+    try {
+      var today = new Date().toISOString().slice(0, 10);
+      if (w.localStorage.getItem('nwr_kept') === today) return;
+      w.localStorage.setItem('nwr_kept', today);
+    } catch (e) { /* no storage: once per page view is still cheap */ }
+    try {
+      w.fetch(KEEP, { credentials: 'same-origin', cache: 'no-store', keepalive: true }).catch(function () {});
+    } catch (e) {}
   }
 
   var pixelReady = false;
@@ -370,7 +390,8 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       body.fbclid = new URLSearchParams(w.location.search).get('fbclid');
     }
     if (consentActive()) body.consent = c;
-    post(body);
+    // Refreshing identifiers is a marketing use, like the identifiers themselves.
+    post(body, c.marketing ? keepCookies : null);
   }
 
   function countryOnly(user) {

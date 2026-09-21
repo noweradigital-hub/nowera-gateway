@@ -9,6 +9,7 @@
  *   ?event=login                    run wp_login for the test customer
  *   &ref=<url>   the request's HTTP referer;  &ajax=1  pretend it is an AJAX call
  *   &email=<address>&prior=<status>  purchase: buyer email, and an earlier order in that status
+ *   ?event=paid_no_return|paid_with_return  checkout, then the gateway confirms the payment
  */
 require __DIR__ . '/_bootstrap.php';
 delete_option( 'nwr_test_captured' );
@@ -135,6 +136,38 @@ switch ( $event ) {
 			'notes'   => array_map(
 				function ( $n ) { return $n->content; },
 				wc_get_order_notes( array( 'order_id' => $fresh->get_id(), 'limit' => 3 ) )
+			),
+		);
+		break;
+	case 'paid_no_return':
+	case 'paid_with_return':
+		$order = nwr_order( $ids );
+		$order->set_customer_ip_address( '203.0.113.9' );
+		$order->set_customer_user_agent( 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) TestSafari' );
+		$order->save();
+		// The buyer submits the checkout: this request still carries their cookies.
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		if ( 'paid_with_return' === $event ) {
+			ob_start();
+			do_action( 'woocommerce_thankyou', $order->get_id() );
+			ob_end_clean();
+		}
+		// The payment gateway's confirmation arrives later, without those cookies.
+		nwr_cookies( array() );
+		delete_option( 'nwr_test_captured' );
+		$order = wc_get_order( $order->get_id() );
+		$order->payment_complete( 'TX-TEST' );
+		$scheduled = (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		do_action( 'nowera_capi_purchase_fallback', $order->get_id() ); // now instead of in 30 minutes
+		$fresh    = wc_get_order( $order->get_id() );
+		$purchase = array(
+			'order'     => $fresh->get_id(),
+			'scheduled' => $scheduled,
+			'consent'   => $fresh->get_meta( '_nowera_capi_purchase_consent' ),
+			'sent'      => (bool) $fresh->get_meta( '_nowera_capi_purchase_sent' ),
+			'notes'     => array_map(
+				function ( $n ) { return $n->content; },
+				wc_get_order_notes( array( 'order_id' => $fresh->get_id(), 'limit' => 5 ) )
 			),
 		);
 		break;
