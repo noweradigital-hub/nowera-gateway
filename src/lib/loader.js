@@ -316,13 +316,14 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
 
   // Once a day, after the gateway answered (it may have just created _fbp or
   // _fbc), ask the site to write the identifiers again from its own server.
+  // force: something new was just stored and should not wait until tomorrow.
   var kept = false;
-  function keepCookies() {
-    if (!KEEP || kept || !w.fetch) return;
+  function keepCookies(force) {
+    if (!KEEP || !w.fetch || (kept && force !== true)) return;
     kept = true;
     try {
       var today = new Date().toISOString().slice(0, 10);
-      if (w.localStorage.getItem('nwr_kept') === today) return;
+      if (force !== true && w.localStorage.getItem('nwr_kept') === today) return;
       w.localStorage.setItem('nwr_kept', today);
     } catch (e) { /* no storage: once per page view is still cheap */ }
     try {
@@ -454,6 +455,67 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     d.addEventListener('CookieScriptCurrentState', remember(detailCategories));
     d.addEventListener('CookieScriptLoaded', remember(null));
   }
+
+  // ---- identity from the site's own forms ------------------------------------
+
+  // An email typed into a form on the site (newsletter, contact, checkout) is the
+  // strongest match key there is. With marketing consent it is hashed here and
+  // kept in _nwr_ud, the cookie the site itself writes after a purchase, so every
+  // later event from this browser carries it. The address never leaves the page
+  // unhashed. Forms or fields marked data-nwr-ignore are skipped.
+  var EMAIL = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/;
+
+  function ignored(el) {
+    return !!(el && el.getAttribute && el.getAttribute('data-nwr-ignore') !== null);
+  }
+
+  function formEmail(form) {
+    if (!form || !form.elements || ignored(form)) return null;
+    for (var i = 0; i < form.elements.length; i++) {
+      var f = form.elements[i];
+      var type = String(f.type || '').toLowerCase();
+      if (type === 'password' || type === 'hidden' || ignored(f)) continue;
+      var hint = (type + ' ' + (f.name || '') + ' ' + (f.id || '') + ' ' +
+        ((f.getAttribute && f.getAttribute('autocomplete')) || '')).toLowerCase();
+      if (hint.indexOf('email') === -1 && hint.indexOf('e-mail') === -1) continue;
+      var value = String(f.value || '').replace(/^\\s+|\\s+$/g, '').toLowerCase();
+      if (EMAIL.test(value)) return value;
+    }
+    return null;
+  }
+
+  function rememberEmail(email) {
+    if (!consentSnapshot().marketing) return;
+    var em = sha256(email);
+    var stored = null;
+    try { stored = JSON.parse(cookie('_nwr_ud') || 'null'); } catch (e) {}
+    if (stored && stored.em === em) return;
+    // A different address is a different person: nothing stored for the previous
+    // one (phone, name, city) may travel with it.
+    writeCookie('_nwr_ud', JSON.stringify({ em: em }), ID_MAX_AGE);
+    // Safari keeps a cookie written here for seven days; the site's keeper turns
+    // it into a server cookie that lasts the full 90.
+    keepCookies(true);
+  }
+
+  function onFormSubmit(e) {
+    var el = e && e.target;
+    var email = formEmail(el && (el.tagName === 'FORM' ? el : el.form));
+    if (email) rememberEmail(email);
+  }
+
+  // Some forms never fire submit: a script takes the button's click and posts the
+  // fields itself. Listening in the capture phase runs before that script.
+  function onFormClick(e) {
+    var el = e && e.target;
+    var button = el && el.closest ? el.closest('button, input[type="submit"], input[type="image"]') : null;
+    if (!button || !button.form) return;
+    var type = String(button.type || '').toLowerCase();
+    if (type === 'submit' || type === 'image') onFormSubmit({ target: button.form });
+  }
+
+  d.addEventListener('submit', onFormSubmit, true);
+  d.addEventListener('click', onFormClick, true);
 
   var queued = (w.nwr && w.nwr.q) || [];
   w.nwr = function (cmd) {

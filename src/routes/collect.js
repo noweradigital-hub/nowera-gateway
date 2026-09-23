@@ -7,6 +7,7 @@ import { originAllowed, tenantByHost as defaultTenantByHost } from '../lib/tenan
 import { loaderScript } from '../lib/loader.js';
 import { normalizeConsent } from '../lib/consent.js';
 import { isBot } from '../lib/bots.js';
+import { clientIp } from '../lib/client-ip.js';
 
 const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
 
@@ -26,13 +27,6 @@ function persistCookie(reply, tenant, name, value) {
     secure: true,
     httpOnly: false,
   });
-}
-
-function clientIp(req) {
-  // Traefik terminates TLS and sets X-Forwarded-For; take the original client.
-  const fwd = req.headers['x-forwarded-for'];
-  if (fwd) return String(fwd).split(',')[0].trim();
-  return req.ip;
 }
 
 const VISITOR_ID = /^[A-Za-z0-9_-]{8,64}$/;

@@ -10,6 +10,7 @@ import { isBot } from '../src/lib/bots.js';
 import { normalizeKeepPath } from '../src/lib/consent.js';
 import { loaderScript } from '../src/lib/loader.js';
 import { newFbp, resolveFbc } from '../src/lib/ids.js';
+import { clientIp, fromCloudflare } from '../src/lib/client-ip.js';
 
 const sha = (v) => createHash('sha256').update(v, 'utf8').digest('hex');
 
@@ -280,4 +281,18 @@ test('the keeper path stays on the site\u2019s own origin', () => {
   for (const bad of ['', 'https://evil.example/keep.php', '//evil.example/keep.php', 'keep.php', '/a b.php', '/x"><script>', null, undefined]) {
     assert.equal(normalizeKeepPath(bad), null, String(bad));
   }
+});
+
+test('behind Cloudflare the visitor address comes from CF-Connecting-IP, IPv6 included', () => {
+  const req = (headers, ip = '172.18.0.2') => ({ headers, ip });
+  // Traefik replaced X-Forwarded-For with the Cloudflare edge that connected.
+  assert.equal(clientIp(req({ 'x-forwarded-for': '172.70.1.5', 'cf-connecting-ip': '2a02:ab8:1::5' })), '2a02:ab8:1::5');
+  // Traefik trusting forwarded headers: the last hop is still the edge.
+  assert.equal(clientIp(req({ 'x-forwarded-for': '2a02:ab8:1::5, 2400:cb00:2049::1', 'cf-connecting-ip': '2a02:ab8:1::5' })), '2a02:ab8:1::5');
+  // Straight to the VPS: the header is somebody's claim, not Cloudflare's.
+  assert.equal(clientIp(req({ 'x-forwarded-for': '81.2.3.4', 'cf-connecting-ip': '9.9.9.9' })), '81.2.3.4');
+  assert.equal(clientIp(req({ 'x-forwarded-for': '172.70.1.5', 'cf-connecting-ip': 'garbage' })), '172.70.1.5');
+  assert.equal(clientIp(req({})), '172.18.0.2');
+  assert.equal(fromCloudflare('::ffff:104.16.0.1'), true);
+  assert.equal(fromCloudflare('31.97.179.201'), false);
 });

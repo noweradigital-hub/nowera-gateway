@@ -532,3 +532,63 @@ test('a page cached before the site published the keeper still uses it, via the 
   await settle();
   assert.equal(own.gets[0].url, KEEP, 'what the page publishes wins');
 });
+
+// ------------------------------------------------------------ emails from forms
+
+const field = (props, attrs = {}) => ({ getAttribute: (n) => (n in attrs ? attrs[n] : null), ...props });
+const form = (elements, attrs = {}) => ({ tagName: 'FORM', elements, getAttribute: (n) => (n in attrs ? attrs[n] : null) });
+const submit = (b, target) => (b.listeners.submit || []).forEach((fn) => fn({ target }));
+const today = () => new Date().toISOString().slice(0, 10);
+
+test('an email submitted in a form is kept hashed and travels with later events', async () => {
+  const b = browser({ keep: KEEP, storage: { nwr_kept: today() } });
+  b.run();
+  submit(b, form([
+    field({ type: 'text', name: 'name', value: 'Jana' }),
+    field({ type: 'email', name: 'EMAIL', value: '  Jana@Example.SK ' }),
+  ]));
+  await settle();
+  assert.deepEqual(JSON.parse(b.jar.value('_nwr_ud')), { em: sha('jana@example.sk') }, 'hashed, never the address');
+  assert.equal(b.gets.length, 1, 'the keeper runs at once, even when it already ran today');
+
+  b.window.nwr('track', 'AddToCart', {});
+  assert.equal(b.posts.at(-1).body.user_data.em, sha('jana@example.sk'));
+});
+
+test('a new address replaces the details stored for the previous person', () => {
+  const stored = encodeURIComponent(JSON.stringify({ em: HASH('a'), ph: HASH('b') }));
+  const b = browser({ cookie: `_nwr_ud=${stored}` });
+  b.run();
+  submit(b, form([field({ type: 'text', name: 'billing_email', value: 'nova@example.sk' })]));
+  assert.deepEqual(JSON.parse(b.jar.value('_nwr_ud')), { em: sha('nova@example.sk') });
+
+  const writes = b.jar.writes.length;
+  submit(b, form([field({ type: 'email', name: 'email', value: 'nova@example.sk' })]));
+  assert.equal(b.jar.writes.length, writes, 'the same address is not written again');
+});
+
+test('forms handled by a script are caught on the submit button click', () => {
+  const b = browser();
+  b.run();
+  const f = form([field({ type: 'email', name: 'newsletter', value: 'klik@example.sk' })]);
+  const button = { tagName: 'BUTTON', type: 'submit', form: f };
+  button.closest = () => button;
+  (b.listeners.click || []).forEach((fn) => fn({ target: button }));
+  assert.deepEqual(JSON.parse(b.jar.value('_nwr_ud')), { em: sha('klik@example.sk') });
+});
+
+test('nothing is kept without marketing consent, from ignored forms, or from non-email fields', () => {
+  const stats = browser({ consent: { mode: 'cookiescript' }, cookie: csCookie(['strict', 'performance']) });
+  stats.run();
+  submit(stats, form([field({ type: 'email', name: 'email', value: 'a@example.sk' })]));
+  assert.equal(stats.jar.value('_nwr_ud'), undefined, 'statistics consent is not enough');
+
+  const b = browser();
+  b.run();
+  submit(b, form([field({ type: 'email', name: 'email', value: 'a@example.sk' })], { 'data-nwr-ignore': '' }));
+  submit(b, form([field({ type: 'email', name: 'email', value: 'a@example.sk' }, { 'data-nwr-ignore': '' })]));
+  submit(b, form([field({ type: 'hidden', name: 'email', value: 'a@example.sk' })]));
+  submit(b, form([field({ type: 'text', name: 'message', value: 'a@example.sk' })]));
+  submit(b, form([field({ type: 'email', name: 'email', value: 'not-an-email' })]));
+  assert.equal(b.jar.value('_nwr_ud'), undefined);
+});
