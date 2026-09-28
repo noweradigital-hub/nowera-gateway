@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import { buildUserData, hashField } from '../src/lib/hash.js';
+import { buildUserData, hashField, phoneDigits } from '../src/lib/hash.js';
 import { normalizeEvent } from '../src/lib/event.js';
 import { buildPayload as metaPayload } from '../src/destinations/meta.js';
 import { buildPayload as ga4Payload } from '../src/destinations/ga4.js';
@@ -20,7 +20,23 @@ test('email is trimmed and lowercased before hashing', () => {
 
 test('phone keeps digits only and drops leading zeros', () => {
   assert.equal(hashField('ph', '+421 903 123 456'), sha('421903123456'));
-  assert.equal(hashField('ph', '0903/123-456'), sha('903123456'));
+  assert.equal(hashField('ph', '0903/123-456'), sha('903123456'), 'no country: nothing to prefix');
+});
+
+test('a national phone number gets its country code, as Meta matches it', () => {
+  const cases = [
+    ['0905 123 456', 'SK', '421905123456'],
+    ['905123456', 'sk', '421905123456'],
+    ['421905123456', 'SK', '421905123456'],
+    ['00421 905 123 456', 'CZ', '421905123456'],
+    ['+421 0905 123 456', 'SK', '421905123456'],
+    ['603 123 456', 'CZ', '420603123456'],
+    ['06 30 123 4567', 'HU', '36301234567'],
+    ['+36 06 30 123 4567', null, '36301234567'],
+    ['06 1234 5678', 'IT', '390612345678'],
+  ];
+  for (const [input, country, expected] of cases) assert.equal(phoneDigits(input, country), expected, input);
+  assert.deepEqual(buildUserData({ ph: '0905 123 456', country: 'SK' }).ph, [sha('421905123456')]);
 });
 
 test('already hashed values pass through untouched', () => {

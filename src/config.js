@@ -11,7 +11,7 @@ export const config = {
   workerIntervalMs: Number(env.WORKER_INTERVAL_MS || 2000),
   retentionDays: Number(env.RETENTION_DAYS || 30),
   // Meta bumps this roughly twice a year; changing it here changes it for every tenant.
-  metaApiVersion: env.META_API_VERSION || 'v21.0',
+  metaApiVersion: env.META_API_VERSION || 'v26.0',
 };
 
 /**

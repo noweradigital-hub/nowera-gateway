@@ -88,7 +88,15 @@ export async function requeueStale(olderThanMinutes = 10) {
   return rowCount;
 }
 
-export async function tick() {
+/** Deliveries since the last summary line, per destination kind. */
+const tally = new Map();
+function count(kind, outcome) {
+  const t = tally.get(kind) || { sent: 0, failed: 0 };
+  t[outcome] += 1;
+  tally.set(kind, t);
+}
+
+export async function tick(log) {
   const rows = await claimBatch(config.batchSize);
   if (!rows.length) return 0;
 
@@ -108,11 +116,17 @@ export async function tick() {
       const result = await driverFor(dest.kind).send(row.payload, dest.settings || {});
       if (result.ok) {
         await query(`UPDATE events SET status = 'sent', sent_at = now(), last_error = NULL WHERE id = $1`, [row.id]);
+        count(dest.kind, 'sent');
       } else {
         await markFailed(row, result.error, result.retryable);
+        count(dest.kind, 'failed');
+        // The destination's own error text: codes and messages, no customer data.
+        log?.warn({ kind: dest.kind, event: row.payload?.event_name, attempt: row.attempts,
+          error: String(result.error).slice(0, 300) }, 'delivery failed');
       }
     } catch (err) {
       await markFailed(row, `worker: ${err.message}`, true);
+      count(dest.kind, 'failed');
     }
   }));
 
@@ -130,7 +144,7 @@ export function startWorker(log) {
     if (running) return; // never overlap ticks
     running = true;
     try {
-      const n = await tick();
+      const n = await tick(log);
       if (n) log.debug({ sent: n }, 'worker tick');
     } catch (err) {
       log.error({ err }, 'worker tick failed');
@@ -138,6 +152,13 @@ export function startWorker(log) {
       running = false;
     }
   }, config.workerIntervalMs);
+
+  // One line every ten minutes says delivery works, without logging each event.
+  const summary = setInterval(() => {
+    if (!tally.size) return;
+    log.info({ deliveries: Object.fromEntries(tally) }, 'deliveries in the last 10 minutes');
+    tally.clear();
+  }, 600_000);
 
   const stale = setInterval(() => {
     requeueStale(10).catch((err) => log.error({ err }, 'stale requeue failed'));
@@ -156,5 +177,5 @@ export function startWorker(log) {
     }
   }, 3600_000);
 
-  return () => { clearInterval(timer); clearInterval(stale); clearInterval(retention); };
+  return () => { clearInterval(timer); clearInterval(summary); clearInterval(stale); clearInterval(retention); };
 }

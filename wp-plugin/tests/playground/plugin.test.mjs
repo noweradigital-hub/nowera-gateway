@@ -402,8 +402,33 @@ test('a login stores the account billing identity', async () => {
   const ud = storedFrom(res);
   assert.ok(ud, 'cookie set on login');
   assert.equal(ud.em, sha('fakturacia@example.com'), 'billing email wins over the account email');
-  assert.equal(ud.ph, sha('903123456'));
+  assert.equal(ud.ph, sha('421903123456'), 'national number, shop country SK');
   assert.equal(ud.fn, sha('ján'));
+});
+
+test('phone numbers get the country code Meta matches them by', async () => {
+  const cases = [
+    ['0905 123 456', 'SK', '421905123456'],
+    ['905123456', 'SK', '421905123456'],
+    ['421905123456', 'SK', '421905123456'],
+    ['+421 0905 123 456', 'SK', '421905123456'],
+    ['00420 603 123 456', 'SK', '420603123456'],
+    ['603 123 456', 'CZ', '420603123456'],
+    ['06 30 123 4567', 'HU', '36301234567'],
+    ['0905 123 456', null, '421905123456'],
+  ];
+  const got = await json(`/nwr-test/phones.php?cases=${encodeURIComponent(JSON.stringify(cases))}`);
+  assert.deepEqual(got, cases.map((c) => c[2]), 'no country: the shop country (SK) is assumed');
+});
+
+test('a signed-in customer: server events add the billing phone and address', async () => {
+  const { sent } = await fire('add_to_cart', '', '&as_user=1');
+  const u = sent[0].body.user_data;
+  assert.equal(u.em, sha('zakaznik@example.com'), 'the account e-mail wins');
+  assert.equal(u.ph, sha('421903123456'));
+  assert.equal(u.ct, sha('žilina'));
+  assert.equal(u.zp, sha('01001'));
+  assert.equal(u.external_id, sha(String(ids.user)));
 });
 
 test('a returning guest: server events carry the stored identity, only with marketing consent', async () => {

@@ -10,6 +10,7 @@
  *   &ref=<url>   the request's HTTP referer;  &ajax=1  pretend it is an AJAX call
  *   &email=<address>&prior=<status>  purchase: buyer email, and an earlier order in that status
  *   ?event=paid_no_return|paid_with_return  checkout, then the gateway confirms the payment
+ *   &as_user=1   act as the signed-in test customer
  */
 require __DIR__ . '/_bootstrap.php';
 delete_option( 'nwr_test_captured' );
@@ -43,6 +44,18 @@ if ( ! empty( $_GET['ajax'] ) ) {
 
 $ids = get_option( 'nwr_test_ids' );
 $event = sanitize_key( $_GET['event'] ?? '' );
+
+// &as_user=1: the request comes from the signed-in test customer, whose billing
+// details hold a national phone number and an address.
+if ( ! empty( $_GET['as_user'] ) ) {
+	wp_set_current_user( $ids['user'] );
+	$customer = new WC_Customer( $ids['user'] );
+	$customer->set_billing_phone( '0903 123 456' );
+	$customer->set_billing_city( 'Žilina' );
+	$customer->set_billing_postcode( '010 01' );
+	$customer->save();
+	WC()->customer = $customer;
+}
 
 if ( ! did_action( 'woocommerce_load_cart_from_session' ) && function_exists( 'wc_load_cart' ) ) {
 	wc_load_cart();

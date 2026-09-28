@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.8.0
+ * Version:      0.8.1
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -16,6 +16,20 @@ const NOWERA_CAPI_OPTION = 'nowera_capi_settings';
 
 /** Contact fields kept, hashed, in the _nwr_ud cookie for returning customers. */
 const NOWERA_CAPI_STORED_KEYS = array( 'em', 'ph', 'fn', 'ln', 'ct', 'st', 'zp', 'country' );
+
+/**
+ * Calling codes for the countries our shops sell to. Meta matches a phone number
+ * only in its full international form, so one typed the national way
+ * (0905 123 456) needs the country's code in front of it.
+ */
+const NOWERA_CAPI_CALLING_CODES = array(
+	'SK' => '421', 'CZ' => '420', 'PL' => '48', 'HU' => '36', 'AT' => '43', 'DE' => '49',
+	'CH' => '41', 'SI' => '386', 'HR' => '385', 'RO' => '40', 'UA' => '380', 'IT' => '39',
+	'FR' => '33', 'GB' => '44', 'IE' => '353', 'NL' => '31', 'BE' => '32', 'ES' => '34',
+);
+
+/** What a national number starts with and the international form drops. Default '0'. */
+const NOWERA_CAPI_TRUNK_PREFIXES = array( 'HU' => '06', 'IT' => '', 'ES' => '' );
 
 /* -------------------------------------------------------------------------
  * Settings
@@ -151,8 +165,9 @@ add_action( 'wp_head', function () {
 	// identity reaches Meta through the server leg at checkout instead.
 	if ( is_user_logged_in() ) {
 		$identity = array();
-		foreach ( nowera_capi_current_user() as $key => $value ) {
-			$digest = nowera_capi_hash( $key, $value );
+		$current  = nowera_capi_current_user();
+		foreach ( $current as $key => $value ) {
+			$digest = nowera_capi_hash( $key, $value, $current['country'] ?? null );
 			if ( $digest !== null ) {
 				$identity[ $key ] = $digest;
 			}
@@ -330,7 +345,7 @@ function nowera_capi_page_context(): ?array {
  * Meta's normalization rules, mirrored from the gateway's hash.js so a value
  * hashed here produces the same digest as one hashed there.
  */
-function nowera_capi_hash( string $key, $value ): ?string {
+function nowera_capi_hash( string $key, $value, ?string $country = null ): ?string {
 	if ( $value === null || $value === '' ) {
 		return null;
 	}
@@ -345,7 +360,7 @@ function nowera_capi_hash( string $key, $value ): ?string {
 			$normalized = $lower;
 			break;
 		case 'ph':
-			$normalized = ltrim( preg_replace( '/\D/', '', $value ), '0' );
+			$normalized = nowera_capi_phone_digits( $value, $country );
 			break;
 		case 'fn':
 		case 'ln':
@@ -366,6 +381,55 @@ function nowera_capi_hash( string $key, $value ): ?string {
 	}
 
 	return $normalized === '' ? null : hash( 'sha256', $normalized );
+}
+
+/**
+ * A phone number as Meta keys it: digits only, country code first, no plus and
+ * no trunk prefix. $country is the ISO code the number belongs to (the billing
+ * country); without one the shop's own country is assumed.
+ */
+function nowera_capi_phone_digits( string $value, ?string $country ): string {
+	$digits = preg_replace( '/\D/', '', $value );
+	if ( '' === $digits ) {
+		return '';
+	}
+
+	// Written internationally: +421…, 00421…, or the common +421 0905… slip.
+	if ( str_starts_with( ltrim( $value ), '+' ) || str_starts_with( $digits, '00' ) ) {
+		$digits = ltrim( $digits, '0' );
+		$codes  = NOWERA_CAPI_CALLING_CODES;
+		uasort( $codes, fn( $a, $b ) => strlen( $b ) <=> strlen( $a ) );
+		foreach ( $codes as $iso => $code ) {
+			if ( str_starts_with( $digits, $code ) ) {
+				$trunk = NOWERA_CAPI_TRUNK_PREFIXES[ $iso ] ?? '0';
+				$rest  = substr( $digits, strlen( $code ) );
+				if ( '' !== $trunk && str_starts_with( $rest, $trunk ) ) {
+					$digits = $code . substr( $rest, strlen( $trunk ) );
+				}
+				break;
+			}
+		}
+		return $digits;
+	}
+
+	$country = strtoupper( (string) $country );
+	if ( ! preg_match( '/^[A-Z]{2}$/', $country ) ) {
+		$country = function_exists( 'WC' ) && WC()->countries ? (string) WC()->countries->get_base_country() : '';
+	}
+	$code = NOWERA_CAPI_CALLING_CODES[ $country ] ?? null;
+	if ( null === $code ) {
+		return ltrim( $digits, '0' ); // a country we have no rule for
+	}
+
+	// Typed with the country code but without the plus: 421905123456.
+	if ( str_starts_with( $digits, $code ) && strlen( $digits ) >= strlen( $code ) + 8 ) {
+		return $digits;
+	}
+	$trunk = NOWERA_CAPI_TRUNK_PREFIXES[ $country ] ?? '0';
+	if ( '' !== $trunk && str_starts_with( $digits, $trunk ) ) {
+		$digits = substr( $digits, strlen( $trunk ) );
+	}
+	return $code . $digits;
 }
 
 /**
@@ -436,7 +500,7 @@ function nowera_capi_remember_user( array $raw ): void {
 	}
 	$hashed = array();
 	foreach ( NOWERA_CAPI_STORED_KEYS as $key ) {
-		$digest = isset( $raw[ $key ] ) ? nowera_capi_hash( $key, $raw[ $key ] ) : null;
+		$digest = isset( $raw[ $key ] ) ? nowera_capi_hash( $key, $raw[ $key ], $raw['country'] ?? null ) : null;
 		if ( $digest !== null ) {
 			$hashed[ $key ] = $digest;
 		}
@@ -689,7 +753,7 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 
 	$hashed = array();
 	foreach ( $user as $key => $value ) {
-		$digest = nowera_capi_hash( $key, $value );
+		$digest = nowera_capi_hash( $key, $value, $user['country'] ?? null );
 		if ( $digest !== null ) {
 			$hashed[ $key ] = $digest;
 		}
@@ -995,17 +1059,9 @@ add_action( 'woocommerce_before_checkout_form', function () {
 function nowera_capi_current_user(): array {
 	$data = array();
 
-	if ( is_user_logged_in() ) {
-		$user = wp_get_current_user();
-		$data = array(
-			'em'          => $user->user_email,
-			'fn'          => $user->first_name,
-			'ln'          => $user->last_name,
-			'external_id' => (string) $user->ID,
-		);
-	} elseif ( function_exists( 'WC' ) && WC()->customer ) {
+	if ( function_exists( 'WC' ) && WC()->customer ) {
 		$customer = WC()->customer;
-		$data = array(
+		$data = array_filter( array(
 			'em'      => $customer->get_billing_email(),
 			'ph'      => $customer->get_billing_phone(),
 			'fn'      => $customer->get_billing_first_name(),
@@ -1013,7 +1069,19 @@ function nowera_capi_current_user(): array {
 			'ct'      => $customer->get_billing_city(),
 			'zp'      => $customer->get_billing_postcode(),
 			'country' => $customer->get_billing_country(),
-		);
+		) );
+	}
+
+	// A signed-in customer: the account's own e-mail and name win, the billing
+	// details fill in the phone and address the account does not hold.
+	if ( is_user_logged_in() ) {
+		$user = wp_get_current_user();
+		$data = array_merge( $data, array_filter( array(
+			'em'          => $user->user_email,
+			'fn'          => $user->first_name,
+			'ln'          => $user->last_name,
+			'external_id' => (string) $user->ID,
+		) ) );
 	}
 
 	// A returning customer: what this session knows wins, the stored identity
