@@ -27,6 +27,14 @@ import {
   TABS, destinationsTab, installTab, overviewTab, qualityTab, settingsTab, tenantHeader,
 } from '../views/tenant.js';
 import { eventBrowser } from '../views/events.js';
+import {
+  RULES, alertHistory, alertSettings, openAlertCount, saveAlertSettings, testWebhook, validWebhook,
+} from '../lib/alerts.js';
+import { alertsPage } from '../views/alerts.js';
+import { newTotpSecret, otpauthUrl, verifyTotp } from '../lib/totp.js';
+import {
+  invitedPage, twoFactorCard, twoFactorLoginPage, twoFactorSetupPage, usersPage,
+} from '../views/users.js';
 
 /** A tenant's signing key: 256 random bits, shown once and pasted into the plugin. */
 const newIngestKey = () => randomBytes(32).toString('hex');
@@ -70,6 +78,20 @@ function cookieOptions() {
   };
 }
 
+// Signed in with the password, waiting for the authenticator code. In memory:
+// a restart simply asks for the password again.
+const PENDING_COOKIE = 'nwr_2fa';
+const pendingLogins = new Map(); // token -> { userId, exp, tries }
+const PENDING_MS = 5 * 60_000;
+
+/** Remember who changed what; never lets a logging failure break the action. */
+async function audit(req, action, target = null) {
+  try {
+    await query('INSERT INTO admin_audit (user_id, email, action, target) VALUES ($1, $2, $3, $4)',
+      [req.adminUser?.id ?? null, req.adminUser?.email ?? null, action, target ? String(target).slice(0, 200) : null]);
+  } catch { /* the change itself already happened */ }
+}
+
 const redirect = (reply, to, msg, type = 'ok') =>
   reply.redirect(`${to}${to.includes('?') ? '&' : '?'}m=${encodeURIComponent(msg)}&t=${type}`, 303);
 
@@ -104,6 +126,8 @@ export default async function adminRoutes(app) {
     const user = await getSessionUser(req.cookies?.[SESSION_COOKIE]);
     if (!user) return reply.redirect('/admin/login', 303);
     req.adminUser = user;
+    // The sidebar shows how many problems are open, on every page.
+    if (req.method === 'GET') req.openAlerts = await openAlertCount().catch(() => 0);
   });
 
   // The bare domain is where someone lands when they type the host by hand.
@@ -113,7 +137,7 @@ export default async function adminRoutes(app) {
 
   app.get('/admin/login', async (req, reply) =>
     reply.type('text/html').send(page({
-      title: 'Prihlásenie',
+      alerts: req.openAlerts, title: 'Prihlásenie',
       body: loginPage(),
       flash: flashFrom(req.query),
     })));
@@ -133,9 +157,56 @@ export default async function adminRoutes(app) {
       return redirect(reply, '/admin/login', 'Nesprávny e-mail alebo heslo.', 'err');
     }
     loginByEmail.reset(address);
-    const { token } = await createSession(user.id);
+    const full = await one('SELECT totp_enabled FROM admin_users WHERE id = $1', [user.id]);
+    if (full?.totp_enabled) {
+      const pending = randomBytes(24).toString('hex');
+      pendingLogins.set(pending, { userId: user.id, exp: Date.now() + PENDING_MS, tries: 0 });
+      reply.setCookie(PENDING_COOKIE, pending, { ...cookieOptions(), maxAge: PENDING_MS / 1000 });
+      return reply.redirect('/admin/login/2fa', 303);
+    }
+    return startSession(reply, user.id);
+  });
+
+  async function startSession(reply, userId) {
+    const { token } = await createSession(userId);
+    await query('UPDATE admin_users SET last_login_at = now() WHERE id = $1', [userId]);
     reply.setCookie(SESSION_COOKIE, token, cookieOptions());
     return reply.redirect('/admin', 303);
+  }
+
+  const pendingFrom = (req) => {
+    const token = req.cookies?.[PENDING_COOKIE];
+    const p = token && pendingLogins.get(token);
+    if (!p || p.exp < Date.now()) {
+      if (token) pendingLogins.delete(token);
+      return null;
+    }
+    return { token, ...p };
+  };
+
+  app.get('/admin/login/2fa', async (req, reply) => {
+    if (!pendingFrom(req)) return redirect(reply, '/admin/login', 'Prihlásenie vypršalo, zadajte heslo znova.', 'err');
+    return reply.type('text/html').send(page({ title: 'Overenie', body: twoFactorLoginPage(), flash: flashFrom(req.query) }));
+  });
+
+  app.post('/admin/login/2fa', async (req, reply) => {
+    const p = pendingFrom(req);
+    if (!p) return redirect(reply, '/admin/login', 'Prihlásenie vypršalo, zadajte heslo znova.', 'err');
+    const user = await one('SELECT id, totp_secret, totp_last_step FROM admin_users WHERE id = $1 AND totp_enabled', [p.userId]);
+    const step = user && verifyTotp(user.totp_secret, req.body?.code, { lastStep: Number(user.totp_last_step) });
+    if (!step) {
+      const tries = p.tries + 1;
+      if (tries >= 5) {
+        pendingLogins.delete(p.token);
+        return redirect(reply, '/admin/login', 'Príliš veľa nesprávnych kódov. Prihláste sa znova.', 'err');
+      }
+      pendingLogins.set(p.token, { userId: p.userId, exp: p.exp, tries });
+      return redirect(reply, '/admin/login/2fa', 'Kód nesedí. Skúste aktuálny kód z aplikácie.', 'err');
+    }
+    pendingLogins.delete(p.token);
+    reply.clearCookie(PENDING_COOKIE, { path: '/' });
+    await query('UPDATE admin_users SET totp_last_step = $2 WHERE id = $1', [user.id, step]);
+    return startSession(reply, user.id);
   });
 
   app.post('/admin/logout', async (req, reply) => {
@@ -144,11 +215,75 @@ export default async function adminRoutes(app) {
     return reply.redirect('/admin/login', 303);
   });
 
-  app.get('/admin/account', async (req, reply) =>
-    reply.type('text/html').send(page({
-      title: 'Môj účet', user: req.adminUser, flash: flashFrom(req.query),
-      body: accountPage(req.adminUser, MIN_PASSWORD_LENGTH),
-    })));
+  app.get('/admin/account', async (req, reply) => {
+    const me = await one('SELECT id, email, totp_enabled FROM admin_users WHERE id = $1', [req.adminUser.id]);
+    return reply.type('text/html').send(page({
+      alerts: req.openAlerts, title: 'Môj účet', user: req.adminUser, flash: flashFrom(req.query), nav: 'account',
+      body: accountPage(req.adminUser, MIN_PASSWORD_LENGTH) + `<div style="margin-top:14px">${twoFactorCard(me)}</div>`,
+    }));
+  });
+
+  app.post('/admin/account/2fa/start', async (req, reply) => {
+    const secret = newTotpSecret();
+    await query('UPDATE admin_users SET totp_pending = $2 WHERE id = $1', [req.adminUser.id, secret]);
+    return reply.type('text/html').send(page({
+      title: 'Dvojfaktorové overenie', user: req.adminUser, nav: 'account',
+      body: twoFactorSetupPage(secret, otpauthUrl(secret, req.adminUser.email)),
+    }));
+  });
+
+  app.post('/admin/account/2fa/confirm', async (req, reply) => {
+    const me = await one('SELECT totp_pending FROM admin_users WHERE id = $1', [req.adminUser.id]);
+    const step = me?.totp_pending && verifyTotp(me.totp_pending, req.body?.code);
+    if (!step) return redirect(reply, '/admin/account', 'Kód nesedel, 2FA nie je zapnuté. Skúste to znova.', 'err');
+    await query(
+      `UPDATE admin_users SET totp_secret = totp_pending, totp_pending = NULL, totp_enabled = TRUE, totp_last_step = $2
+        WHERE id = $1`, [req.adminUser.id, step]);
+    await audit(req, 'account.2fa_on');
+    return redirect(reply, '/admin/account', 'Dvojfaktorové overenie je zapnuté.');
+  });
+
+  app.post('/admin/account/2fa/disable', async (req, reply) => {
+    const me = await one('SELECT password_hash, totp_secret, totp_last_step FROM admin_users WHERE id = $1', [req.adminUser.id]);
+    const passwordOk = me && await verifyPassword(req.body?.password || '', me.password_hash);
+    const step = passwordOk && verifyTotp(me.totp_secret, req.body?.code, { lastStep: Number(me.totp_last_step) });
+    if (!step) return redirect(reply, '/admin/account', 'Heslo alebo kód nesedí.', 'err');
+    await query(`UPDATE admin_users SET totp_secret = NULL, totp_enabled = FALSE, totp_pending = NULL WHERE id = $1`, [req.adminUser.id]);
+    await audit(req, 'account.2fa_off');
+    return redirect(reply, '/admin/account', 'Dvojfaktorové overenie je vypnuté.');
+  });
+
+  app.get('/admin/pouzivatelia', async (req, reply) => {
+    const users = await many('SELECT id, email, totp_enabled, last_login_at, created_at FROM admin_users ORDER BY email');
+    const log = await many('SELECT at, email, action, target FROM admin_audit ORDER BY id DESC LIMIT 100');
+    return reply.type('text/html').send(page({
+      alerts: req.openAlerts, title: 'Používatelia', user: req.adminUser, flash: flashFrom(req.query), nav: 'pouzivatelia',
+      body: usersPage({ users, audit: log, me: req.adminUser }),
+    }));
+  });
+
+  app.post('/admin/pouzivatelia', async (req, reply) => {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return redirect(reply, '/admin/pouzivatelia', 'Zadajte platný e-mail.', 'err');
+    const password = randomBytes(12).toString('base64url');
+    try {
+      await query('INSERT INTO admin_users (email, password_hash) VALUES ($1, $2)', [email, await hashPassword(password)]);
+    } catch (err) {
+      return redirect(reply, '/admin/pouzivatelia', err.code === '23505' ? 'Tento e-mail už prístup má.' : err.message, 'err');
+    }
+    await audit(req, 'user.invite', email);
+    return reply.type('text/html').send(page({
+      title: 'Používatelia', user: req.adminUser, nav: 'pouzivatelia', body: invitedPage(email, password),
+    }));
+  });
+
+  app.post('/admin/pouzivatelia/:id/delete', async (req, reply) => {
+    const id = idOf(req.params.id);
+    if (!id || id === req.adminUser.id) return redirect(reply, '/admin/pouzivatelia', 'Seba odobrať nemôžete.', 'err');
+    const row = await one('DELETE FROM admin_users WHERE id = $1 RETURNING email', [id]);
+    if (row) await audit(req, 'user.remove', row.email);
+    return redirect(reply, '/admin/pouzivatelia', row ? 'Prístup odobraný.' : 'Používateľ neexistuje.', row ? 'ok' : 'err');
+  });
 
   app.post('/admin/account', async (req, reply) => {
     const b = req.body || {};
@@ -165,6 +300,7 @@ export default async function adminRoutes(app) {
     if (problem) return redirect(reply, '/admin/account', problem, 'err');
 
     const dropped = await changePassword(req.adminUser.id, b.new_password, token);
+    await audit(req, 'account.password');
     const note = dropped
       ? ` Odhlásených ostatných prihlásení: ${dropped}.`
       : '';
@@ -174,14 +310,14 @@ export default async function adminRoutes(app) {
   app.get('/admin', async (req, reply) => {
     const data = await overview();
     return reply.type('text/html').send(page({
-      title: 'Prehľad', user: req.adminUser, flash: flashFrom(req.query), nav: 'prehlad',
+      alerts: req.openAlerts, title: 'Prehľad', user: req.adminUser, flash: flashFrom(req.query), nav: 'prehlad',
       body: overviewPage(data),
     }));
   });
 
   app.get('/admin/tenants/new', async (req, reply) =>
     reply.type('text/html').send(page({
-      title: 'Nový klient', user: req.adminUser, flash: flashFrom(req.query),
+      alerts: req.openAlerts, title: 'Nový klient', user: req.adminUser, flash: flashFrom(req.query),
       body: newTenantPage(),
     })));
 
@@ -206,8 +342,9 @@ export default async function adminRoutes(app) {
          consent.mode, consent.prefix, normalizeKeepPath(b.keep_path), key, cleanEventNames(b.server_only_events)],
       );
       invalidateTenantCache();
+      await audit(req, 'tenant.create', row.name);
       return reply.type('text/html').send(page({
-        title: `${row.name} · kľúč`, user: req.adminUser,
+        alerts: req.openAlerts, title: `${row.name} · kľúč`, user: req.adminUser,
         flash: { text: 'Klient vytvorený. Skopírujte si kľúč pre plugin, potom pokračujte na inštaláciu.', type: 'ok' },
         body: ingestKeyPage(row, key, { created: true }),
       }));
@@ -244,7 +381,7 @@ export default async function adminRoutes(app) {
       body = settingsTab(tenant);
     }
     return reply.type('text/html').send(page({
-      title: tenant.name, user: req.adminUser, flash: flashFrom(req.query),
+      alerts: req.openAlerts, title: tenant.name, user: req.adminUser, flash: flashFrom(req.query),
       body: tenantHeader(tenant, destinations, health, tab) + body,
     }));
   }
@@ -280,6 +417,7 @@ export default async function adminRoutes(app) {
     );
     invalidateTenantCache();
     forgetChecks(id);
+    await audit(req, 'tenant.update', b.name);
     return redirect(reply, tabUrl(id, 'nastavenia'), 'Uložené.');
   });
 
@@ -299,8 +437,9 @@ export default async function adminRoutes(app) {
     if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
     forgetChecks(id);
+    await audit(req, 'tenant.key', row.name);
     return reply.type('text/html').send(page({
-      title: `${row.name} · kľúč`, user: req.adminUser, body: ingestKeyPage(row, key),
+      alerts: req.openAlerts, title: `${row.name} · kľúč`, user: req.adminUser, body: ingestKeyPage(row, key),
     }));
   });
 
@@ -309,6 +448,7 @@ export default async function adminRoutes(app) {
     if (!id) return reply.code(404).send('not found');
     await query('UPDATE tenants SET ingest_secret_prev = NULL WHERE id = $1', [id]);
     invalidateTenantCache();
+    await audit(req, 'tenant.key_revoke', `klient ${id}`);
     return redirect(reply, tabUrl(id, 'nastavenia'), 'Predchádzajúci kľúč zrušený.');
   });
 
@@ -334,6 +474,7 @@ export default async function adminRoutes(app) {
     );
     invalidateTenantCache();
     forgetChecks(id);
+    await audit(req, 'destination.add', `${kind} · klient ${id}`);
     return redirect(reply, tabUrl(id, 'destinacie'), 'Destinácia pridaná.');
   });
 
@@ -343,7 +484,7 @@ export default async function adminRoutes(app) {
     if (!dest) return reply.code(404).send('not found');
     const tenant = await one('SELECT id, name FROM tenants WHERE id = $1', [dest.tenant_id]);
     return reply.type('text/html').send(page({
-      title: `${tenant.name} · ${dest.kind}`, user: req.adminUser, flash: flashFrom(req.query),
+      alerts: req.openAlerts, title: `${tenant.name} · ${dest.kind}`, user: req.adminUser, flash: flashFrom(req.query),
       body: destinationForm(tenant, dest, SCHEMAS[dest.kind] || []),
     }));
   });
@@ -372,6 +513,7 @@ export default async function adminRoutes(app) {
     await query('UPDATE destinations SET settings = $2 WHERE id = $1', [dest.id, JSON.stringify(withTestWindow(dest.kind, settings))]);
     invalidateTenantCache();
     forgetChecks(dest.tenant_id);
+    await audit(req, 'destination.update', `${dest.kind} · klient ${dest.tenant_id}`);
     return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Destinácia upravená.');
   });
 
@@ -387,6 +529,7 @@ export default async function adminRoutes(app) {
       : { verify_error: result.error, verified_at: null };
     await query(`UPDATE destinations SET settings = jsonb_strip_nulls(settings || $2::jsonb) WHERE id = $1`, [id, JSON.stringify(patch)]);
     forgetChecks(dest.tenant_id);
+    await audit(req, 'destination.verify', `${result.ok ? 'ok' : result.error} · klient ${dest.tenant_id}`);
     return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'),
       result.ok ? `Token funguje${result.name ? ` (${result.name})` : ''}.` : `Token nefunguje: ${result.error}.`, result.ok ? 'ok' : 'err');
   });
@@ -402,6 +545,7 @@ export default async function adminRoutes(app) {
     const settings = withTestWindow('meta', { ...(dest.settings || {}), test_event_code: code });
     await query('UPDATE destinations SET settings = $2 WHERE id = $1', [id, JSON.stringify(settings)]);
     invalidateTenantCache();
+    await audit(req, 'destination.test_on', `klient ${dest.tenant_id}`);
     return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Testovací režim zapnutý na 60 minút.');
   });
 
@@ -412,6 +556,7 @@ export default async function adminRoutes(app) {
         WHERE id = $1 RETURNING tenant_id`, [id]);
     if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
+    await audit(req, 'destination.test_off', `klient ${row.tenant_id}`);
     return redirect(reply, tabUrl(row.tenant_id, 'destinacie'), 'Testovací režim ukončený. Eventy sa znova počítajú do kampaní.');
   });
 
@@ -420,6 +565,7 @@ export default async function adminRoutes(app) {
     const row = id && await one('UPDATE destinations SET active = NOT active WHERE id = $1 RETURNING tenant_id, active', [id]);
     if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
+    await audit(req, 'destination.toggle', `${row.active ? 'zapnutá' : 'vypnutá'} · klient ${row.tenant_id}`);
     return redirect(reply, tabUrl(row.tenant_id, 'destinacie'), row.active ? 'Destinácia zapnutá.' : 'Destinácia vypnutá.');
   });
 
@@ -429,6 +575,7 @@ export default async function adminRoutes(app) {
     if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
     forgetChecks(row.tenant_id);
+    await audit(req, 'destination.delete', `klient ${row.tenant_id}`);
     return redirect(reply, tabUrl(row.tenant_id, 'destinacie'), 'Destinácia zmazaná.');
   });
 
@@ -462,6 +609,7 @@ export default async function adminRoutes(app) {
       context: { ip: '127.0.0.1', userAgent: 'nowera-gateway-test/1.0' },
     };
     await enqueue(tenant.id, event, destinations);
+    await audit(req, 'tenant.test_event', tenant.name);
     return redirect(reply, tabUrl(id, 'eventy'), `Testovací event zaradený (${destinations.length} destinácií). Výsledok sa ukáže o pár sekúnd.`);
   });
 
@@ -473,7 +621,7 @@ export default async function adminRoutes(app) {
     const detail = e ? await eventDetail(e, null) : null;
     const tenants = await many('SELECT id, name FROM tenants ORDER BY name');
     return reply.type('text/html').send(page({
-      title: 'Eventy', user: req.adminUser, flash: flashFrom(req.query), nav: 'eventy',
+      alerts: req.openAlerts, title: 'Eventy', user: req.adminUser, flash: flashFrom(req.query), nav: 'eventy',
       body: `<div class="head"><div><h1>Eventy</h1><p class="meta"><span>všetci klienti</span><span>doručenia do Mety a GA4</span></p></div></div>`
         + eventBrowser({ base: '/admin/events', rows, names: await eventNames(tenantId), filters, detail, showTenant: true, tenants }),
     }));
@@ -484,7 +632,43 @@ export default async function adminRoutes(app) {
     const row = id && await one('SELECT tenant_id FROM events WHERE id = $1', [id]);
     if (!row) return reply.code(404).send('not found');
     const n = await retryEvent(id);
+    if (n) await audit(req, 'event.retry', `event ${id}`);
     return redirect(reply, `${tabUrl(row.tenant_id, 'eventy')}?e=${id}`,
       n ? 'Event je znova vo fronte, odošle sa o pár sekúnd.' : 'Tento event sa nedá poslať znova (nie je v stave chyba).', n ? 'ok' : 'err');
+  });
+
+  app.get('/admin/upozornenia', async (req, reply) => {
+    const [settings, history] = await Promise.all([alertSettings(), alertHistory()]);
+    return reply.type('text/html').send(page({
+      alerts: req.openAlerts, title: 'Upozornenia', user: req.adminUser, flash: flashFrom(req.query), nav: 'upozornenia',
+      body: alertsPage({ settings, history }),
+    }));
+  });
+
+  app.post('/admin/upozornenia', async (req, reply) => {
+    const b = req.body || {};
+    const current = await alertSettings();
+    const typed = String(b.webhook_url || '').trim();
+    let webhook = current.webhook_url;
+    if (b.clear_webhook === 'on') webhook = '';
+    else if (typed) {
+      webhook = validWebhook(typed);
+      if (!webhook) return redirect(reply, '/admin/upozornenia', 'Webhook musí byť adresa začínajúca https://.', 'err');
+    }
+    const rules = Object.fromEntries(Object.keys(RULES).map((k) => [k, b[`rule_${k}`] === 'on']));
+    await saveAlertSettings({ webhook_url: webhook, rules });
+    await audit(req, 'alerts.update');
+    return redirect(reply, '/admin/upozornenia', 'Uložené.');
+  });
+
+  app.post('/admin/upozornenia/test', async (req, reply) => {
+    const { webhook_url: url } = await alertSettings();
+    if (!url) return redirect(reply, '/admin/upozornenia', 'Najprv uložte webhook.', 'err');
+    try {
+      await testWebhook(url);
+      return redirect(reply, '/admin/upozornenia', 'Skúšobné upozornenie odoslané. Skontrolujte, či prišlo.');
+    } catch (err) {
+      return redirect(reply, '/admin/upozornenia', `Webhook neodpovedal: ${err.message}.`, 'err');
+    }
   });
 }

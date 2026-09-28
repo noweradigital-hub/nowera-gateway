@@ -5,6 +5,7 @@ import { assertConfig, config } from './config.js';
 import { pool } from './db.js';
 import { startWorker } from './lib/queue.js';
 import { startStatsWriter } from './lib/stats-writer.js';
+import { startAlerts } from './lib/alerts.js';
 import collectRoutes from './routes/collect.js';
 import adminRoutes from './routes/admin.js';
 
@@ -26,10 +27,12 @@ app.setNotFoundHandler((req, reply) => reply.code(404).type('text/plain').send('
 
 const stopWorker = startWorker(app.log);
 const stopStats = startStatsWriter(app.log);
+const stopAlerts = startAlerts(app.log);
 
 async function shutdown(signal) {
   app.log.info({ signal }, 'shutting down');
   stopWorker();
+  stopAlerts();
   await stopStats();
   await app.close();
   await pool.end();

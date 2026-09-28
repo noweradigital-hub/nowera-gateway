@@ -154,13 +154,15 @@ const FONTS = '<link rel="preconnect" href="https://fonts.googleapis.com"><link 
 const NAV = [
   { key: 'prehlad', href: '/admin', label: 'Prehľad' },
   { key: 'eventy', href: '/admin/events', label: 'Eventy' },
+  { key: 'upozornenia', href: '/admin/upozornenia', label: 'Upozornenia', count: 'alerts' },
 ];
 
 /**
  * The dashboard frame. Without a user (the sign-in page) there is no sidebar.
  * `nav` marks the active sidebar item.
  */
-export function page({ title, user, body, flash, nav = 'prehlad' }) {
+export function page({ title, user, body, flash, nav = 'prehlad', alerts = 0 }) {
+  const counts = { alerts };
   const flashHtml = flash ? `<div class="flash ${flash.type === 'err' ? 'err' : 'ok'}" role="status">${esc(flash.text)}</div>` : '';
   const head = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -171,7 +173,9 @@ export function page({ title, user, body, flash, nav = 'prehlad' }) {
 <aside class="side" aria-label="Navigácia">
   <a class="brand" href="/admin"><i>S</i><span>Nowera Gateway<small>${esc(process.env.ADMIN_HOST || 'signals')}</small></span></a>
   <nav class="nav"><div class="nav-label">Prevádzka</div>
-    ${NAV.map((n) => `<a href="${n.href}"${n.key === nav ? ' class="on"' : ''}>${n.label}</a>`).join('')}
+    ${NAV.map((n) => `<a href="${n.href}"${n.key === nav ? ' class="on"' : ''}>${n.label}${n.count && counts[n.count] ? ` <span class="count">${counts[n.count]}</span>` : ''}</a>`).join('')}
+    <div class="nav-label" style="margin-top:14px">Správa</div>
+    <a href="/admin/pouzivatelia"${nav === 'pouzivatelia' ? ' class="on"' : ''}>Používatelia</a>
   </nav>
   <div class="side-foot"><b>${esc(user.email)}</b>
     <span><a href="/admin/account">Môj účet</a> · <form class="inline" method="post" action="/admin/logout"><button class="linkbtn">Odhlásiť</button></form></span>

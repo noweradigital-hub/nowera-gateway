@@ -89,3 +89,15 @@ test('the event detail escapes what the site sent', () => {
   assert.ok(!html.includes('<b>r</b>'));
   assert.match(html, /\/admin\/events\/1\/retry/, 'a failed delivery can be sent again');
 });
+
+test('the alerts page never shows the stored webhook and escapes messages', async () => {
+  const { alertsPage } = await import('../src/views/alerts.js');
+  const html = alertsPage({
+    settings: { webhook_url: 'https://n8n.example.sk/webhook/SECRETPATH', rules: { token: true, failing: false } },
+    history: [{ id: 1, tenant_id: 2, tenant_name: 'K', rule: 'token', message: '<b>x</b>', opened_at: new Date(), resolved_at: null }],
+  });
+  assert.ok(!html.includes('SECRETPATH'));
+  assert.ok(!html.includes('<b>x</b>'));
+  assert.match(html, /name="rule_token" checked/);
+  assert.doesNotMatch(html, /name="rule_failing" checked/);
+});

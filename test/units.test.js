@@ -356,3 +356,26 @@ test('token check reads the token itself, not the dataset it may only write to',
   const bad = await verifyMeta({ dataset_id: '1', access_token: 'tok' }, fake(400, { error: { code: 190, message: 'x' } }));
   assert.deepEqual(bad, { ok: false, error: 'token je neplatný alebo expirovaný' });
 });
+
+test('alerts only go to an https webhook', async () => {
+  const { validWebhook } = await import('../src/lib/alerts.js');
+  assert.equal(validWebhook('https://n8n.nwra.sk/webhook/abc'), 'https://n8n.nwra.sk/webhook/abc');
+  assert.equal(validWebhook('http://n8n.nwra.sk/webhook/abc'), null);
+  assert.equal(validWebhook('javascript:alert(1)'), null);
+  assert.equal(validWebhook(''), null);
+});
+
+test('TOTP matches the RFC 6238 test vector and refuses a replayed code', async () => {
+  const { base32Encode, totpCode, verifyTotp, stepAt, otpauthUrl } = await import('../src/lib/totp.js');
+  const secret = base32Encode(Buffer.from('12345678901234567890'));
+  assert.equal(secret, 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ');
+  assert.equal(totpCode(secret, stepAt(59_000)), '287082');
+  assert.equal(totpCode(secret, stepAt(1111111109_000)), '081804');
+  const now = Date.now();
+  const code = totpCode(secret, stepAt(now));
+  const step = verifyTotp(secret, code, { now });
+  assert.equal(step, stepAt(now));
+  assert.equal(verifyTotp(secret, code, { now, lastStep: step }), null, 'the same code twice is refused');
+  assert.equal(verifyTotp(secret, '000000', { now }) === null || totpCode(secret, stepAt(now)) === '000000', true);
+  assert.match(otpauthUrl(secret, 'a@b.sk'), /^otpauth:\/\/totp\/Nowera%20Gateway:a%40b\.sk\?secret=GEZD/);
+});

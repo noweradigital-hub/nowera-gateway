@@ -119,6 +119,29 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS source TEXT;
 CREATE INDEX IF NOT EXISTS events_tenant_event_id_idx ON events(tenant_id, event_id);
 
+-- Dashboard-wide settings, e.g. where alerts go and which rules are on.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key        TEXT PRIMARY KEY,
+  value      JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- A problem the gateway noticed, open until the condition clears. One open row
+-- per tenant, rule and subject (e.g. which destination).
+CREATE TABLE IF NOT EXISTS alerts (
+  id                   BIGSERIAL PRIMARY KEY,
+  tenant_id            INTEGER REFERENCES tenants(id) ON DELETE CASCADE,
+  rule                 TEXT NOT NULL,
+  subject              TEXT NOT NULL DEFAULT '',
+  message              TEXT NOT NULL,
+  opened_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at          TIMESTAMPTZ,
+  notified_at          TIMESTAMPTZ,
+  resolved_notified_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS alerts_open_idx ON alerts(tenant_id, rule, subject) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS alerts_opened_idx ON alerts(opened_at DESC);
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id            SERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,
@@ -133,6 +156,25 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
+
+-- Two-factor sign-in (TOTP): the active secret, one being set up, and the last
+-- step used so a code cannot be replayed.
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_secret TEXT;
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_pending TEXT;
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+
+-- Who changed what in the dashboard.
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id      BIGSERIAL PRIMARY KEY,
+  at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  user_id INTEGER,
+  email   TEXT,
+  action  TEXT NOT NULL,
+  target  TEXT
+);
+CREATE INDEX IF NOT EXISTS admin_audit_at_idx ON admin_audit(at DESC);
 `;
 
 const r = await pool.query(SQL);
