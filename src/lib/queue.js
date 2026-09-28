@@ -18,15 +18,15 @@ export async function enqueue(tenantId, event, allDestinations) {
   const values = [];
   const params = [];
   destinations.forEach((dest, i) => {
-    const base = i * 6;
-    values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`);
+    const base = i * 7;
+    values.push(`($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7})`);
     params.push(
       tenantId, dest.id, event.event_name, event.event_id,
-      JSON.stringify(event), dedupeKeyFor(dest.kind, event),
+      JSON.stringify(event), dedupeKeyFor(dest.kind, event), event.source || null,
     );
   });
   const { rowCount } = await query(
-    `INSERT INTO events (tenant_id, destination_id, event_name, event_id, payload, dedupe_key)
+    `INSERT INTO events (tenant_id, destination_id, event_name, event_id, payload, dedupe_key, source)
      VALUES ${values.join(', ')}
      ON CONFLICT (destination_id, dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING`,
     params,
@@ -42,7 +42,7 @@ export async function enqueue(tenantId, event, allDestinations) {
 async function claimBatch(limit) {
   return many(
     `UPDATE events e
-        SET status = 'sending', attempts = e.attempts + 1
+        SET status = 'sending', attempts = e.attempts + 1, claimed_at = now()
        FROM (
          SELECT id FROM events
           WHERE status = 'pending' AND next_attempt_at <= now()
@@ -60,7 +60,7 @@ async function markFailed(row, error, retryable) {
   const attempts = row.attempts;
   if (!retryable || attempts >= MAX_ATTEMPTS) {
     await query(
-      `UPDATE events SET status = 'dead', last_error = $2, sent_at = NULL WHERE id = $1`,
+      `UPDATE events SET status = 'dead', last_error = $2, response = $2, sent_at = NULL WHERE id = $1`,
       [row.id, error],
     );
     return;
@@ -70,19 +70,24 @@ async function markFailed(row, error, retryable) {
     `UPDATE events
         SET status = 'pending',
             last_error = $2,
+            response = $2,
             next_attempt_at = now() + ($3 || ' seconds')::interval
       WHERE id = $1`,
     [row.id, error, String(delay)],
   );
 }
 
-/** Return events stranded in 'sending' by a crashed worker back to the queue. */
+/**
+ * Return events stranded in 'sending' by a crashed worker back to the queue.
+ * Counted from when a worker took the row, not from when the event arrived: a
+ * retried event is old, yet its current attempt may be seconds in flight.
+ */
 export async function requeueStale(olderThanMinutes = 10) {
   const { rowCount } = await query(
     `UPDATE events
         SET status = 'pending', next_attempt_at = now()
       WHERE status = 'sending'
-        AND created_at < now() - ($1 || ' minutes')::interval`,
+        AND COALESCE(claimed_at, created_at) < now() - ($1 || ' minutes')::interval`,
     [String(olderThanMinutes)],
   );
   return rowCount;
@@ -115,7 +120,8 @@ export async function tick(log) {
     try {
       const result = await driverFor(dest.kind).send(row.payload, dest.settings || {});
       if (result.ok) {
-        await query(`UPDATE events SET status = 'sent', sent_at = now(), last_error = NULL WHERE id = $1`, [row.id]);
+        await query(`UPDATE events SET status = 'sent', sent_at = now(), last_error = NULL, response = $2 WHERE id = $1`,
+          [row.id, result.response ? String(result.response).slice(0, 500) : null]);
         count(dest.kind, 'sent');
       } else {
         await markFailed(row, result.error, result.retryable);

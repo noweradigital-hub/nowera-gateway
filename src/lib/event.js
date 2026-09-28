@@ -1,4 +1,5 @@
 import { newEventId } from './ids.js';
+import { hashField } from './hash.js';
 
 const MAX_AGE_SECONDS = 7 * 86400; // Meta rejects events older than 7 days
 const EVENT_ID = /^[A-Za-z0-9._:-]{1,100}$/;
@@ -12,13 +13,23 @@ const PII_ALIASES = {
   city: 'ct', state: 'st', zip: 'zp', gender: 'ge', date_of_birth: 'db',
 };
 
+/**
+ * Contact details, hashed on arrival: what is stored in the queue and shown in
+ * the dashboard is never readable, whichever way a site sent it. Values that
+ * arrive hashed (the plugin and the loader send them so) pass through unchanged.
+ */
 function pickUser(raw = {}) {
-  const user = {};
+  const plain = {};
   for (const [alias, key] of Object.entries(PII_ALIASES)) {
-    if (raw[alias] !== undefined) user[key] = raw[alias];
+    if (raw[alias] !== undefined) plain[key] = raw[alias];
   }
   for (const key of PII_KEYS) {
-    if (raw[key] !== undefined) user[key] = raw[key];
+    if (raw[key] !== undefined) plain[key] = raw[key];
+  }
+  const user = {};
+  for (const [key, value] of Object.entries(plain)) {
+    const hashed = hashField(key, value, plain.country);
+    if (hashed) user[key] = hashed;
   }
   return user;
 }

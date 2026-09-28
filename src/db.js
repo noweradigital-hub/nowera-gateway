@@ -1,7 +1,7 @@
 import pg from 'pg';
 import { config } from './config.js';
 
-export const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 10 });
+export const pool = new pg.Pool({ connectionString: config.databaseUrl, max: Number(process.env.DB_POOL_MAX || 10) });
 
 // An idle client that errors — Postgres restarting, or dropping the connection —
 // emits 'error' on the pool. Without this listener Node treats it as an unhandled

@@ -4,6 +4,7 @@ import formbody from '@fastify/formbody';
 import { assertConfig, config } from './config.js';
 import { pool } from './db.js';
 import { startWorker } from './lib/queue.js';
+import { startStatsWriter } from './lib/stats-writer.js';
 import collectRoutes from './routes/collect.js';
 import adminRoutes from './routes/admin.js';
 
@@ -24,10 +25,12 @@ await app.register(adminRoutes);
 app.setNotFoundHandler((req, reply) => reply.code(404).type('text/plain').send('not found'));
 
 const stopWorker = startWorker(app.log);
+const stopStats = startStatsWriter(app.log);
 
 async function shutdown(signal) {
   app.log.info({ signal }, 'shutting down');
   stopWorker();
+  await stopStats();
   await app.close();
   await pool.end();
   process.exit(0);

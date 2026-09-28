@@ -14,14 +14,25 @@ import { newEventId } from '../lib/ids.js';
 import { page } from '../views/layout.js';
 import { normalizeConsent, normalizeKeepPath } from '../lib/consent.js';
 import {
-  accountPage, destinationForm, ingestKeyPage, tenantForm, tenantList, tenantDetail, eventLog, loginPage,
+  accountPage, destinationForm, ingestKeyPage, loginPage, newTenantPage,
 } from '../views/pages.js';
+import {
+  destinationStats, eventDetail, eventList, eventNames, healthOf, overview, quality, qualityFindings,
+  retryEvent, tenantOverview,
+} from '../lib/stats.js';
+import { forgetChecks, runChecks } from '../lib/checks.js';
+import { verifyMeta } from '../destinations/verify.js';
+import { overviewPage } from '../views/overview.js';
+import {
+  TABS, destinationsTab, installTab, overviewTab, qualityTab, settingsTab, tenantHeader,
+} from '../views/tenant.js';
+import { eventBrowser } from '../views/events.js';
 
 /** A tenant's signing key: 256 random bits, shown once and pasted into the plugin. */
 const newIngestKey = () => randomBytes(32).toString('hex');
 
 /** Event names typed into the form, as a clean comma-separated list. */
-const eventList = (value) => String(value || '')
+const cleanEventNames = (value) => String(value || '')
   .split(',').map((s) => s.trim()).filter((s) => /^[A-Za-z0-9_ ]{1,64}$/.test(s)).join(',');
 
 /** Saving a Meta test code (re)starts its hour; clearing it ends test mode. */
@@ -63,6 +74,23 @@ const redirect = (reply, to, msg, type = 'ok') =>
   reply.redirect(`${to}${to.includes('?') ? '&' : '?'}m=${encodeURIComponent(msg)}&t=${type}`, 303);
 
 const flashFrom = (q) => (q.m ? { text: q.m, type: q.t === 'err' ? 'err' : 'ok' } : null);
+
+/** A numeric id from the URL, or null so the route can answer 404. */
+const idOf = (v) => (/^\d{1,9}$/.test(String(v)) ? Number(v) : null);
+
+const tabUrl = (tenantId, tab) => (tab === 'prehlad' ? `/admin/tenants/${tenantId}` : `/admin/tenants/${tenantId}/${tab}`);
+
+/** Filters for the event browser, from the query string, each checked. */
+function eventFilters(q) {
+  return {
+    q: typeof q.q === 'string' ? q.q.slice(0, 100) : '',
+    name: /^[A-Za-z0-9_ ]{1,64}$/.test(q.name || '') ? q.name : '',
+    status: ['pending', 'sending', 'sent', 'dead'].includes(q.status) ? q.status : '',
+    source: ['browser', 'server'].includes(q.source) ? q.source : '',
+    period: ['24h', '7d', '30d'].includes(q.period) ? q.period : '24h',
+    tenant: idOf(q.tenant) ? String(idOf(q.tenant)) : '',
+  };
+}
 
 export default async function adminRoutes(app) {
   // Every admin route is scoped to the dashboard host. A tenant's collector
@@ -144,27 +172,17 @@ export default async function adminRoutes(app) {
   });
 
   app.get('/admin', async (req, reply) => {
-    const tenants = await many(`
-      SELECT t.*,
-             (SELECT count(*) FROM destinations d WHERE d.tenant_id = t.id AND d.active) AS destination_count,
-             (SELECT count(*) FROM events e WHERE e.tenant_id = t.id AND e.status = 'sent'
-                AND e.created_at > now() - interval '24 hours') AS sent_24h,
-             (SELECT count(*) FROM events e WHERE e.tenant_id = t.id AND e.status = 'dead'
-                AND e.created_at > now() - interval '24 hours') AS dead_24h,
-             EXISTS (SELECT 1 FROM destinations d WHERE d.tenant_id = t.id AND d.active
-                AND d.settings->>'test_event_code' <> ''
-                AND (d.settings->>'test_until')::timestamptz > now()) AS testing
-        FROM tenants t ORDER BY t.name`);
+    const data = await overview();
     return reply.type('text/html').send(page({
-      title: 'Klienti', user: req.adminUser, flash: flashFrom(req.query),
-      body: tenantList(tenants),
+      title: 'Prehľad', user: req.adminUser, flash: flashFrom(req.query), nav: 'prehlad',
+      body: overviewPage(data),
     }));
   });
 
   app.get('/admin/tenants/new', async (req, reply) =>
     reply.type('text/html').send(page({
       title: 'Nový klient', user: req.adminUser, flash: flashFrom(req.query),
-      body: tenantForm(null),
+      body: newTenantPage(),
     })));
 
   app.post('/admin/tenants', async (req, reply) => {
@@ -185,12 +203,12 @@ export default async function adminRoutes(app) {
          RETURNING id, name, collector_host`,
         [slug, String(b.name || slug).trim(), String(b.collector_host || '').trim().toLowerCase(),
          String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
-         consent.mode, consent.prefix, normalizeKeepPath(b.keep_path), key, eventList(b.server_only_events)],
+         consent.mode, consent.prefix, normalizeKeepPath(b.keep_path), key, cleanEventNames(b.server_only_events)],
       );
       invalidateTenantCache();
       return reply.type('text/html').send(page({
         title: `${row.name} · kľúč`, user: req.adminUser,
-        flash: { text: 'Klient vytvorený. Skopírujte si kľúč pre plugin, potom pridajte destináciu.', type: 'ok' },
+        flash: { text: 'Klient vytvorený. Skopírujte si kľúč pre plugin, potom pokračujte na inštaláciu.', type: 'ok' },
         body: ingestKeyPage(row, key, { created: true }),
       }));
     } catch (err) {
@@ -199,20 +217,55 @@ export default async function adminRoutes(app) {
     }
   });
 
-  app.get('/admin/tenants/:id', async (req, reply) => {
-    const tenant = await one('SELECT * FROM tenants WHERE id = $1', [req.params.id]);
-    if (!tenant) return reply.code(404).send('not found');
-    const destinations = await many('SELECT * FROM destinations WHERE tenant_id = $1 ORDER BY id', [tenant.id]);
-    const events = await many(
-      `SELECT id, event_name, status, attempts, last_error, created_at, sent_at, destination_id
-         FROM events WHERE tenant_id = $1 ORDER BY id DESC LIMIT 25`, [tenant.id]);
+  /** One tenant, one tab: /admin/tenants/:id and /admin/tenants/:id/<tab>. */
+  async function tenantTab(req, reply, tab) {
+    const id = idOf(req.params.id);
+    const tenant = id && await one('SELECT * FROM tenants WHERE id = $1', [id]);
+    if (!tenant) return reply.code(404).type('text/plain').send('not found');
+    const destinations = await destinationStats(id);
+    const health = healthOf(tenant, destinations);
+    let body;
+    if (tab === 'prehlad') {
+      body = overviewTab(tenant, await tenantOverview(id));
+    } else if (tab === 'kvalita') {
+      const rows = await quality(id);
+      body = qualityTab(rows, qualityFindings(rows));
+    } else if (tab === 'destinacie') {
+      body = destinationsTab(tenant, destinations, SCHEMAS, config.metaApiVersion);
+    } else if (tab === 'instalacia') {
+      body = installTab(tenant, await runChecks(tenant, destinations));
+    } else if (tab === 'eventy') {
+      const filters = eventFilters(req.query);
+      const rows = await eventList(id, filters);
+      const e = idOf(req.query.e);
+      const detail = e ? await eventDetail(e, id) : null;
+      body = eventBrowser({ base: tabUrl(id, 'eventy'), rows, names: await eventNames(id), filters, detail });
+    } else {
+      body = settingsTab(tenant);
+    }
     return reply.type('text/html').send(page({
       title: tenant.name, user: req.adminUser, flash: flashFrom(req.query),
-      body: tenantDetail(tenant, destinations, events, SCHEMAS),
+      body: tenantHeader(tenant, destinations, health, tab) + body,
     }));
+  }
+
+  app.get('/admin/tenants/:id', (req, reply) => tenantTab(req, reply, 'prehlad'));
+  app.get('/admin/tenants/:id/:tab', (req, reply) => {
+    const tab = TABS.find(([key]) => key === req.params.tab)?.[0];
+    if (!tab) return reply.code(404).type('text/plain').send('not found');
+    return tenantTab(req, reply, tab);
+  });
+
+  app.post('/admin/tenants/:id/checks', async (req, reply) => {
+    const id = idOf(req.params.id);
+    if (!id) return reply.code(404).send('not found');
+    forgetChecks(id);
+    return reply.redirect(tabUrl(id, 'instalacia'), 303);
   });
 
   app.post('/admin/tenants/:id', async (req, reply) => {
+    const id = idOf(req.params.id);
+    if (!id) return reply.code(404).send('not found');
     const b = req.body || {};
     const consent = normalizeConsent(b.consent_mode, b.consent_prefix);
     await query(
@@ -220,13 +273,14 @@ export default async function adminRoutes(app) {
               cookie_domain = $5, active = $6, consent_mode = $7, consent_prefix = $8,
               keep_path = $9, legacy_ingest = $10, server_only_events = $11
         WHERE id = $1`,
-      [req.params.id, String(b.name || '').trim(), String(b.collector_host || '').trim().toLowerCase(),
+      [id, String(b.name || '').trim(), String(b.collector_host || '').trim().toLowerCase(),
        String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
        b.active === 'on', consent.mode, consent.prefix, normalizeKeepPath(b.keep_path),
-       b.legacy_ingest === 'on', eventList(b.server_only_events)],
+       b.legacy_ingest === 'on', cleanEventNames(b.server_only_events)],
     );
     invalidateTenantCache();
-    return redirect(reply, `/admin/tenants/${req.params.id}`, 'Uložené.');
+    forgetChecks(id);
+    return redirect(reply, tabUrl(id, 'nastavenia'), 'Uložené.');
   });
 
   /**
@@ -235,49 +289,57 @@ export default async function adminRoutes(app) {
    * The key is shown once, on this response, and never put in a URL.
    */
   app.post('/admin/tenants/:id/key', async (req, reply) => {
+    const id = idOf(req.params.id);
     const key = newIngestKey();
-    const row = await one(
+    const row = id && await one(
       `UPDATE tenants SET ingest_secret_prev = ingest_secret, ingest_secret = $2
         WHERE id = $1 RETURNING id, name, collector_host`,
-      [req.params.id, key],
+      [id, key],
     );
     if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
+    forgetChecks(id);
     return reply.type('text/html').send(page({
       title: `${row.name} · kľúč`, user: req.adminUser, body: ingestKeyPage(row, key),
     }));
   });
 
   app.post('/admin/tenants/:id/key/revoke-previous', async (req, reply) => {
-    await query('UPDATE tenants SET ingest_secret_prev = NULL WHERE id = $1', [req.params.id]);
+    const id = idOf(req.params.id);
+    if (!id) return reply.code(404).send('not found');
+    await query('UPDATE tenants SET ingest_secret_prev = NULL WHERE id = $1', [id]);
     invalidateTenantCache();
-    return redirect(reply, `/admin/tenants/${req.params.id}`, 'Predchádzajúci kľúč zrušený.');
+    return redirect(reply, tabUrl(id, 'nastavenia'), 'Predchádzajúci kľúč zrušený.');
   });
 
   app.post('/admin/tenants/:id/destinations', async (req, reply) => {
+    const id = idOf(req.params.id);
+    if (!id) return reply.code(404).send('not found');
     const b = req.body || {};
     const kind = String(b.kind || '');
     const schema = SCHEMAS[kind];
-    if (!schema) return redirect(reply, `/admin/tenants/${req.params.id}`, 'Neznámy typ destinácie.', 'err');
+    if (!schema) return redirect(reply, tabUrl(id, 'destinacie'), 'Neznámy typ destinácie.', 'err');
 
     const settings = {};
     for (const field of schema) {
       const value = String(b[field.key] || '').trim();
       if (field.required && !value) {
-        return redirect(reply, `/admin/tenants/${req.params.id}`, `Chýba pole: ${field.label}`, 'err');
+        return redirect(reply, tabUrl(id, 'destinacie'), `Chýba pole: ${field.label}`, 'err');
       }
       if (value) settings[field.key] = value;
     }
     await query(
       'INSERT INTO destinations (tenant_id, kind, settings) VALUES ($1, $2, $3)',
-      [req.params.id, kind, JSON.stringify(withTestWindow(kind, settings))],
+      [id, kind, JSON.stringify(withTestWindow(kind, settings))],
     );
     invalidateTenantCache();
-    return redirect(reply, `/admin/tenants/${req.params.id}`, 'Destinácia pridaná.');
+    forgetChecks(id);
+    return redirect(reply, tabUrl(id, 'destinacie'), 'Destinácia pridaná.');
   });
 
   app.get('/admin/destinations/:id/edit', async (req, reply) => {
-    const dest = await one('SELECT * FROM destinations WHERE id = $1', [req.params.id]);
+    const id = idOf(req.params.id);
+    const dest = id && await one('SELECT * FROM destinations WHERE id = $1', [id]);
     if (!dest) return reply.code(404).send('not found');
     const tenant = await one('SELECT id, name FROM tenants WHERE id = $1', [dest.tenant_id]);
     return reply.type('text/html').send(page({
@@ -287,8 +349,9 @@ export default async function adminRoutes(app) {
   });
 
   app.post('/admin/destinations/:id', async (req, reply) => {
+    const id = idOf(req.params.id);
     const b = req.body || {};
-    const dest = await one('SELECT * FROM destinations WHERE id = $1', [req.params.id]);
+    const dest = id && await one('SELECT * FROM destinations WHERE id = $1', [id]);
     if (!dest) return reply.code(404).send('not found');
 
     const settings = { ...(dest.settings || {}) };
@@ -303,31 +366,70 @@ export default async function adminRoutes(app) {
         return redirect(reply, `/admin/destinations/${dest.id}/edit`, `Chýba pole: ${field.label}`, 'err');
       }
     }
+    // A changed token has not been checked yet.
+    if (b.access_token) { delete settings.verified_at; delete settings.verify_error; delete settings.verified_name; }
 
     await query('UPDATE destinations SET settings = $2 WHERE id = $1', [dest.id, JSON.stringify(withTestWindow(dest.kind, settings))]);
     invalidateTenantCache();
-    return redirect(reply, `/admin/tenants/${dest.tenant_id}`, 'Destinácia upravená.');
+    forgetChecks(dest.tenant_id);
+    return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Destinácia upravená.');
+  });
+
+  /** Ask Meta whether the stored token works, and remember the answer. */
+  app.post('/admin/destinations/:id/verify', async (req, reply) => {
+    const id = idOf(req.params.id);
+    const dest = id && await one('SELECT * FROM destinations WHERE id = $1', [id]);
+    if (!dest) return reply.code(404).send('not found');
+    if (dest.kind !== 'meta') return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Overiť sa dá len token Mety.', 'err');
+    const result = await verifyMeta(dest.settings);
+    const patch = result.ok
+      ? { verified_at: new Date().toISOString(), verified_name: result.name || null, verify_error: null }
+      : { verify_error: result.error, verified_at: null };
+    await query(`UPDATE destinations SET settings = jsonb_strip_nulls(settings || $2::jsonb) WHERE id = $1`, [id, JSON.stringify(patch)]);
+    forgetChecks(dest.tenant_id);
+    return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'),
+      result.ok ? `Token funguje${result.name ? ` (${result.name})` : ''}.` : `Token nefunguje: ${result.error}.`, result.ok ? 'ok' : 'err');
+  });
+
+  app.post('/admin/destinations/:id/test-on', async (req, reply) => {
+    const id = idOf(req.params.id);
+    const dest = id && await one('SELECT * FROM destinations WHERE id = $1', [id]);
+    if (!dest) return reply.code(404).send('not found');
+    const code = String(req.body?.test_event_code || '').trim();
+    if (dest.kind !== 'meta' || !/^[A-Za-z0-9_-]{1,64}$/.test(code)) {
+      return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Zadajte test event code z Events Managera.', 'err');
+    }
+    const settings = withTestWindow('meta', { ...(dest.settings || {}), test_event_code: code });
+    await query('UPDATE destinations SET settings = $2 WHERE id = $1', [id, JSON.stringify(settings)]);
+    invalidateTenantCache();
+    return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Testovací režim zapnutý na 60 minút.');
   });
 
   app.post('/admin/destinations/:id/test-off', async (req, reply) => {
-    const row = await one(
+    const id = idOf(req.params.id);
+    const row = id && await one(
       `UPDATE destinations SET settings = settings - 'test_event_code' - 'test_until'
-        WHERE id = $1 RETURNING tenant_id`, [req.params.id]);
+        WHERE id = $1 RETURNING tenant_id`, [id]);
     if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
-    return redirect(reply, `/admin/tenants/${row.tenant_id}`, 'Testovací režim ukončený. Eventy sa znova počítajú do kampaní.');
+    return redirect(reply, tabUrl(row.tenant_id, 'destinacie'), 'Testovací režim ukončený. Eventy sa znova počítajú do kampaní.');
   });
 
   app.post('/admin/destinations/:id/toggle', async (req, reply) => {
-    const row = await one('UPDATE destinations SET active = NOT active WHERE id = $1 RETURNING tenant_id, active', [req.params.id]);
+    const id = idOf(req.params.id);
+    const row = id && await one('UPDATE destinations SET active = NOT active WHERE id = $1 RETURNING tenant_id, active', [id]);
+    if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
-    return redirect(reply, `/admin/tenants/${row.tenant_id}`, row.active ? 'Destinácia zapnutá.' : 'Destinácia vypnutá.');
+    return redirect(reply, tabUrl(row.tenant_id, 'destinacie'), row.active ? 'Destinácia zapnutá.' : 'Destinácia vypnutá.');
   });
 
   app.post('/admin/destinations/:id/delete', async (req, reply) => {
-    const row = await one('DELETE FROM destinations WHERE id = $1 RETURNING tenant_id', [req.params.id]);
+    const id = idOf(req.params.id);
+    const row = id && await one('DELETE FROM destinations WHERE id = $1 RETURNING tenant_id', [id]);
+    if (!row) return reply.code(404).send('not found');
     invalidateTenantCache();
-    return redirect(reply, `/admin/tenants/${row.tenant_id}`, 'Destinácia zmazaná.');
+    forgetChecks(row.tenant_id);
+    return redirect(reply, tabUrl(row.tenant_id, 'destinacie'), 'Destinácia zmazaná.');
   });
 
   /**
@@ -336,14 +438,15 @@ export default async function adminRoutes(app) {
    * code is active, GA4 through the validation endpoint.
    */
   app.post('/admin/tenants/:id/test', async (req, reply) => {
-    const tenant = await one('SELECT * FROM tenants WHERE id = $1', [req.params.id]);
+    const id = idOf(req.params.id);
+    const tenant = id && await one('SELECT * FROM tenants WHERE id = $1', [id]);
     if (!tenant) return reply.code(404).send('not found');
     const destinations = await many('SELECT id, kind, settings FROM destinations WHERE tenant_id = $1 AND active', [tenant.id]);
     if (!destinations.length) {
-      return redirect(reply, `/admin/tenants/${tenant.id}`, 'Najprv pridajte aspoň jednu aktívnu destináciu.', 'err');
+      return redirect(reply, tabUrl(id, 'destinacie'), 'Najprv pridajte aspoň jednu aktívnu destináciu.', 'err');
     }
     if (destinations.some((d) => d.kind === 'meta' && !testModeActive(d.settings))) {
-      return redirect(reply, `/admin/tenants/${tenant.id}`,
+      return redirect(reply, tabUrl(id, 'destinacie'),
         'Najprv zapnite testovací režim: v destinácii Meta vyplňte Test event code z Events Managera.', 'err');
     }
     const event = {
@@ -353,32 +456,35 @@ export default async function adminRoutes(app) {
       event_time: Math.floor(Date.now() / 1000),
       event_source_url: `https://${tenant.collector_host}/`,
       action_source: 'website',
+      source: 'server',
       user: { em: 'test@example.com' },
       properties: { value: 1, currency: 'EUR' },
       context: { ip: '127.0.0.1', userAgent: 'nowera-gateway-test/1.0' },
     };
     await enqueue(tenant.id, event, destinations);
-    return redirect(reply, `/admin/tenants/${tenant.id}`, `Testovací event zaradený (${destinations.length} destinácií). Výsledok o pár sekúnd nižšie.`);
+    return redirect(reply, tabUrl(id, 'eventy'), `Testovací event zaradený (${destinations.length} destinácií). Výsledok sa ukáže o pár sekúnd.`);
   });
 
   app.get('/admin/events', async (req, reply) => {
-    const status = ['pending', 'sending', 'sent', 'dead'].includes(req.query.status) ? req.query.status : null;
-    const tenantId = req.query.tenant ? Number(req.query.tenant) : null;
-    const rows = await many(
-      `SELECT e.id, e.event_name, e.event_id, e.status, e.attempts, e.last_error, e.created_at,
-              t.name AS tenant_name, t.id AS tenant_id, d.kind
-         FROM events e
-         JOIN tenants t ON t.id = e.tenant_id
-         LEFT JOIN destinations d ON d.id = e.destination_id
-        WHERE ($1::text IS NULL OR e.status = $1)
-          AND ($2::int IS NULL OR e.tenant_id = $2)
-        ORDER BY e.id DESC LIMIT 150`,
-      [status, tenantId],
-    );
+    const filters = eventFilters(req.query);
+    const tenantId = filters.tenant ? Number(filters.tenant) : null;
+    const rows = await eventList(tenantId, filters);
+    const e = idOf(req.query.e);
+    const detail = e ? await eventDetail(e, null) : null;
     const tenants = await many('SELECT id, name FROM tenants ORDER BY name');
     return reply.type('text/html').send(page({
-      title: 'Eventy', user: req.adminUser, flash: flashFrom(req.query),
-      body: eventLog(rows, tenants, { status, tenantId }),
+      title: 'Eventy', user: req.adminUser, flash: flashFrom(req.query), nav: 'eventy',
+      body: `<div class="head"><div><h1>Eventy</h1><p class="meta"><span>všetci klienti</span><span>doručenia do Mety a GA4</span></p></div></div>`
+        + eventBrowser({ base: '/admin/events', rows, names: await eventNames(tenantId), filters, detail, showTenant: true, tenants }),
     }));
+  });
+
+  app.post('/admin/events/:id/retry', async (req, reply) => {
+    const id = idOf(req.params.id);
+    const row = id && await one('SELECT tenant_id FROM events WHERE id = $1', [id]);
+    if (!row) return reply.code(404).send('not found');
+    const n = await retryEvent(id);
+    return redirect(reply, `${tabUrl(row.tenant_id, 'eventy')}?e=${id}`,
+      n ? 'Event je znova vo fronte, odošle sa o pár sekúnd.' : 'Tento event sa nedá poslať znova (nie je v stave chyba).', n ? 'ok' : 'err');
   });
 }

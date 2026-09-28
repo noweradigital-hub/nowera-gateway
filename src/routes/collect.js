@@ -9,6 +9,7 @@ import { normalizeConsent } from '../lib/consent.js';
 import { isBot } from '../lib/bots.js';
 import { clientIp } from '../lib/client-ip.js';
 import { createLimiter } from '../lib/ratelimit.js';
+import * as defaultStats from '../lib/stats-writer.js';
 
 const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
 
@@ -115,6 +116,7 @@ export default async function collectRoutes(app, opts = {}) {
   const tenantByHost = opts.tenantByHost || defaultTenantByHost;
   const enqueue = opts.enqueue || defaultEnqueue;
   const browserLimit = createLimiter(opts.browserLimit || BROWSER_LIMIT);
+  const stats = opts.stats || defaultStats;
 
   // Keep the raw body around so the HMAC is computed over exactly what was sent.
   app.addHook('preParsing', async (req, _reply, payload) => {
@@ -177,12 +179,14 @@ export default async function collectRoutes(app, opts = {}) {
       .header('access-control-allow-credentials', 'true');
 
     if (!browserLimit.hit(`${tenant.id}|${clientIp(req)}`)) {
+      stats.countDropped(tenant.id, 'rate_limited');
       return reply.code(429).send({ error: 'too many requests' });
     }
 
     // A crawler is not a customer: answer it, but keep it out of the data and
     // give it no identity cookies.
     if (isBot(req.headers['user-agent'])) {
+      stats.countDropped(tenant.id, 'bot');
       return reply.send({ ok: true, filtered: 'bot' });
     }
 
@@ -216,9 +220,12 @@ export default async function collectRoutes(app, opts = {}) {
     // The site's server already reports these, signed. A browser copy adds
     // nothing but a way to forge one, e.g. a Purchase with any value.
     if (serverOnly(tenant).has(event.event_name)) {
+      stats.countDropped(tenant.id, 'server_only');
       return reply.send({ ok: true, event_id: event.event_id, queued: 0, ignored: 'server_only' });
     }
 
+    event.source = 'browser';
+    stats.recordReceived(tenant.id, event, 'browser');
     const queued = await enqueue(tenant.id, event, tenant.destinations);
     return reply.send({ ok: true, event_id: event.event_id, queued });
   });
@@ -233,9 +240,11 @@ export default async function collectRoutes(app, opts = {}) {
 
     const refused = verifyServerRequest(tenant, req.rawBody || '', req.headers);
     if (refused) return reply.code(401).send({ error: refused });
+    stats.notePlugin(tenant.id, req.headers['x-nwr-plugin']);
 
     const body = req.body || {};
     if (isBot(body.client_user_agent || req.headers['user-agent'])) {
+      stats.countDropped(tenant.id, 'bot');
       return reply.send({ ok: true, filtered: 'bot' });
     }
 
@@ -262,6 +271,8 @@ export default async function collectRoutes(app, opts = {}) {
       return reply.code(400).send({ error: err.message });
     }
 
+    event.source = 'server';
+    stats.recordReceived(tenant.id, event, 'server');
     const queued = await enqueue(tenant.id, event, tenant.destinations);
     return reply.send({ ok: true, event_id: event.event_id, queued });
   });

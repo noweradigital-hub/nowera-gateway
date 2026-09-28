@@ -78,9 +78,10 @@ test('normalizeEvent maps long-form PII aliases to Meta keys', () => {
     { event_name: 'Purchase', user_data: { email: 'x@y.sk', first_name: 'Ján', zip: '01001' } },
     { ip: '9.9.9.9', userAgent: 'UA' },
   );
-  assert.equal(e.user.em, 'x@y.sk');
-  assert.equal(e.user.fn, 'Ján');
-  assert.equal(e.user.zp, '01001');
+  assert.equal(e.user.em, sha('x@y.sk'));
+  assert.equal(e.user.fn, sha('ján'));
+  assert.equal(e.user.zp, sha('01001'));
+  assert.ok(!JSON.stringify(e).includes('x@y.sk'), 'nothing readable is kept');
 });
 
 test('normalizeEvent clamps clock skew and stale timestamps', () => {

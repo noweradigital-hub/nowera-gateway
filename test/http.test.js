@@ -1,6 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+
+const sha = (v) => createHash('sha256').update(v).digest('hex');
 
 process.env.SESSION_SECRET = 'x'.repeat(40);
 process.env.INGEST_SECRET = 'ingest-secret';
@@ -223,7 +225,7 @@ test('the visitor id from the loader wins over the gateway cookie', async () => 
     payload: { event_name: 'PageView', visitor_id: 'rnd-from-page-01' },
   });
   assert.equal(res.statusCode, 200);
-  assert.equal(inserted.at(-1).event.user.external_id, 'rnd-from-page-01', 'same id the pixel was given');
+  assert.equal(inserted.at(-1).event.user.external_id, sha('rnd-from-page-01'), 'same id the pixel was given, hashed');
   const cookie = res.cookies.find((c) => c.name === '_nwr_id');
   assert.equal(cookie.value, 'rnd-from-page-01');
   assert.equal(cookie.domain, '.klient.sk');
@@ -239,7 +241,7 @@ test('a malformed visitor id from the page is ignored', async () => {
     },
     payload: { event_name: 'PageView', visitor_id: '<script>alert(1)</script>' },
   });
-  assert.equal(inserted.at(-1).event.user.external_id, 'older-cookie-id');
+  assert.equal(inserted.at(-1).event.user.external_id, sha('older-cookie-id'));
   assert.ok(!res.cookies.some((c) => c.name === '_nwr_id'), 'unchanged cookie is not rewritten');
 });
 

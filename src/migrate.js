@@ -75,6 +75,50 @@ ALTER TABLE tenants ADD COLUMN IF NOT EXISTS legacy_ingest BOOLEAN NOT NULL DEFA
 -- the site's server sends them signed, so a forged browser request cannot.
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS server_only_events TEXT NOT NULL DEFAULT '';
 
+-- One row per event the gateway accepted, whatever it was forwarded to: what the
+-- dashboard counts and measures. Flags only, no personal data; kept 90 days.
+CREATE TABLE IF NOT EXISTS received (
+  id          BIGSERIAL PRIMARY KEY,
+  tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  event_name  TEXT NOT NULL,
+  event_id    TEXT NOT NULL,
+  source      TEXT NOT NULL CHECK (source IN ('browser','server')),
+  consent     TEXT CHECK (consent IN ('marketing','statistics')),
+  has_em      BOOLEAN NOT NULL DEFAULT FALSE,
+  has_ph      BOOLEAN NOT NULL DEFAULT FALSE,
+  has_ext     BOOLEAN NOT NULL DEFAULT FALSE,
+  has_fbp     BOOLEAN NOT NULL DEFAULT FALSE,
+  has_fbc     BOOLEAN NOT NULL DEFAULT FALSE,
+  has_ip      BOOLEAN NOT NULL DEFAULT FALSE,
+  has_country BOOLEAN NOT NULL DEFAULT FALSE,
+  value       NUMERIC,
+  currency    TEXT
+);
+CREATE INDEX IF NOT EXISTS received_tenant_time_idx ON received(tenant_id, created_at DESC);
+
+-- What happened to requests that never became events: crawlers, floods, browser
+-- copies of server-only events. Per tenant and day.
+CREATE TABLE IF NOT EXISTS daily_counters (
+  tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  day       DATE NOT NULL,
+  name      TEXT NOT NULL,
+  count     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (tenant_id, day, name)
+);
+
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS first_event_at TIMESTAMPTZ;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plugin_version TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plugin_seen_at TIMESTAMPTZ;
+
+-- The destination's last answer, for the event detail in the dashboard, and when
+-- a worker took the row, so a crashed worker's rows are recovered by that time.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS response TEXT;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS source TEXT;
+CREATE INDEX IF NOT EXISTS events_tenant_event_id_idx ON events(tenant_id, event_id);
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id            SERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,
