@@ -598,3 +598,106 @@ test('CookieScript: a Complianz cookie means nothing in CookieScript mode', asyn
     await setConsent('none');
   }
 });
+
+// ------------------------------------------------------------- plugin 1.0
+
+test('events leave only after the page, not while it is being built', async () => {
+  const { sent, purchase } = await fire('queued');
+  assert.equal(purchase.before_flush, 0);
+  assert.equal(sent.length, 1, 'delivered at the end of the request');
+});
+
+test('InitiateCheckout once per cart: reloading the checkout sends nothing new', async () => {
+  const { sent, footer } = await fire('checkout_twice');
+  assert.equal(sent.length, 1);
+  assert.equal([...footer.matchAll(/"InitiateCheckout"/g)].length, 1);
+});
+
+test('an AJAX add to cart hands its id to the browser in the cart fragments', async () => {
+  const { sent, purchase } = await fire('atc_ajax');
+  assert.equal(sent.length, 1);
+  assert.equal(typeof purchase.fragment, 'string', 'themes expect every fragment to be a string');
+  const leg = JSON.parse(purchase.fragment);
+  assert.equal(leg.event_id, sent[0].body.event_id, 'one id, so Meta counts one add to cart');
+  assert.deepEqual(leg.data, sent[0].body.custom_data);
+  assert.equal(purchase.pending, null, 'nothing left waiting for a next page');
+});
+
+test('a plain add-to-cart post shows the browser leg on the next page, which is not cached', async () => {
+  const { sent, footer, purchase } = await fire('atc_form');
+  const legs = [...footer.matchAll(/window\.nwr\("track","AddToCart",(.*?),\{eventID:(".*?")\}\);<\/script>/g)];
+  assert.equal(legs.length, 1);
+  assert.equal(JSON.parse(legs[0][2]), sent[0].body.event_id);
+  assert.equal(purchase.nocache, true);
+  assert.equal(purchase.left, null, 'shown once');
+});
+
+test('the page listens for AJAX adds to cart and reports them under the server id', async () => {
+  const page = await html(`/?post_type=product&p=${ids.simple}`);
+  assert.match(page, /jQuery\(document\.body\)\.on\('added_to_cart'/);
+  assert.match(page, /f\.nwr_atc/);
+});
+
+test('a gateway outage pauses sending, and the purchase is retried from the order', async () => {
+  const { sent, purchase } = await fire('purchase_gateway_down');
+  assert.equal(purchase.attempts, 1, 'after the first timeout the next event is not even tried');
+  assert.equal(purchase.paused, true);
+  assert.equal(purchase.sent, false, 'the order no longer claims it was sent');
+  assert.equal(purchase.retry, 1);
+  assert.equal(purchase.scheduled, true);
+  assert.equal(purchase.status.failing, true);
+  assert.match(purchase.status.error, /timed out/);
+  assert.match(purchase.notes.join(' '), /skúsi sa znova o 2 min/);
+  assert.equal(sent.length, 1, 'the retry delivered it');
+  assert.equal(sent[0].body.event_id, `ord-${purchase.order}`);
+  assert.equal(sent[0].signature_valid, true);
+  assert.equal(purchase.sent_after, true);
+});
+
+test('the settings page never prints the key, and takes a pairing code', async () => {
+  const s = await json('/nwr-test/settings-page.php');
+  assert.equal(s.key_in_page, false);
+  assert.equal(s.has_pairing_input, true);
+  assert.equal(s.has_test_button, true);
+  assert.deepEqual(s.paired, { host: 't.novy-klient.sk', key: true });
+  assert.equal(s.bad_pairing.key_kept, true);
+  assert.match(s.bad_pairing.error, /Párovací kód/);
+  assert.equal(s.blank_key_kept, true, 'an empty key field keeps the stored key');
+  assert.equal(s.host_cleaned, 'collector.test');
+});
+
+test('the visitor address comes from Cloudflare or a local proxy only', async () => {
+  const r = await json('/nwr-test/misc.php');
+  assert.equal(r.via_cloudflare, '2a02:ab88:1:2::3');
+  assert.equal(r.forged_direct, '198.51.100.7', 'a header typed by the sender is ignored');
+  assert.equal(r.local_proxy, '203.0.113.5');
+  assert.equal(r.already_resolved, '203.0.113.8');
+});
+
+test('WooCommerce sees the plugin as compatible with HPOS and the block checkout', async () => {
+  const r = await json('/nwr-test/misc.php');
+  assert.deepEqual(r.compat, { custom_order_tables: true, cart_checkout_blocks: true });
+});
+
+test('an update installs only with a valid signature from the release key', async (t) => {
+  const { readFileSync, existsSync } = await import('node:fs');
+  const dir = new URL('../../releases/', import.meta.url);
+  if (!existsSync(new URL('latest.json', dir))) return t.skip('no release built yet (scripts/release-plugin.mjs)');
+  const latest = JSON.parse(readFileSync(new URL('latest.json', dir), 'utf8'));
+  const zip = readFileSync(new URL(latest.file, dir));
+  const res = await fetch(`${BASE}/nwr-test/release.php`, {
+    method: 'POST',
+    body: JSON.stringify({ zip: zip.toString('base64'), signature: latest.signature, sha256: latest.sha256, version: '9.9.9' }),
+  });
+  const r = JSON.parse(await res.text());
+  assert.equal(r.valid, true);
+  assert.equal(r.tampered, false);
+  assert.equal(r.wrong_sha, false);
+  assert.equal(r.garbage_sig, false);
+  assert.equal(r.update.version, '9.9.9');
+  assert.equal(r.update.package, 'https://collector.test/wp/nowera-capi/nowera-capi-9.9.9.zip');
+  assert.equal(r.foreign, null, 'a package on another host is ignored');
+  assert.equal(r.auto_off, false);
+  assert.equal(r.auto_on, true);
+  assert.equal(r.update_uri, 'https://signals.nwra.sk/wp/nowera-capi');
+});

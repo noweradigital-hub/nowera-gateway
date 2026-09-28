@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "file": "nowera-capi-1.0.0.zip",
+  "sha256": "81870bd330e624b542f1dda7ef8dfb45db99e42cbe04beb34dcc33809c0fbebc",
+  "signature": "OqdhavMNAK03HMgKJAfYEltYAI+xfEOg2jHYp9QTkaxFFIs5TwbsqNjmRKcEK/J0ZN/iJjzYVUqUc/mN9Rb6AA==",
+  "released_at": "2026-09-28T10:11:21.988Z",
+  "requires": "6.0",
+  "requires_php": "8.0",
+  "tested": null,
+  "notes": "Odosielanie až po načítaní stránky a pozastavenie pri výpadku gatewaya; nákup sa pri chybe zopakuje z objednávky. InitiateCheckout aj pri blokovej pokladni, len raz na košík. AddToCart aj z prehliadača s rovnakým ID. Párovací kód, test spojenia a stav doručovania v nastaveniach. Podpisované automatické aktualizácie. Kompatibilita s HPOS a blokovou pokladňou."
+}

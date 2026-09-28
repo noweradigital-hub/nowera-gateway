@@ -10,6 +10,9 @@ register_shutdown_function( function () {
 	}
 } );
 require '/wordpress/wp-load.php';
+// Real page loads in the suite cannot reach collector.test (only these scripts
+// intercept it), so the plugin pauses sending after them; each script starts clean.
+delete_transient( 'nowera_capi_pause' );
 header( 'Content-Type: application/json; charset=utf-8' );
 /**
  * Test-only: records every request the plugin would send to the gateway and
@@ -19,6 +22,19 @@ header( 'Content-Type: application/json; charset=utf-8' );
 add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
 	if ( false === strpos( $url, 'collector.test' ) ) {
 		return $pre;
+	}
+	// The updater asks for the newest release; tests put its description in an option.
+	if ( false !== strpos( $url, '/wp/nowera-capi/info.json' ) ) {
+		$info = get_option( 'nwr_test_release' );
+		return $info
+			? array( 'headers' => array(), 'body' => wp_json_encode( $info ), 'response' => array( 'code' => 200, 'message' => 'OK' ), 'cookies' => array() )
+			: array( 'headers' => array(), 'body' => 'not found', 'response' => array( 'code' => 404, 'message' => 'Not Found' ), 'cookies' => array() );
+	}
+	// ?fail=down: the gateway does not answer; ?fail=401: it refuses the key.
+	$fail = get_option( 'nwr_test_fail' );
+	if ( 'down' === $fail ) {
+		update_option( 'nwr_test_attempts', (int) get_option( 'nwr_test_attempts', 0 ) + 1, false );
+		return new WP_Error( 'http_request_failed', 'cURL error 28: Operation timed out' );
 	}
 	$log   = get_option( 'nwr_test_captured', array() );
 	$log[] = array(
@@ -35,6 +51,22 @@ add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
 
 
 const NWR_TEST_SECRET = 'test-secret';
+
+/** Deliver what the plugin queued for after the response, as shutdown would. */
+function nwr_flush(): void {
+	if ( function_exists( 'nowera_capi_flush_outbox' ) ) {
+		nowera_capi_flush_outbox( false );
+	}
+}
+
+/** Open the checkout page as WordPress would route it, so is_checkout() is true. */
+function nwr_on_checkout_page(): void {
+	$GLOBALS['wp_query']     = new WP_Query( array( 'page_id' => wc_get_page_id( 'checkout' ) ) );
+	$GLOBALS['wp_the_query'] = $GLOBALS['wp_query'];
+	// WooCommerce remembers the first answer of is_checkout() for the request, and
+	// this script asked before it "opened" the page.
+	add_filter( 'woocommerce_is_checkout', '__return_true' );
+}
 
 function nwr_out( $data ): void {
 	echo wp_json_encode( $data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );

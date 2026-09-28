@@ -37,4 +37,16 @@ First boot downloads WordPress and WooCommerce and takes a minute or two.
   "port is open" is not "ready". The suite polls `diag.php` until both plugins
   are loaded.
 
+- Since 1.0 the plugin sends after the response (shutdown). Scripts call
+  `nwr_flush()` before reading or resetting what was captured.
+- Real page loads cannot reach `collector.test` (only these scripts intercept
+  it), so the plugin's circuit breaker pauses sending after one; the bootstrap
+  clears the pause at the start of every script.
+- WooCommerce 9+ starts new stores in "coming soon" mode, which replaces shop
+  pages for guests and their Cache-Control; `setup.php` turns it off.
+- WooCommerce remembers the first `is_checkout()` answer per request;
+  `nwr_on_checkout_page()` sets the query and the `woocommerce_is_checkout` filter.
+- The update test verifies the real signed ZIP in `wp-plugin/releases/` and is
+  skipped until `scripts/release-plugin.mjs` has built one.
+
 These scripts are test-only and must never be deployed.

@@ -2,10 +2,12 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.9.0
+ * Version:      1.0.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
+ * Requires at least: 6.0
  * Requires PHP: 8.0
+ * Update URI:   https://signals.nwra.sk/wp/nowera-capi
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -13,7 +15,24 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '0.9.0';
+const NOWERA_CAPI_VERSION = '1.0.0';
+
+/**
+ * Ed25519 public keys whose signature an update must carry. The private key
+ * never leaves the release machine, so neither the gateway nor the repository
+ * can push code to a site. Several keys allow rotating to a new one.
+ */
+const NOWERA_CAPI_RELEASE_KEYS = array( 'EkZtQ4CBqMWrwbFSAl5eS11cGNUku9GfX3cVczn9qZc=' );
+
+/** Cloudflare's edge ranges: only from these is CF-Connecting-IP believed. */
+const NOWERA_CAPI_CLOUDFLARE = array(
+	'173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+	'141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+	'197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+	'104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+	'2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+	'2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+);
 
 /** Contact fields kept, hashed, in the _nwr_ud cookie for returning customers. */
 const NOWERA_CAPI_STORED_KEYS = array( 'em', 'ph', 'fn', 'ln', 'ct', 'st', 'zp', 'country' );
@@ -43,9 +62,33 @@ function nowera_capi_settings(): array {
 		'load_script'    => 1,
 		'consent_mode'   => 'none',
 		'consent_prefix' => 'cmplz_',
+		'auto_update'    => 1,
 	);
 	return wp_parse_args( get_option( NOWERA_CAPI_OPTION, array() ), $defaults );
 }
+
+/** A pairing code from the gateway's dashboard: nwr1.<base64url of {"h": host, "k": key}>. */
+function nowera_capi_read_pairing( string $code ): ?array {
+	if ( ! preg_match( '/^nwr1\.([A-Za-z0-9_-]+)$/', trim( $code ), $m ) ) {
+		return null;
+	}
+	$data = json_decode( (string) base64_decode( strtr( $m[1], '-_', '+/' ) ), true );
+	if ( ! is_array( $data ) || ! is_string( $data['h'] ?? null ) || ! is_string( $data['k'] ?? null ) ) {
+		return null;
+	}
+	if ( ! preg_match( '/^[a-z0-9-]+(\.[a-z0-9-]+)+$/i', $data['h'] ) || ! preg_match( '/^[0-9a-f]{64}$/i', $data['k'] ) ) {
+		return null;
+	}
+	return array( 'host' => strtolower( $data['h'] ), 'key' => $data['k'] );
+}
+
+// WooCommerce: the plugin reads orders only through the order API, and hooks the block checkout too.
+add_action( 'before_woocommerce_init', function () {
+	if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'cart_checkout_blocks', __FILE__, true );
+	}
+} );
 
 add_action( 'admin_menu', function () {
 	add_options_page( 'Nowera CAPI', 'Nowera CAPI', 'manage_options', 'nowera-capi', 'nowera_capi_render_settings' );
@@ -54,9 +97,24 @@ add_action( 'admin_menu', function () {
 add_action( 'admin_init', function () {
 	register_setting( 'nowera_capi', NOWERA_CAPI_OPTION, array(
 		'sanitize_callback' => function ( $input ) {
+			$current = nowera_capi_settings();
+			$host    = strtolower( preg_replace( '#^https?://|/.*$#i', '', sanitize_text_field( $input['collector_host'] ?? '' ) ) );
+			// The key is never printed back into the form: an empty field keeps it.
+			$key = sanitize_text_field( $input['ingest_secret'] ?? '' );
+			$key = '' === $key ? $current['ingest_secret'] : $key;
+			if ( ! empty( $input['pairing_code'] ) ) {
+				$pair = nowera_capi_read_pairing( (string) $input['pairing_code'] );
+				if ( $pair ) {
+					$host = $pair['host'];
+					$key  = $pair['key'];
+				} else {
+					add_settings_error( NOWERA_CAPI_OPTION, 'pairing', 'Párovací kód nie je platný — skopírujte ho z administrácie gatewaya celý.' );
+				}
+			}
 			return array(
-				'collector_host' => sanitize_text_field( $input['collector_host'] ?? '' ),
-				'ingest_secret'  => sanitize_text_field( $input['ingest_secret'] ?? '' ),
+				'collector_host' => $host,
+				'ingest_secret'  => $key,
+				'auto_update'    => empty( $input['auto_update'] ) ? 0 : 1,
 				'load_script'    => empty( $input['load_script'] ) ? 0 : 1,
 				'consent_mode'   => in_array( $input['consent_mode'] ?? 'none', array( 'none', 'cookiescript', 'complianz', 'custom' ), true )
 					? $input['consent_mode']
@@ -68,13 +126,49 @@ add_action( 'admin_init', function () {
 } );
 
 function nowera_capi_render_settings(): void {
-	$s = nowera_capi_settings();
+	$s      = nowera_capi_settings();
+	$status = get_option( 'nowera_capi_status', array() );
+	$status = is_array( $status ) ? $status : array();
+	$test   = get_transient( 'nowera_capi_test_' . get_current_user_id() );
+	if ( $test ) {
+		delete_transient( 'nowera_capi_test_' . get_current_user_id() );
+	}
+	$ago = function ( $t ) {
+		return $t ? sprintf( 'pred %s', human_time_diff( (int) $t ) ) : '—';
+	};
 	?>
 	<div class="wrap">
-		<h1>Nowera CAPI</h1>
+		<h1>Nowera CAPI <span style="font-size:13px;color:#646970;font-weight:400"><?php echo esc_html( NOWERA_CAPI_VERSION ); ?></span></h1>
+		<?php if ( is_array( $test ) ) : ?>
+			<div class="notice notice-<?php echo $test['ok'] ? 'success' : 'error'; ?>"><p><?php echo esc_html( $test['message'] ); ?></p></div>
+		<?php endif; ?>
+		<?php if ( $s['collector_host'] && $s['ingest_secret'] ) : ?>
+			<p>
+				<?php if ( ! empty( $status['failing'] ) ) : ?>
+					<strong style="color:#b32d2e">Posledné odoslanie zlyhalo</strong> <?php echo esc_html( $ago( $status['error_at'] ?? 0 ) ); ?>:
+					<code><?php echo esc_html( $status['error'] ?? '' ); ?></code>
+				<?php else : ?>
+					Posledné doručenie do gatewaya: <strong><?php echo esc_html( $ago( $status['ok_at'] ?? 0 ) ); ?></strong>
+				<?php endif; ?>
+			</p>
+			<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" style="margin:0 0 12px">
+				<input type="hidden" name="action" value="nowera_capi_test">
+				<?php wp_nonce_field( 'nowera_capi_test' ); ?>
+				<?php submit_button( 'Otestovať spojenie', 'secondary', 'submit', false ); ?>
+				<span class="description">Overí, že gateway odpovedá a prijme podpis tohto webu. Nevytvorí žiadny event.</span>
+			</form>
+		<?php endif; ?>
 		<form method="post" action="options.php">
 			<?php settings_fields( 'nowera_capi' ); ?>
 			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row"><label for="nwr_pairing">Párovací kód</label></th>
+					<td>
+						<input id="nwr_pairing" class="large-text code" type="text" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[pairing_code]"
+						       value="" placeholder="nwr1.…" autocomplete="off">
+						<p class="description">Z administrácie gatewaya (Nový klient alebo Nastavenia → Vygenerovať kľúč). Vyplní collector host aj kľúč naraz.</p>
+					</td>
+				</tr>
 				<tr>
 					<th scope="row"><label for="nwr_host">Collector host</label></th>
 					<td>
@@ -87,8 +181,18 @@ function nowera_capi_render_settings(): void {
 					<th scope="row"><label for="nwr_secret">Kľúč</label></th>
 					<td>
 						<input id="nwr_secret" class="regular-text code" type="password" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[ingest_secret]"
-						       value="<?php echo esc_attr( $s['ingest_secret'] ); ?>" autocomplete="off">
-						<p class="description">Kľúč tohto webu z administrácie gatewaya (Klient → Kľúč pre plugin). Podpisuje serverové eventy.</p>
+						       value="" autocomplete="new-password" placeholder="<?php echo $s['ingest_secret'] ? esc_attr( 'uložený — nechajte prázdne' ) : ''; ?>">
+						<p class="description">Kľúč tohto webu z administrácie gatewaya. Podpisuje serverové eventy. Prázdne pole ponechá uložený kľúč.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">Aktualizácie</th>
+					<td>
+						<label>
+							<input type="checkbox" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[auto_update]" value="1" <?php checked( $s['auto_update'] ); ?>>
+							Inštalovať nové verzie automaticky
+						</label>
+						<p class="description">Vydania prichádzajú z gatewaya a inštalujú sa, len ak ich podpis sedí s kľúčom zabudovaným v plugine.</p>
 					</td>
 				</tr>
 				<tr>
@@ -626,16 +730,54 @@ function nowera_capi_visitor_id(): ?string {
 		: sanitize_text_field( wp_unslash( $_COOKIE['_nwr_id'] ) );
 }
 
+/** Whether an address lies in a CIDR range, IPv4 or IPv6. */
+function nowera_capi_ip_in( string $ip, string $cidr ): bool {
+	[ $net, $bits ] = array_pad( explode( '/', $cidr, 2 ), 2, null );
+	$a = @inet_pton( $ip );
+	$b = @inet_pton( (string) $net );
+	if ( false === $a || false === $b || strlen( $a ) !== strlen( $b ) ) {
+		return false;
+	}
+	$bits  = (int) $bits;
+	$bytes = intdiv( $bits, 8 );
+	if ( substr( $a, 0, $bytes ) !== substr( $b, 0, $bytes ) ) {
+		return false;
+	}
+	$rest = $bits % 8;
+	if ( 0 === $rest ) {
+		return true;
+	}
+	$mask = ( 0xff << ( 8 - $rest ) ) & 0xff;
+	return ( ord( $a[ $bytes ] ) & $mask ) === ( ord( $b[ $bytes ] ) & $mask );
+}
+
+/**
+ * The visitor's address. CF-Connecting-IP and X-Forwarded-For are believed only
+ * when the request came through Cloudflare or a proxy on the hosting's own
+ * network; from anywhere else they are whatever the sender typed.
+ */
 function nowera_capi_client_ip(): string {
-	foreach ( array( 'HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR', 'REMOTE_ADDR' ) as $key ) {
-		if ( ! empty( $_SERVER[ $key ] ) ) {
-			$ip = trim( explode( ',', sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) ) )[0] );
-			if ( filter_var( $ip, FILTER_VALIDATE_IP ) ) {
-				return $ip;
+	$remote = isset( $_SERVER['REMOTE_ADDR'] ) ? trim( sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) ) : '';
+	$remote = filter_var( $remote, FILTER_VALIDATE_IP ) ? $remote : '';
+	$proxied = '' === $remote
+		|| ! filter_var( $remote, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE );
+	foreach ( NOWERA_CAPI_CLOUDFLARE as $range ) {
+		if ( $proxied ) {
+			break;
+		}
+		$proxied = nowera_capi_ip_in( $remote, $range );
+	}
+	if ( $proxied ) {
+		foreach ( array( 'HTTP_CF_CONNECTING_IP', 'HTTP_X_FORWARDED_FOR' ) as $key ) {
+			if ( ! empty( $_SERVER[ $key ] ) ) {
+				$ip = trim( explode( ',', sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) ) )[0] );
+				if ( filter_var( $ip, FILTER_VALIDATE_IP ) ) {
+					return $ip;
+				}
 			}
 		}
 	}
-	return '';
+	return $remote;
 }
 
 /**
@@ -730,12 +872,13 @@ function nowera_capi_request_context(): array {
 }
 
 /**
- * Send one event to the gateway. Non-blocking: never delays the page for the
- * visitor. Returns what happened, so a caller can record it on the order:
- * 'marketing' (Meta will get it), 'statistics' (only GA4 may), 'none' (the
- * visitor gave no consent) or 'not_configured'.
+ * Queue one event for the gateway; it leaves after the page has been sent to
+ * the visitor (see nowera_capi_flush_outbox). Returns what happened, so a caller
+ * can record it on the order: 'marketing' (Meta will get it), 'statistics' (only
+ * GA4 may), 'none' (the visitor gave no consent) or 'not_configured'. A Purchase
+ * passes its order, so a failed delivery is retried from the order.
  */
-function nowera_capi_send( string $event_name, string $event_id, array $user, array $props, ?string $url = null, ?array $ctx = null ): string {
+function nowera_capi_send( string $event_name, string $event_id, array $user, array $props, ?string $url = null, ?array $ctx = null, ?int $order_id = null ): string {
 	$s = nowera_capi_settings();
 	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) ) {
 		return 'not_configured';
@@ -782,27 +925,156 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 	if ( 'none' !== $s['consent_mode'] ) {
 		$payload['consent'] = array( 'marketing' => $marketing, 'statistics' => $statistics );
 	}
-	$body = wp_json_encode( $payload );
+	nowera_capi_outbox( array(
+		'event'    => $event_name,
+		'body'     => wp_json_encode( $payload ),
+		'order_id' => $order_id,
+	) );
 
+	return $marketing ? 'marketing' : 'statistics';
+}
+
+/* -------------------------------------------------------------------------
+ * Delivery, after the page has gone to the visitor
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Events of this request wait here. Called with an event, adds it (and makes
+ * sure the queue is flushed at shutdown); called without, hands the queue over
+ * and empties it.
+ */
+function nowera_capi_outbox( ?array $item = null ): array {
+	static $queue  = array();
+	static $hooked = false;
+	if ( null === $item ) {
+		$out   = $queue;
+		$queue = array();
+		return $out;
+	}
+	$queue[] = $item;
+	if ( ! $hooked ) {
+		// Late: after WordPress has flushed the page and WooCommerce saved its session.
+		add_action( 'shutdown', 'nowera_capi_flush_outbox', 1000 );
+		$hooked = true;
+	}
+	return $queue;
+}
+
+/**
+ * Send what this request queued. First the response is finished for the
+ * browser (LiteSpeed and PHP-FPM can do that), so the visitor never waits for
+ * the gateway; then each event goes with a short timeout. While the gateway is
+ * down, nothing is tried for a minute, so an outage cannot tie up the site's PHP
+ * workers. A Purchase that did not arrive is retried from its order.
+ */
+function nowera_capi_flush_outbox( bool $finish = true ): void {
+	$queue = nowera_capi_outbox();
+	if ( ! $queue ) {
+		return;
+	}
+	if ( $finish ) {
+		if ( function_exists( 'litespeed_finish_request' ) ) {
+			litespeed_finish_request();
+		} elseif ( function_exists( 'fastcgi_finish_request' ) ) {
+			fastcgi_finish_request();
+		}
+	}
+	foreach ( $queue as $item ) {
+		$error = nowera_capi_deliver( $item['body'] );
+		if ( null !== $error && ! empty( $item['order_id'] ) ) {
+			nowera_capi_purchase_failed( (int) $item['order_id'], $error );
+		}
+	}
+}
+
+/** Whether a recent failure paused sending. */
+function nowera_capi_gateway_paused(): bool {
+	return (int) get_transient( 'nowera_capi_pause' ) > time();
+}
+
+/** POST one event body to the gateway, signed. Null when it arrived, otherwise why not. */
+function nowera_capi_deliver( string $body ): ?string {
+	$s = nowera_capi_settings();
+	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) ) {
+		return 'plugin nemá vyplnený collector alebo kľúč';
+	}
+	if ( nowera_capi_gateway_paused() ) {
+		return 'gateway nedávno neodpovedal, odosielanie je na minútu pozastavené';
+	}
 	// The time is signed with the body, so a captured request cannot be sent again later.
 	$timestamp = (string) time();
 	$response  = wp_remote_post( 'https://' . $s['collector_host'] . '/s', array(
-		'timeout'  => 5,
-		'blocking' => false,
-		'headers'  => array(
+		'timeout'     => 3,
+		'redirection' => 0,
+		'headers'     => array(
 			'Content-Type'    => 'application/json',
 			'X-NWR-Timestamp' => $timestamp,
 			'X-NWR-Signature' => hash_hmac( 'sha256', $timestamp . '.' . $body, $s['ingest_secret'] ),
 			'X-NWR-Plugin'    => NOWERA_CAPI_VERSION,
 		),
-		'body'     => $body,
+		'body'        => $body,
 	) );
-
-	if ( is_wp_error( $response ) ) {
-		error_log( '[nowera-capi] ' . $response->get_error_message() );
+	$code = is_wp_error( $response ) ? 0 : (int) wp_remote_retrieve_response_code( $response );
+	if ( $code >= 200 && $code < 300 ) {
+		nowera_capi_note_status( null );
+		return null;
 	}
+	$error = is_wp_error( $response )
+		? $response->get_error_message()
+		: 'HTTP ' . $code . ' ' . substr( wp_strip_all_tags( (string) wp_remote_retrieve_body( $response ) ), 0, 160 );
+	// No answer, a server error or throttling: an outage, so pause. A 4xx is this
+	// site's own problem (key, settings) and pausing would not fix it.
+	if ( 0 === $code || $code >= 500 || 429 === $code ) {
+		set_transient( 'nowera_capi_pause', time() + MINUTE_IN_SECONDS, MINUTE_IN_SECONDS );
+	}
+	nowera_capi_note_status( $error );
+	error_log( '[nowera-capi] ' . $error );
+	return $error;
+}
 
-	return $marketing ? 'marketing' : 'statistics';
+/**
+ * Remember how delivery goes, for the settings page. A success is written at
+ * most every five minutes, so a busy shop does not write an option per event.
+ */
+function nowera_capi_note_status( ?string $error ): void {
+	$status = get_option( 'nowera_capi_status', array() );
+	$status = is_array( $status ) ? $status : array();
+	if ( null === $error ) {
+		if ( empty( $status['failing'] ) && ! empty( $status['ok_at'] ) && $status['ok_at'] > time() - 5 * MINUTE_IN_SECONDS ) {
+			return;
+		}
+		$status['ok_at']   = time();
+		$status['failing'] = false;
+	} else {
+		$status['error']    = $error;
+		$status['error_at'] = time();
+		$status['failing']  = true;
+	}
+	update_option( 'nowera_capi_status', $status, false );
+}
+
+/**
+ * A Purchase the gateway did not take: the order forgets it was sent and the
+ * after-payment job tries again from the order, later each time.
+ */
+function nowera_capi_purchase_failed( int $order_id, string $error ): void {
+	$order = wc_get_order( $order_id );
+	if ( ! $order ) {
+		return;
+	}
+	$attempt = (int) $order->get_meta( '_nowera_capi_purchase_retry' ) + 1;
+	$delays  = array( 2, 10, 30, 60, 180 ); // minutes
+	$order->delete_meta_data( '_nowera_capi_purchase_sent' );
+	$order->update_meta_data( '_nowera_capi_purchase_retry', $attempt );
+	$args = array( $order_id );
+	if ( $attempt <= count( $delays ) && function_exists( 'as_schedule_single_action' ) && $order->get_meta( '_nowera_capi_ctx' ) ) {
+		as_unschedule_action( 'nowera_capi_purchase_fallback', $args, 'nowera-capi' );
+		as_schedule_single_action( time() + $delays[ $attempt - 1 ] * MINUTE_IN_SECONDS, 'nowera_capi_purchase_fallback', $args, 'nowera-capi' );
+		$order->add_order_note( sprintf( 'Nowera CAPI: gateway Purchase neprijal (%s), skúsi sa znova o %d min.', $error, $delays[ $attempt - 1 ] ) );
+	} else {
+		$order->add_order_note( 'Nowera CAPI: Purchase sa nepodarilo doručiť ani po opakovaní: ' . $error );
+	}
+	$order->save();
 }
 
 /** Plain-language outcome of a Purchase, written to the order so it can be checked later. */
@@ -817,8 +1089,12 @@ function nowera_capi_record_outcome( \WC_Order $order, string $outcome, bool $af
 	if ( $after_payment ) {
 		$note = 'Po potvrdení platby (zákazník sa nevrátil na web): ' . $note;
 	}
+	// A reloaded thank-you page without consent would write the same note again.
+	$same = $order->get_meta( '_nowera_capi_purchase_consent' ) === $outcome && ! $after_payment;
 	$order->update_meta_data( '_nowera_capi_purchase_consent', $outcome );
-	$order->add_order_note( 'Nowera CAPI: ' . $note );
+	if ( ! $same ) {
+		$order->add_order_note( 'Nowera CAPI: ' . $note );
+	}
 }
 
 /**
@@ -934,7 +1210,9 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		$event_id,
 		nowera_capi_user_from_order( $order ),
 		$custom_data,
-		$order->get_checkout_order_received_url()
+		$order->get_checkout_order_received_url(),
+		null,
+		$order->get_id()
 	);
 
 	nowera_capi_record_outcome( $order, $outcome );
@@ -973,8 +1251,13 @@ add_action( 'woocommerce_order_status_completed', 'nowera_capi_schedule_purchase
 
 add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
 	$order = wc_get_order( $order_id );
-	if ( ! $order || $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_purchase_consent' ) ) {
-		return; // the thank-you page got there first
+	if ( ! $order || $order->get_meta( '_nowera_capi_purchase_sent' ) ) {
+		return; // reported already
+	}
+	// The thank-you page decided (e.g. no consent) — unless its delivery failed and this is the retry.
+	$retry = (int) $order->get_meta( '_nowera_capi_purchase_retry' ) > 0;
+	if ( ! $retry && $order->get_meta( '_nowera_capi_purchase_consent' ) ) {
+		return;
 	}
 	$stored = $order->get_meta( '_nowera_capi_ctx' );
 	if ( ! is_array( $stored ) ) {
@@ -1002,38 +1285,112 @@ add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
 		$user['external_id'] = (string) $stored['visitor']; // no visitor cookie in this request
 	}
 
-	$outcome = nowera_capi_send( 'Purchase', 'ord-' . $order->get_id(), $user, nowera_capi_purchase_data( $order ), $order->get_checkout_order_received_url(), $ctx );
-	nowera_capi_record_outcome( $order, $outcome, true );
+	$outcome = nowera_capi_send( 'Purchase', 'ord-' . $order->get_id(), $user, nowera_capi_purchase_data( $order ), $order->get_checkout_order_received_url(), $ctx, $order->get_id() );
+	if ( ! $retry ) {
+		nowera_capi_record_outcome( $order, $outcome, true );
+	}
 	if ( 'marketing' === $outcome || 'statistics' === $outcome ) {
 		$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
 	}
 	$order->save();
 } );
 
+/** The AddToCart this request sent, for the browser to report under the same id. */
+function nowera_capi_atc_leg( ?array $leg = null ): ?array {
+	static $current = null;
+	if ( null !== $leg ) {
+		$current = $leg;
+	}
+	return $current;
+}
+
 add_action( 'woocommerce_add_to_cart', function ( $cart_item_key, $product_id, $quantity, $variation_id = 0 ) {
 	$product = wc_get_product( $variation_id ?: $product_id );
 	if ( ! $product ) {
 		return;
 	}
-	$id = nowera_capi_content_id( $product );
-	nowera_capi_send(
-		'AddToCart',
-		wp_generate_uuid4(),
-		nowera_capi_current_user(),
-		array(
-			'value'        => round( (float) $product->get_price() * (int) $quantity, wc_get_price_decimals() ),
-			'currency'     => get_woocommerce_currency(),
-			'content_ids'  => array( $id ),
-			'contents'     => array( array( 'id' => $id, 'quantity' => (int) $quantity, 'item_price' => (float) $product->get_price() ) ),
-			'content_name' => $product->get_name(),
-			'content_type' => 'product',
-		),
-		get_permalink( $product_id )
+	$id          = nowera_capi_content_id( $product );
+	$event_id    = wp_generate_uuid4();
+	$custom_data = array(
+		'value'        => round( (float) $product->get_price() * (int) $quantity, wc_get_price_decimals() ),
+		'currency'     => get_woocommerce_currency(),
+		'content_ids'  => array( $id ),
+		'contents'     => array( array( 'id' => $id, 'quantity' => (int) $quantity, 'item_price' => (float) $product->get_price() ) ),
+		'content_name' => $product->get_name(),
+		'content_type' => 'product',
 	);
+	nowera_capi_send( 'AddToCart', $event_id, nowera_capi_current_user(), $custom_data, get_permalink( $product_id ) );
+
+	// The browser half: an AJAX add to cart hands it over in the cart fragments;
+	// a plain form post shows it on the next page this visitor loads.
+	nowera_capi_atc_leg( array( 'event_id' => $event_id, 'data' => $custom_data ) );
+	if ( ! wp_doing_ajax() && ! ( defined( 'REST_REQUEST' ) && REST_REQUEST ) && WC()->session ) {
+		$pending   = (array) WC()->session->get( 'nowera_capi_legs', array() );
+		$pending[] = array( 'AddToCart', $event_id, $custom_data );
+		WC()->session->set( 'nowera_capi_legs', array_slice( $pending, -5 ) );
+	}
 }, 10, 4 );
 
-add_action( 'woocommerce_before_checkout_form', function () {
+// A string, not an object: themes loop over fragments expecting HTML strings.
+add_filter( 'woocommerce_add_to_cart_fragments', function ( $fragments ) {
+	$leg = nowera_capi_atc_leg();
+	if ( $leg && is_array( $fragments ) ) {
+		$fragments['nwr_atc'] = wp_json_encode( $leg );
+	}
+	return $fragments;
+} );
+
+/** Browser legs waiting since a plain add-to-cart form post. Such a page belongs to one visitor: never cached. */
+function nowera_capi_pending_legs(): void {
+	if ( ! function_exists( 'WC' ) || ! WC()->session || wp_doing_ajax() ) {
+		return;
+	}
+	$pending = WC()->session->get( 'nowera_capi_legs' );
+	if ( ! $pending || ! is_array( $pending ) ) {
+		return;
+	}
+	WC()->session->set( 'nowera_capi_legs', null );
+	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+		define( 'DONOTCACHEPAGE', true );
+	}
+	do_action( 'litespeed_control_set_nocache', 'nowera-capi: browser event for this visitor' );
+	nocache_headers();
+	foreach ( $pending as $leg ) {
+		if ( is_array( $leg ) && 3 === count( $leg ) ) {
+			nowera_capi_browser_leg( (string) $leg[0], (string) $leg[1], (array) $leg[2] );
+		}
+	}
+}
+add_action( 'template_redirect', 'nowera_capi_pending_legs', 6 );
+
+// The AJAX half: WooCommerce fires added_to_cart with the fragments of the response.
+add_action( 'wp_footer', function () {
+	$s = nowera_capi_settings();
+	if ( empty( $s['collector_host'] ) || empty( $s['load_script'] ) || ! function_exists( 'WC' ) ) {
+		return;
+	}
+	echo "<script>(function(){if(!window.jQuery)return;jQuery(document.body).on('added_to_cart',function(e,f){" .
+		"if(!f||!f.nwr_atc)return;try{var l=JSON.parse(f.nwr_atc);" .
+		"window.nwr=window.nwr||function(){(window.nwr.q=window.nwr.q||[]).push(arguments)};" .
+		"window.nwr('track','AddToCart',l.data,{eventID:l.event_id});}catch(x){}});})();</script>\n";
+}, 99 );
+
+/**
+ * InitiateCheckout when the checkout page opens, classic or built from blocks.
+ * Once per cart: reloading the checkout or coming back from the payment page
+ * is not a new checkout.
+ */
+function nowera_capi_maybe_initiate_checkout(): void {
+	if ( ! function_exists( 'is_checkout' ) || ! is_checkout() || is_order_received_page()
+		|| ( function_exists( 'is_checkout_pay_page' ) && is_checkout_pay_page() ) ) {
+		return;
+	}
 	if ( ! WC()->cart || WC()->cart->is_empty() ) {
+		return;
+	}
+	$hash = WC()->cart->get_cart_hash();
+	$seen = WC()->session ? WC()->session->get( 'nowera_capi_ic' ) : null;
+	if ( is_array( $seen ) && ( $seen['hash'] ?? '' ) === $hash && (int) ( $seen['at'] ?? 0 ) > time() - HOUR_IN_SECONDS ) {
 		return;
 	}
 	$ids = array();
@@ -1054,7 +1411,11 @@ add_action( 'woocommerce_before_checkout_form', function () {
 	nowera_capi_send( 'InitiateCheckout', $event_id, nowera_capi_current_user(), $custom_data, wc_get_checkout_url() );
 	// The checkout page is never cached, so the browser leg can share this id.
 	nowera_capi_browser_leg( 'InitiateCheckout', $event_id, $custom_data );
-} );
+	if ( WC()->session ) {
+		WC()->session->set( 'nowera_capi_ic', array( 'hash' => $hash, 'at' => time() ) );
+	}
+}
+add_action( 'template_redirect', 'nowera_capi_maybe_initiate_checkout', 20 );
 
 /**
  * Best identity available before an order exists. Most checkouts are guests, so
@@ -1150,3 +1511,186 @@ add_action( 'woocommerce_checkout_order_processed', function ( $order_id, $poste
 	nowera_capi_add_payment_info( $order ?: $order_id );
 }, 20, 3 );
 add_action( 'woocommerce_store_api_checkout_order_processed', 'nowera_capi_add_payment_info', 20, 1 );
+
+/* -------------------------------------------------------------------------
+ * Connection test
+ * ---------------------------------------------------------------------- */
+
+/**
+ * A signed, empty event: the gateway checks the signature before the content,
+ * so "event_name is required" means host and key are right, and nothing is
+ * recorded anywhere.
+ */
+add_action( 'admin_post_nowera_capi_test', function () {
+	if ( ! current_user_can( 'manage_options' ) || ! check_admin_referer( 'nowera_capi_test' ) ) {
+		wp_die( 'Nemáte oprávnenie.' );
+	}
+	$s = nowera_capi_settings();
+	$result = array( 'ok' => false, 'message' => 'Najprv vyplňte collector host a kľúč.' );
+	if ( $s['collector_host'] && $s['ingest_secret'] ) {
+		$timestamp = (string) time();
+		$body      = '{}';
+		$response  = wp_remote_post( 'https://' . $s['collector_host'] . '/s', array(
+			'timeout'     => 8,
+			'redirection' => 0,
+			'headers'     => array(
+				'Content-Type'    => 'application/json',
+				'X-NWR-Timestamp' => $timestamp,
+				'X-NWR-Signature' => hash_hmac( 'sha256', $timestamp . '.' . $body, $s['ingest_secret'] ),
+				'X-NWR-Plugin'    => NOWERA_CAPI_VERSION,
+			),
+			'body'        => $body,
+		) );
+		$code = is_wp_error( $response ) ? 0 : (int) wp_remote_retrieve_response_code( $response );
+		$text = is_wp_error( $response ) ? $response->get_error_message() : (string) wp_remote_retrieve_body( $response );
+		if ( 400 === $code && false !== strpos( $text, 'event_name' ) ) {
+			$result = array( 'ok' => true, 'message' => 'Spojenie funguje: gateway odpovedá a prijal podpis tohto webu.' );
+			delete_transient( 'nowera_capi_pause' );
+		} elseif ( 401 === $code ) {
+			$result['message'] = 'Gateway odpovedá, ale kľúč nesedí (' . wp_strip_all_tags( $text ) . '). Vložte nový párovací kód.';
+		} elseif ( 404 === $code ) {
+			$result['message'] = 'Gateway tento host nepozná. Skontrolujte collector host.';
+		} else {
+			$result['message'] = 'Gateway neodpovedá: ' . ( $code ? 'HTTP ' . $code : $text );
+		}
+	}
+	set_transient( 'nowera_capi_test_' . get_current_user_id(), $result, MINUTE_IN_SECONDS );
+	wp_safe_redirect( admin_url( 'options-general.php?page=nowera-capi' ) );
+	exit;
+} );
+
+/* -------------------------------------------------------------------------
+ * Updates from the gateway, signed
+ * ---------------------------------------------------------------------- */
+
+/**
+ * The newest release as the gateway describes it, cached for six hours (an hour
+ * after a failure). Null when there is none or the gateway cannot be reached.
+ */
+function nowera_capi_release_info( bool $fresh = false ): ?array {
+	$s = nowera_capi_settings();
+	if ( empty( $s['collector_host'] ) ) {
+		return null;
+	}
+	$cached = get_site_transient( 'nowera_capi_release' );
+	if ( ! $fresh && is_array( $cached ) && array_key_exists( 'info', $cached ) ) {
+		return $cached['info'];
+	}
+	$info     = null;
+	$base     = 'https://' . $s['collector_host'] . '/wp/nowera-capi/';
+	$response = wp_remote_get( $base . 'info.json', array( 'timeout' => 5, 'redirection' => 0 ) );
+	if ( ! is_wp_error( $response ) && 200 === (int) wp_remote_retrieve_response_code( $response ) ) {
+		$data = json_decode( (string) wp_remote_retrieve_body( $response ), true );
+		// Only a package on the same gateway; its signature is checked before install anyway.
+		if ( is_array( $data ) && ! empty( $data['version'] ) && ! empty( $data['signature'] )
+			&& is_string( $data['download_url'] ?? null ) && 0 === strpos( $data['download_url'], $base ) ) {
+			$info = $data;
+		}
+	}
+	set_site_transient( 'nowera_capi_release', array( 'info' => $info ), $info ? 6 * HOUR_IN_SECONDS : HOUR_IN_SECONDS );
+	return $info;
+}
+
+/** Whether a release ZIP carries a valid signature by one of the built-in keys. */
+function nowera_capi_verify_release( string $zip, string $signature, string $sha256 = '' ): bool {
+	if ( '' !== $sha256 && ! hash_equals( strtolower( $sha256 ), hash( 'sha256', $zip ) ) ) {
+		return false;
+	}
+	$sig = base64_decode( $signature, true );
+	if ( false === $sig || 64 !== strlen( $sig ) || ! function_exists( 'sodium_crypto_sign_verify_detached' ) ) {
+		return false;
+	}
+	foreach ( NOWERA_CAPI_RELEASE_KEYS as $encoded ) {
+		$key = base64_decode( $encoded, true );
+		if ( false === $key || 32 !== strlen( $key ) ) {
+			continue;
+		}
+		try {
+			if ( sodium_crypto_sign_verify_detached( $sig, $zip, $key ) ) {
+				return true;
+			}
+		} catch ( \Throwable $e ) {
+			continue;
+		}
+	}
+	return false;
+}
+
+// "Update URI" in the header sends WordPress here instead of wordpress.org.
+add_filter( 'update_plugins_signals.nwra.sk', function ( $update, $plugin_data, $plugin_file ) {
+	if ( plugin_basename( __FILE__ ) !== $plugin_file ) {
+		return $update;
+	}
+	$info = nowera_capi_release_info();
+	if ( ! $info ) {
+		return $update;
+	}
+	return array(
+		'slug'         => 'nowera-capi',
+		'version'      => $info['version'],
+		'url'          => 'https://nowera.sk',
+		'package'      => $info['download_url'],
+		'requires_php' => $info['requires_php'] ?? '8.0',
+		'tested'       => $info['tested'] ?? '',
+		'autoupdate'   => ! empty( nowera_capi_settings()['auto_update'] ),
+	);
+}, 10, 3 );
+
+add_filter( 'plugins_api', function ( $result, $action, $args ) {
+	if ( 'plugin_information' !== $action || 'nowera-capi' !== ( $args->slug ?? '' ) ) {
+		return $result;
+	}
+	$info = nowera_capi_release_info();
+	return (object) array(
+		'name'          => 'Nowera CAPI',
+		'slug'          => 'nowera-capi',
+		'version'       => $info['version'] ?? NOWERA_CAPI_VERSION,
+		'author'        => 'Nowera',
+		'homepage'      => 'https://nowera.sk',
+		'requires_php'  => $info['requires_php'] ?? '8.0',
+		'last_updated'  => $info['released_at'] ?? '',
+		'download_link' => $info['download_url'] ?? '',
+		'sections'      => array(
+			'description' => 'Serverové eventy z WooCommerce do Nowera Gateway (Meta Conversions API a GA4).',
+			'changelog'   => nl2br( esc_html( (string) ( $info['notes'] ?? '' ) ) ),
+		),
+	);
+}, 10, 3 );
+
+// On unless the site turned it off, or the gateway paused updates for everyone.
+add_filter( 'auto_update_plugin', function ( $update, $item ) {
+	if ( plugin_basename( __FILE__ ) !== ( $item->plugin ?? '' ) ) {
+		return $update;
+	}
+	$info = nowera_capi_release_info();
+	if ( is_array( $info ) && array_key_exists( 'auto_update', $info ) && false === $info['auto_update'] ) {
+		return false;
+	}
+	return ! empty( nowera_capi_settings()['auto_update'] );
+}, 10, 2 );
+
+/**
+ * Download our package ourselves and refuse it unless the signature matches a
+ * built-in key. WordPress, MainWP and automatic updates all pass through here.
+ */
+add_filter( 'upgrader_pre_download', function ( $reply, $package, $upgrader = null, $hook_extra = array() ) {
+	if ( false !== $reply || ! is_string( $package ) || ! preg_match( '#/wp/nowera-capi/(nowera-capi-[0-9][0-9A-Za-z.-]*\.zip)$#', $package, $m ) ) {
+		return $reply;
+	}
+	$info = nowera_capi_release_info( true );
+	if ( ! $info || basename( (string) wp_parse_url( $info['download_url'], PHP_URL_PATH ) ) !== $m[1] ) {
+		return new \WP_Error( 'nowera_capi_release', 'Nowera CAPI: toto vydanie gateway neponúka.' );
+	}
+	if ( ! function_exists( 'download_url' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+	}
+	$file = download_url( $info['download_url'], 60 );
+	if ( is_wp_error( $file ) ) {
+		return $file;
+	}
+	if ( ! nowera_capi_verify_release( (string) file_get_contents( $file ), (string) $info['signature'], (string) ( $info['sha256'] ?? '' ) ) ) {
+		wp_delete_file( $file );
+		return new \WP_Error( 'nowera_capi_signature', 'Nowera CAPI: aktualizácia nemá platný podpis, neinštaluje sa.' );
+	}
+	return $file;
+}, 10, 4 );

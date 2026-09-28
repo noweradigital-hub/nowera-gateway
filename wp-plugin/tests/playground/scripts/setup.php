@@ -3,6 +3,9 @@
 require __DIR__ . '/_bootstrap.php';
 nwr_settings();
 delete_option( 'nwr_test_captured' );
+// WooCommerce 9+ starts new stores in "coming soon" mode, which replaces shop pages
+// for guests (and their Cache-Control); the suite needs the real pages.
+update_option( 'woocommerce_coming_soon', 'no' );
 
 // The thank-you page lives under the checkout page.
 if ( wc_get_page_id( 'checkout' ) <= 0 || ! get_post( wc_get_page_id( 'checkout' ) ) ) {

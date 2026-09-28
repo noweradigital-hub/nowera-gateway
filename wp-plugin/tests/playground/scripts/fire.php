@@ -85,17 +85,81 @@ switch ( $event ) {
 		WC()->cart->add_to_cart( $ids['variable'], 1, $ids['variations'][0] );
 		break;
 	case 'checkout':
+	case 'checkout_twice':
 		WC()->cart->empty_cart();
 		WC()->cart->add_to_cart( $ids['simple'], 1 );
 		WC()->cart->add_to_cart( $ids['variable'], 1, $ids['variations'][1] );
+		nwr_flush();
 		delete_option( 'nwr_test_captured' ); // only the checkout event, not the add_to_cart ones
-		remove_all_actions( 'wp_footer' ); // keep only the browser leg this hook queues
-		ob_start(); // Woo prints the coupon toggle on this hook
-		do_action( 'woocommerce_before_checkout_form', WC()->checkout() );
-		ob_end_clean();
+		remove_all_actions( 'wp_footer' ); // keep only the browser leg this page queues
+		nwr_on_checkout_page();
+		nowera_capi_maybe_initiate_checkout();
+		if ( 'checkout_twice' === $event ) {
+			nowera_capi_maybe_initiate_checkout(); // a reload of the same checkout
+		}
 		ob_start();
 		do_action( 'wp_footer' );
 		$footer = ob_get_clean();
+		break;
+	case 'queued':
+		// Nothing leaves while the page is still being built.
+		WC()->cart->empty_cart();
+		WC()->cart->add_to_cart( $ids['simple'], 1 );
+		$purchase = array( 'before_flush' => count( nwr_captured() ) );
+		break;
+	case 'atc_ajax':
+		// An AJAX add to cart: the fragments of the response carry the browser leg.
+		add_filter( 'wp_doing_ajax', '__return_true' );
+		WC()->cart->empty_cart();
+		WC()->cart->add_to_cart( $ids['simple'], 2 );
+		$fragments = apply_filters( 'woocommerce_add_to_cart_fragments', array( 'div.widget_shopping_cart_content' => '<div></div>' ) );
+		$purchase  = array( 'fragment' => $fragments['nwr_atc'] ?? null, 'pending' => WC()->session->get( 'nowera_capi_legs' ) );
+		break;
+	case 'atc_form':
+		// A plain form post: nothing in fragments, the leg waits for the next page.
+		WC()->cart->empty_cart();
+		WC()->cart->add_to_cart( $ids['simple'], 1 );
+		remove_all_actions( 'wp_footer' );
+		nowera_capi_pending_legs();
+		ob_start();
+		do_action( 'wp_footer' );
+		$footer   = ob_get_clean();
+		$purchase = array( 'nocache' => defined( 'DONOTCACHEPAGE' ), 'left' => WC()->session->get( 'nowera_capi_legs' ) );
+		break;
+	case 'purchase_gateway_down':
+		// The gateway times out while the thank-you page reports the purchase.
+		$order = nwr_order( $ids );
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		delete_transient( 'nowera_capi_pause' );
+		update_option( 'nwr_test_attempts', 0, false );
+		update_option( 'nwr_test_fail', 'down', false );
+		ob_start();
+		do_action( 'woocommerce_thankyou', $order->get_id() );
+		ob_end_clean();
+		WC()->cart->add_to_cart( $ids['simple'], 1 ); // one more event in the same request
+		nwr_flush();
+		$after_fail = wc_get_order( $order->get_id() );
+		$state      = array(
+			'attempts'  => (int) get_option( 'nwr_test_attempts' ),
+			'paused'    => nowera_capi_gateway_paused(),
+			'sent'      => (bool) $after_fail->get_meta( '_nowera_capi_purchase_sent' ),
+			'retry'     => (int) $after_fail->get_meta( '_nowera_capi_purchase_retry' ),
+			'scheduled' => (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' ),
+			'status'    => get_option( 'nowera_capi_status' ),
+		);
+		// The gateway is back; the scheduled retry runs.
+		delete_option( 'nwr_test_fail' );
+		delete_transient( 'nowera_capi_pause' );
+		do_action( 'nowera_capi_purchase_fallback', $order->get_id() );
+		nwr_flush();
+		$fresh    = wc_get_order( $order->get_id() );
+		$purchase = array_merge( $state, array(
+			'order'      => $fresh->get_id(),
+			'sent_after' => (bool) $fresh->get_meta( '_nowera_capi_purchase_sent' ),
+			'notes'      => array_map( function ( $n ) { return $n->content; }, wc_get_order_notes( array( 'order_id' => $fresh->get_id(), 'limit' => 5 ) ) ),
+		) );
 		break;
 	case 'payment_info':
 		$order = nwr_order( $ids );
@@ -167,6 +231,7 @@ switch ( $event ) {
 		}
 		// The payment gateway's confirmation arrives later, without those cookies.
 		nwr_cookies( array() );
+		nwr_flush();
 		delete_option( 'nwr_test_captured' );
 		$order = wc_get_order( $order->get_id() );
 		$order->payment_complete( 'TX-TEST' );
@@ -190,6 +255,7 @@ switch ( $event ) {
 		exit;
 }
 
+nwr_flush();
 $captured = nwr_captured();
 foreach ( $captured as &$c ) {
 	// Signed as the gateway checks it: the timestamp, a dot, the body; and recent.
