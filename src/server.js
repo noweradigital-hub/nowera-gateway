@@ -22,7 +22,7 @@ const app = Fastify({
   trustProxy: true,
   bodyLimit: 256 * 1024,
   // /admin/ and /admin are the same page.
-  ignoreTrailingSlash: true,
+  routerOptions: { ignoreTrailingSlash: true },
 });
 
 await app.register(cookie, { secret: config.sessionSecret });
