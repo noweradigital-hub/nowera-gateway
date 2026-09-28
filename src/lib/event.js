@@ -1,6 +1,8 @@
 import { newEventId } from './ids.js';
 
 const MAX_AGE_SECONDS = 7 * 86400; // Meta rejects events older than 7 days
+const EVENT_ID = /^[A-Za-z0-9._:-]{1,100}$/;
+const MAX_URL = 2048;
 
 const PII_KEYS = ['em', 'ph', 'fn', 'ln', 'ct', 'st', 'zp', 'country', 'ge', 'db', 'external_id'];
 
@@ -52,6 +54,23 @@ function pickReferrer(raw) {
 }
 
 /**
+ * The page an event happened on. A URL longer than any real page address is cut
+ * to scheme, host and path rather than stored whole.
+ */
+function pickUrl(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const value = raw.trim();
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  return value.length <= MAX_URL ? value : `${url.origin}${url.pathname}`.slice(0, MAX_URL);
+}
+
+/**
  * Turn whatever arrived on the wire into the canonical shape every destination
  * driver consumes. Throws on input we refuse to guess about.
  */
@@ -59,6 +78,10 @@ export function normalizeEvent(input, context) {
   const name = String(input.event_name || input.event || '').trim();
   if (!name) throw new Error('event_name is required');
   if (!/^[A-Za-z0-9_ ]{1,64}$/.test(name)) throw new Error('event_name has invalid characters');
+
+  const rawId = input.event_id;
+  const eventId = rawId === undefined || rawId === null || rawId === '' ? newEventId() : String(rawId);
+  if (!EVENT_ID.test(eventId)) throw new Error('event_id must be 1-100 letters, digits or . _ : -');
 
   const nowSeconds = Math.floor(Date.now() / 1000);
   const claimedTime = Number(input.event_time);
@@ -77,9 +100,9 @@ export function normalizeEvent(input, context) {
 
   return {
     event_name: name,
-    event_id: String(input.event_id || newEventId()),
+    event_id: eventId,
     event_time: eventTime,
-    event_source_url: input.event_source_url || input.url || context.referer || null,
+    event_source_url: pickUrl(input.event_source_url) || pickUrl(input.url) || pickUrl(context.referer),
     referrer_url: pickReferrer(input.referrer_url),
     action_source: input.action_source || context.actionSource || 'website',
     user: pickUser(input.user_data || input.user || {}),

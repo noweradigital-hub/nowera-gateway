@@ -63,6 +63,18 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS events_dedupe_idx
   ON events(destination_id, dedupe_key) WHERE dedupe_key IS NOT NULL;
 
+-- Each tenant signs its server events with its own key. Until a tenant is moved
+-- to it (legacy_ingest = FALSE), the shared INGEST_SECRET and signatures without
+-- a timestamp stay accepted, so existing sites keep working through the switch.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS ingest_secret TEXT;
+-- The key before the last rotation, still accepted until someone revokes it, so
+-- rotating does not drop the site's events while its plugin is being updated.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS ingest_secret_prev TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS legacy_ingest BOOLEAN NOT NULL DEFAULT TRUE;
+-- Events the browser may not report on its own, comma separated (e.g. Purchase):
+-- the site's server sends them signed, so a forged browser request cannot.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS server_only_events TEXT NOT NULL DEFAULT '';
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id            SERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,

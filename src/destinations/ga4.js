@@ -63,7 +63,7 @@ export function buildPayload(event, settings) {
     const state = event.consent.marketing ? 'GRANTED' : 'DENIED';
     body.consent = { ad_user_data: state, ad_personalization: state };
   }
-  if (settings.debug) body.debug = true;
+  if (settings.debug || event.test) body.debug = true;
   return body;
 }
 
@@ -76,7 +76,9 @@ export async function send(event, settings) {
   }
 
   // The debug endpoint validates and reports problems; the live one answers 204 to everything.
-  const path = settings.debug ? '/debug/mp/collect' : '/mp/collect';
+  // A test from the dashboard is only validated, never recorded.
+  const debug = Boolean(settings.debug || event.test);
+  const path = debug ? '/debug/mp/collect' : '/mp/collect';
   const url = `https://www.google-analytics.com${path}?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`;
 
   let res;
@@ -93,7 +95,7 @@ export async function send(event, settings) {
 
   const text = await res.text();
 
-  if (settings.debug) {
+  if (debug) {
     let messages = [];
     try { messages = JSON.parse(text)?.validationMessages ?? []; } catch { /* not json */ }
     if (messages.length) {

@@ -45,3 +45,22 @@ test('the tenant form offers the cookie keeper path, prefilled for new tenants',
   assert.match(tenantForm(null), /name="keep_path"[^>]*value="\/wp-content\/plugins\/nowera-capi\/keep\.php"/);
   assert.match(tenantForm({ ...tenant, keep_path: null }), /name="keep_path"[^>]*value=""/, 'a cleared path stays cleared');
 });
+
+test('the signing key is never rendered on the tenant page, only its state', () => {
+  const page = tenantDetail({ ...tenant, ingest_secret: 'CURRENTKEY123', ingest_secret_prev: 'OLDKEY456', legacy_ingest: false }, [], [], SCHEMAS);
+  assert.ok(!page.includes('CURRENTKEY123') && !page.includes('OLDKEY456'));
+  assert.match(page, /Vlastný kľúč je nastavený\. Predchádzajúci kľúč ešte platí\./);
+  assert.match(page, /key\/revoke-previous/);
+  assert.match(page, /Prijíma sa len vlastný kľúč/);
+});
+
+test('an active Meta test mode is announced with a way to end it', () => {
+  const until = new Date(Date.now() + 30 * 60_000).toISOString();
+  const page = tenantDetail(tenant, [{ id: 7, kind: 'meta', active: true,
+    settings: { dataset_id: '1', access_token: 'x', test_event_code: 'TEST9', test_until: until } }], [], SCHEMAS);
+  assert.match(page, /Testovací režim Meta do/);
+  assert.match(page, /\/admin\/destinations\/7\/test-off/);
+  const lapsed = tenantDetail(tenant, [{ id: 7, kind: 'meta', active: true,
+    settings: { dataset_id: '1', access_token: 'x', test_event_code: 'TEST9', test_until: '2026-01-01T00:00:00Z' } }], [], SCHEMAS);
+  assert.doesNotMatch(lapsed, /Testovací režim Meta do/);
+});

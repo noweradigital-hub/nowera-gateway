@@ -127,6 +127,7 @@ test('AddToCart is signed and names the catalog item', async () => {
   const [e] = sent;
   assert.equal(e.url, 'https://collector.test/s');
   assert.equal(e.signature_valid, true);
+  assert.match(e.plugin, /^\d+\.\d+\.\d+$/, 'the gateway can tell which plugin version sent it');
   assert.equal(e.body.event_name, 'AddToCart');
   assert.deepEqual(e.body.custom_data.content_ids, [String(ids.simple)]);
   assert.equal(e.body.custom_data.contents[0].quantity, 3);

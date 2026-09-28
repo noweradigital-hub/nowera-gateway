@@ -19,9 +19,18 @@ const TENANT = {
 
 // Stand in for Postgres: the collector only needs a tenant lookup and an enqueue.
 const inserted = [];
+// A tenant already moved to its own key, with purchases accepted only from its server.
+const STRICT = {
+  ...TENANT, id: 2, slug: 'prisny', collector_host: 't.prisny.sk',
+  allowed_origins: 'https://prisny.sk',
+  ingest_secret: 'tenant-key', legacy_ingest: false, server_only_events: 'Purchase, AddPaymentInfo',
+};
+
 const stubs = {
-  tenantByHost: async (host) =>
-    (String(host).split(':')[0] === TENANT.collector_host ? TENANT : null),
+  tenantByHost: async (host) => {
+    const h = String(host).split(':')[0];
+    return h === TENANT.collector_host ? TENANT : h === STRICT.collector_host ? STRICT : null;
+  },
   enqueue: async (tenantId, event, destinations) => {
     inserted.push({ tenantId, event, destinations });
     return destinations.length;
@@ -288,4 +297,100 @@ test('the click id is derived from the landing url when the site has no cookie y
 test('px.js carries the cookie keeper path, for pages cached before the site published it', async () => {
   const res = await app.inject({ method: 'GET', url: '/px.js', headers: { host: HOST } });
   assert.match(res.body, /var TENANT_KEEP = "\/wp-content\/plugins\/nowera-capi\/keep\.php";/);
+});
+
+// ------------------------------------------------------------ tenant keys
+
+const signed = (secret, body, ts) => (ts === undefined
+  ? createHmac('sha256', secret).update(body).digest('hex')
+  : createHmac('sha256', secret).update(`${ts}.${body}`).digest('hex'));
+const now = () => Math.floor(Date.now() / 1000);
+
+async function postServer(host, body, headers) {
+  return app.inject({
+    method: 'POST', url: '/s',
+    headers: { host, 'content-type': 'application/json', ...headers },
+    payload: body,
+  });
+}
+
+test('a tenant with its own key: timestamped signature accepted, the shared key and old style refused', async () => {
+  const body = JSON.stringify({ event_name: 'Purchase', event_id: 'ord-1', custom_data: { value: 5, currency: 'EUR' } });
+  const ts = now();
+
+  const ok = await postServer('t.prisny.sk', body, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('tenant-key', body, ts) });
+  assert.equal(ok.statusCode, 200);
+
+  const shared = await postServer('t.prisny.sk', body, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('ingest-secret', body, ts) });
+  assert.equal(shared.statusCode, 401, 'another client\u2019s key must not work here');
+
+  const old = await postServer('t.prisny.sk', body, { 'x-nwr-signature': signed('tenant-key', body) });
+  assert.equal(old.statusCode, 401);
+  assert.equal(old.json().error, 'timestamp required');
+});
+
+test('a signed request cannot be replayed after five minutes', async () => {
+  const body = JSON.stringify({ event_name: 'Purchase', event_id: 'ord-2' });
+  const ts = now() - 301;
+  const res = await postServer('t.prisny.sk', body, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('tenant-key', body, ts) });
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().error, 'stale request');
+});
+
+test('a tenant still on the shared key keeps working, old and new plugin alike', async () => {
+  const body = JSON.stringify({ event_name: 'AddToCart' });
+  const ts = now();
+  assert.equal((await postServer(HOST, body, { 'x-nwr-signature': signed('ingest-secret', body) })).statusCode, 200);
+  assert.equal((await postServer(HOST, body, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('ingest-secret', body, ts) })).statusCode, 200);
+});
+
+test('events the tenant reports only from its server are not accepted from the browser', async () => {
+  inserted.length = 0;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: 't.prisny.sk', origin: 'https://prisny.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'Purchase', event_id: 'ord-3', custom_data: { value: 99999, currency: 'EUR' } },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().ignored, 'server_only');
+  assert.equal(inserted.length, 0);
+});
+
+test('event ids and page addresses are bounded', async () => {
+  const bad = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'PageView', event_id: 'x'.repeat(101) },
+  });
+  assert.equal(bad.statusCode, 400);
+
+  inserted.length = 0;
+  const long = 'https://klient.sk/produkt/?q=' + 'a'.repeat(3000);
+  const ok = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'PageView', event_source_url: long },
+  });
+  assert.equal(ok.statusCode, 200);
+  assert.equal(inserted[0].event.event_source_url, 'https://klient.sk/produkt/');
+});
+
+test('a flood from one address is cut off, other visitors are not', async () => {
+  const Fastify = (await import('fastify')).default;
+  const cookie = (await import('@fastify/cookie')).default;
+  const collectRoutes = (await import('../src/routes/collect.js')).default;
+  const small = Fastify({ logger: false, trustProxy: true });
+  await small.register(cookie, { secret: 'x'.repeat(40) });
+  await small.register(collectRoutes, { ...stubs, browserLimit: { windowMs: 60_000, max: 2 } });
+  await small.ready();
+  const hit = (ip) => small.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json', 'x-forwarded-for': ip },
+    payload: { event_name: 'PageView' },
+  });
+  assert.equal((await hit('81.0.0.1')).statusCode, 200);
+  assert.equal((await hit('81.0.0.1')).statusCode, 200);
+  assert.equal((await hit('81.0.0.1')).statusCode, 429);
+  assert.equal((await hit('81.0.0.2')).statusCode, 200);
+  await small.close();
 });

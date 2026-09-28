@@ -24,6 +24,8 @@ add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
 	$log[] = array(
 		'url'       => $url,
 		'signature' => $args['headers']['X-NWR-Signature'] ?? null,
+		'timestamp' => $args['headers']['X-NWR-Timestamp'] ?? null,
+		'plugin'    => $args['headers']['X-NWR-Plugin'] ?? null,
 		'body'      => json_decode( $args['body'], true ),
 		'raw'       => $args['body'],
 	);

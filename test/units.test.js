@@ -106,7 +106,9 @@ const sample = normalizeEvent({
 }, { ip: '1.2.3.4', userAgent: 'UA', fbp: 'fb.1.1.2' });
 
 test('meta payload carries event_id, hashed user data and numeric value', () => {
-  const body = metaPayload(sample, { dataset_id: '1', access_token: 't', test_event_code: 'TEST1' });
+  const testing = { dataset_id: '1', access_token: 't', test_event_code: 'TEST1',
+    test_until: new Date(Date.now() + 60_000).toISOString() };
+  const body = metaPayload(sample, testing);
   const d = body.data[0];
   assert.equal(d.event_id, 'evt-1');
   assert.equal(d.action_source, 'website');
@@ -311,4 +313,29 @@ test('behind Cloudflare the visitor address comes from CF-Connecting-IP, IPv6 in
   assert.equal(clientIp(req({})), '172.18.0.2');
   assert.equal(fromCloudflare('::ffff:104.16.0.1'), true);
   assert.equal(fromCloudflare('31.97.179.201'), false);
+});
+
+test('a Meta test event code lapses an hour after it was saved', () => {
+  const settings = { dataset_id: '1', access_token: 't', test_event_code: 'TEST1' };
+  const payload = (extra) => metaPayload({ event_name: 'Lead', event_time: 1, user: {}, context: {} }, { ...settings, ...extra });
+  assert.equal(payload({ test_until: new Date(Date.now() + 60_000).toISOString() }).test_event_code, 'TEST1');
+  assert.equal(payload({ test_until: new Date(Date.now() - 1).toISOString() }).test_event_code, undefined, 'expired');
+  assert.equal(payload({}).test_event_code, undefined, 'a code with no expiry is a forgotten one');
+});
+
+test('a test from the dashboard goes to the GA4 validation endpoint only', () => {
+  const body = ga4Payload({ event_name: 'Lead', event_id: 'x', event_time: 1, test: true, properties: {}, context: {} }, {});
+  assert.equal(body.debug, true);
+});
+
+test('the limiter counts per key and forgets when the window ends', async () => {
+  const { createLimiter } = await import('../src/lib/ratelimit.js');
+  const limit = createLimiter({ windowMs: 1000, max: 2 });
+  const t0 = Date.now();
+  assert.equal(limit.hit('a', t0), true);
+  assert.equal(limit.hit('a', t0), true);
+  assert.equal(limit.blocked('a', t0), true);
+  assert.equal(limit.hit('a', t0), false);
+  assert.equal(limit.hit('b', t0), true, 'another key is unaffected');
+  assert.equal(limit.blocked('a', t0 + 1000), false, 'a new window starts clean');
 });

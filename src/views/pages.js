@@ -1,7 +1,10 @@
 import { esc } from './layout.js';
 import { CONSENT_MODES } from '../lib/consent.js';
+import { testModeActive } from '../destinations/test-mode.js';
 
 const fmt = (d) => (d ? new Date(d).toLocaleString('sk-SK', { dateStyle: 'short', timeStyle: 'medium' }) : '—');
+
+const time = (d) => new Date(d).toLocaleTimeString('sk-SK', { hour: '2-digit', minute: '2-digit' });
 
 const statusPill = (s) => {
   const cls = s === 'sent' ? 'ok' : s === 'dead' ? 'dead' : 'pending';
@@ -69,10 +72,10 @@ export function destinationForm(tenant, dest, schema) {
         <a class="btn" href="/admin/tenants/${tenant.id}">Späť</a>
       </div>
     </form>
-    ${dest.kind === 'meta' && dest.settings?.test_event_code ? `
-      <p class="hint" style="margin-top:18px;color:var(--warn)">
-        Kým je vyplnený test event code, Meta posiela serverové eventy do Test Events
-        a <strong>nezapočítava ich do kampaní</strong>. Po otestovaní pole vyprázdnite.
+    ${dest.kind === 'meta' ? `
+      <p class="hint" style="margin-top:18px">
+        Uložený test event code platí 60 minút. Kým platí, Meta posiela serverové eventy
+        do Test Events a <strong>nezapočítava ich do kampaní</strong>; potom sa sám vypne.
       </p>` : ''}
   </div>`;
 }
@@ -82,7 +85,7 @@ export function tenantList(tenants) {
     <tr>
       <td><a href="/admin/tenants/${t.id}"><strong>${esc(t.name)}</strong></a>
           <div class="mono" style="color:var(--dim)">${esc(t.collector_host)}</div></td>
-      <td>${t.active ? '<span class="pill ok">aktívny</span>' : '<span class="pill off">vypnutý</span>'}</td>
+      <td>${t.active ? '<span class="pill ok">aktívny</span>' : '<span class="pill off">vypnutý</span>'}${t.testing ? ' <span class="pill pending">test</span>' : ''}</td>
       <td>${t.destination_count}</td>
       <td>${t.sent_24h}</td>
       <td>${Number(t.dead_24h) > 0 ? `<span class="pill dead">${t.dead_24h}</span>` : '0'}</td>
@@ -136,12 +139,22 @@ export function tenantForm(t) {
       <div class="hint">Platí aj pre stránky z cache webu — nastavenie sa posiela priamo v <code>px.js</code>.
         Meta dostane eventy len so súhlasom marketing (CookieScript: targeting), GA4 so štatistikou (performance).</div>
 
+      <label for="server_only_events">Len zo servera webu</label>
+      <input id="server_only_events" name="server_only_events" class="mono" value="${esc(t?.server_only_events)}" placeholder="Purchase">
+      <div class="hint">Eventy, ktoré posiela podpísané len server webu (plugin). Rovnaký event z prehliadača sa ignoruje,
+        takže nikto nepodvrhne napr. nákup s vymyslenou sumou. Nechajte prázdne pri webe bez pluginu.</div>
+
       <label for="keep_path">Cookie keeper (cesta na webe klienta)</label>
       <input id="keep_path" name="keep_path" class="mono" value="${esc(t ? (t.keep_path || '') : '/wp-content/plugins/nowera-capi/keep.php')}" placeholder="/wp-content/plugins/nowera-capi/keep.php">
       <div class="hint">Súbor z pluginu nowera-capi, ktorý obnovuje cookies zo servera webu — Safari ich potom drží 90 dní namiesto 7.
         Nechajte prázdne pri webe bez pluginu.</div>
 
       ${t ? `<label style="display:flex;gap:8px;align-items:center;margin-top:18px">
+        <input type="checkbox" name="legacy_ingest" ${t.legacy_ingest !== false ? 'checked' : ''} style="width:auto">
+        Prijímať aj spoločný kľúč a staré verzie pluginu
+      </label>
+      <div class="hint">Len na prechod. Vypnite, keď má plugin na webe vlastný kľúč a verziu 0.9 alebo novšiu.</div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:18px">
         <input type="checkbox" name="active" ${t.active ? 'checked' : ''} style="width:auto"> Aktívny
       </label>` : ''}
       <div class="actions">
@@ -161,14 +174,17 @@ function destinationFields(kind, schema) {
 }
 
 export function tenantDetail(t, destinations, events, schemas) {
+  const testing = destinations.filter((d) => d.active && testModeActive(d.settings));
   const destRows = destinations.map((d) => {
     const keys = Object.keys(d.settings || {})
+      .filter((k) => k !== 'test_until')
       .map((k) => `${esc(k)}=${/token|secret/i.test(k) ? '••••••' : esc(d.settings[k])}`)
       .join('  ');
     return `<tr>
       <td><strong>${esc(d.kind)}</strong></td>
       <td class="mono" style="color:var(--dim)">${keys}</td>
-      <td>${d.active ? '<span class="pill ok">aktívna</span>' : '<span class="pill off">vypnutá</span>'}</td>
+      <td>${d.active ? '<span class="pill ok">aktívna</span>' : '<span class="pill off">vypnutá</span>'}${testModeActive(d.settings)
+        ? ` <span class="pill pending">test do ${time(d.settings.test_until)}</span>` : ''}</td>
       <td style="text-align:right;white-space:nowrap">
         <a class="btn" href="/admin/destinations/${d.id}/edit">Upraviť</a>
         <form class="inline" method="post" action="/admin/destinations/${d.id}/toggle"><button>${d.active ? 'Vypnúť' : 'Zapnúť'}</button></form>
@@ -187,7 +203,22 @@ export function tenantDetail(t, destinations, events, schemas) {
   const kindOptions = Object.keys(schemas)
     .map((k) => `<option value="${k}">${k === 'meta' ? 'Meta Conversions API' : 'GA4 Measurement Protocol'}</option>`).join('');
 
+  const banner = testing.map((d) => `
+    <div class="flash err" style="display:flex;gap:14px;align-items:center;justify-content:space-between">
+      <span>Testovací režim ${esc(d.kind === 'meta' ? 'Meta' : d.kind)} do ${time(d.settings.test_until)} —
+        serverové eventy idú len do Test Events a nezapočítavajú sa do kampaní.</span>
+      <form class="inline" method="post" action="/admin/destinations/${d.id}/test-off"><button>Ukončiť test</button></form>
+    </div>`).join('');
+
+  const keyState = t.ingest_secret
+    ? `Vlastný kľúč je nastavený.${t.ingest_secret_prev ? ' Predchádzajúci kľúč ešte platí.' : ''}`
+    : 'Web zatiaľ podpisuje spoločným kľúčom všetkých klientov.';
+  const legacyState = t.legacy_ingest !== false
+    ? 'Prijíma sa aj spoločný kľúč a staré verzie pluginu.'
+    : 'Prijíma sa len vlastný kľúč s časovou pečiatkou.';
+
   return `
+  ${banner}
   <h1>${esc(t.name)}</h1>
   <p class="sub mono">${esc(t.collector_host)}</p>
 
@@ -196,6 +227,19 @@ export function tenantDetail(t, destinations, events, schemas) {
     <p style="margin:0 0 10px">Vložte na web klienta do <code>&lt;head&gt;</code>:</p>
     <textarea readonly rows="2" class="mono" onclick="this.select()">&lt;script async src="https://${esc(t.collector_host)}/px.js"&gt;&lt;/script&gt;</textarea>
     <div class="hint">Loader sám naštartuje Meta pixel, odošle PageView a zdieľa <code>event_id</code> so serverovou vetvou.</div>
+  </div>
+
+  <div class="panel">
+    <p style="margin:0 0 6px"><strong>Kľúč pre plugin.</strong> ${keyState}</p>
+    <p class="hint" style="margin:0 0 14px">${legacyState}</p>
+    <div class="actions" style="margin-top:0">
+      <form class="inline" method="post" action="/admin/tenants/${t.id}/key"
+            onsubmit="return confirm('Vygenerovať nový kľúč? Doterajší bude platiť, kým ho nezrušíte.')">
+        <button>${t.ingest_secret ? 'Vygenerovať nový kľúč' : 'Vygenerovať kľúč'}</button></form>
+      ${t.ingest_secret_prev ? `<form class="inline" method="post" action="/admin/tenants/${t.id}/key/revoke-previous"
+            onsubmit="return confirm('Zrušiť predchádzajúci kľúč? Web, ktorý ho ešte používa, prestane posielať serverové eventy.')">
+        <button class="danger">Zrušiť predchádzajúci kľúč</button></form>` : ''}
+    </div>
   </div>
 
   <h2>Destinácie</h2>
@@ -278,5 +322,20 @@ export function eventLog(rows, tenants, filters) {
     ${rows.length ? `<table>
       <thead><tr><th>Klient</th><th>Event</th><th>Event ID</th><th>Cieľ</th><th>Stav</th><th>Čas</th><th>Chyba</th></tr></thead>
       <tbody>${body}</tbody></table>` : '<div class="empty">Nič nezodpovedá filtru.</div>'}
+  </div>`;
+}
+
+/** The tenant's new signing key, shown once. It never goes into a URL or a log. */
+export function ingestKeyPage(t, key, { created = false } = {}) {
+  return `
+  <h1>Kľúč pre plugin</h1>
+  <p class="sub">${esc(t.name)} · <span class="mono">${esc(t.collector_host)}</span></p>
+  <div class="panel" style="max-width:640px">
+    <label for="ingest_key">Kľúč</label>
+    <input id="ingest_key" class="mono" readonly value="${esc(key)}" onclick="this.select()">
+    <div class="hint">Zobrazí sa len teraz. Vložte ho do WordPressu: Nastavenia → Nowera CAPI → Kľúč.</div>
+    ${created ? '' : `<p class="hint" style="margin-top:14px">Predchádzajúci kľúč platí ďalej, kým ho na stránke klienta
+      nezrušíte, takže web medzitým nestratí žiadne eventy.</p>`}
+    <div class="actions"><a class="btn" href="/admin/tenants/${t.id}">Pokračovať na klienta</a></div>
   </div>`;
 }

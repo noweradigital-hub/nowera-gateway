@@ -8,6 +8,7 @@ import { loaderScript } from '../lib/loader.js';
 import { normalizeConsent } from '../lib/consent.js';
 import { isBot } from '../lib/bots.js';
 import { clientIp } from '../lib/client-ip.js';
+import { createLimiter } from '../lib/ratelimit.js';
 
 const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
 
@@ -59,13 +60,51 @@ function ensureIdentity(req, reply, tenant, body = {}) {
   return { fbp, fbc, visitorId };
 }
 
-function verifySignature(rawBody, signature) {
-  if (!signature) return false;
-  const expected = createHmac('sha256', config.ingestSecret).update(rawBody).digest('hex');
+// A signed request older than this is refused, so one captured on the way cannot
+// be sent again later.
+const REPLAY_WINDOW_SECONDS = 300;
+
+const hmacHex = (secret, text) => createHmac('sha256', secret).update(text).digest('hex');
+
+function sameHex(expected, given) {
   const a = Buffer.from(expected, 'utf8');
-  const b = Buffer.from(String(signature), 'utf8');
+  const b = Buffer.from(String(given), 'utf8');
   return a.length === b.length && timingSafeEqual(a, b);
 }
+
+/**
+ * Check a server-to-server request from the tenant's site.
+ *
+ * The tenant's own key signs `<timestamp>.<body>`, the timestamp travelling in
+ * X-NWR-Timestamp. While the tenant still allows the old way (legacy_ingest),
+ * the shared INGEST_SECRET and a signature over the body alone are accepted
+ * too — that is how sites keep working until their plugin has the new key.
+ */
+export function verifyServerRequest(tenant, rawBody, headers, nowMs = Date.now()) {
+  const signature = headers['x-nwr-signature'];
+  if (!signature) return 'bad signature';
+
+  const legacy = tenant.legacy_ingest !== false;
+  const secrets = [tenant.ingest_secret, tenant.ingest_secret_prev, legacy ? config.ingestSecret : null].filter(Boolean);
+
+  const stamp = headers['x-nwr-timestamp'];
+  if (stamp !== undefined) {
+    const ts = Number(stamp);
+    if (!Number.isInteger(ts) || Math.abs(nowMs / 1000 - ts) > REPLAY_WINDOW_SECONDS) return 'stale request';
+    return secrets.some((s) => sameHex(hmacHex(s, `${ts}.${rawBody}`), signature)) ? null : 'bad signature';
+  }
+  if (!legacy) return 'timestamp required';
+  return secrets.some((s) => sameHex(hmacHex(s, rawBody), signature)) ? null : 'bad signature';
+}
+
+/** Event names this tenant accepts only from its signed server leg. */
+function serverOnly(tenant) {
+  return new Set(String(tenant.server_only_events || '').split(',').map((s) => s.trim()).filter(Boolean));
+}
+
+// Browser requests per visitor address and minute. A shop page sends one to three
+// events; this only stops a script hammering the endpoint.
+const BROWSER_LIMIT = { windowMs: 60_000, max: 300 };
 
 /**
  * Data access is injected rather than imported directly so the tests can drive
@@ -75,6 +114,7 @@ function verifySignature(rawBody, signature) {
 export default async function collectRoutes(app, opts = {}) {
   const tenantByHost = opts.tenantByHost || defaultTenantByHost;
   const enqueue = opts.enqueue || defaultEnqueue;
+  const browserLimit = createLimiter(opts.browserLimit || BROWSER_LIMIT);
 
   // Keep the raw body around so the HMAC is computed over exactly what was sent.
   app.addHook('preParsing', async (req, _reply, payload) => {
@@ -136,6 +176,10 @@ export default async function collectRoutes(app, opts = {}) {
       .header('access-control-allow-origin', origin)
       .header('access-control-allow-credentials', 'true');
 
+    if (!browserLimit.hit(`${tenant.id}|${clientIp(req)}`)) {
+      return reply.code(429).send({ error: 'too many requests' });
+    }
+
     // A crawler is not a customer: answer it, but keep it out of the data and
     // give it no identity cookies.
     if (isBot(req.headers['user-agent'])) {
@@ -169,21 +213,26 @@ export default async function collectRoutes(app, opts = {}) {
       return reply.code(400).send({ error: err.message });
     }
 
+    // The site's server already reports these, signed. A browser copy adds
+    // nothing but a way to forge one, e.g. a Purchase with any value.
+    if (serverOnly(tenant).has(event.event_name)) {
+      return reply.send({ ok: true, event_id: event.event_id, queued: 0, ignored: 'server_only' });
+    }
+
     const queued = await enqueue(tenant.id, event, tenant.destinations);
     return reply.send({ ok: true, event_id: event.event_id, queued });
   });
 
   /**
-   * Server-to-server events from the WordPress plugin. Signed with the shared
-   * ingest secret so nobody can inject fake purchases into a client's dataset.
+   * Server-to-server events from the WordPress plugin, signed with the tenant's
+   * key so nobody can inject fake purchases into a client's dataset.
    */
   app.post('/s', async (req, reply) => {
     const tenant = await tenantByHost(req.headers.host);
     if (!tenant) return reply.code(404).send({ error: 'unknown host' });
 
-    if (!verifySignature(req.rawBody || '', req.headers['x-nwr-signature'])) {
-      return reply.code(401).send({ error: 'bad signature' });
-    }
+    const refused = verifyServerRequest(tenant, req.rawBody || '', req.headers);
+    if (refused) return reply.code(401).send({ error: refused });
 
     const body = req.body || {};
     if (isBot(body.client_user_agent || req.headers['user-agent'])) {

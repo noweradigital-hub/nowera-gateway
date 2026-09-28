@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      0.8.1
+ * Version:      0.9.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires PHP: 8.0
@@ -12,7 +12,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-const NOWERA_CAPI_OPTION = 'nowera_capi_settings';
+const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
+const NOWERA_CAPI_VERSION = '0.9.0';
 
 /** Contact fields kept, hashed, in the _nwr_ud cookie for returning customers. */
 const NOWERA_CAPI_STORED_KEYS = array( 'em', 'ph', 'fn', 'ln', 'ct', 'st', 'zp', 'country' );
@@ -83,11 +84,11 @@ function nowera_capi_render_settings(): void {
 					</td>
 				</tr>
 				<tr>
-					<th scope="row"><label for="nwr_secret">Ingest secret</label></th>
+					<th scope="row"><label for="nwr_secret">Kľúč</label></th>
 					<td>
 						<input id="nwr_secret" class="regular-text code" type="password" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[ingest_secret]"
 						       value="<?php echo esc_attr( $s['ingest_secret'] ); ?>" autocomplete="off">
-						<p class="description">Hodnota <code>INGEST_SECRET</code> z gateway servera. Podpisuje serverové eventy.</p>
+						<p class="description">Kľúč tohto webu z administrácie gatewaya (Klient → Kľúč pre plugin). Podpisuje serverové eventy.</p>
 					</td>
 				</tr>
 				<tr>
@@ -783,12 +784,16 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 	}
 	$body = wp_json_encode( $payload );
 
-	$response = wp_remote_post( 'https://' . $s['collector_host'] . '/s', array(
+	// The time is signed with the body, so a captured request cannot be sent again later.
+	$timestamp = (string) time();
+	$response  = wp_remote_post( 'https://' . $s['collector_host'] . '/s', array(
 		'timeout'  => 5,
 		'blocking' => false,
 		'headers'  => array(
 			'Content-Type'    => 'application/json',
-			'X-NWR-Signature' => hash_hmac( 'sha256', $body, $s['ingest_secret'] ),
+			'X-NWR-Timestamp' => $timestamp,
+			'X-NWR-Signature' => hash_hmac( 'sha256', $timestamp . '.' . $body, $s['ingest_secret'] ),
+			'X-NWR-Plugin'    => NOWERA_CAPI_VERSION,
 		),
 		'body'     => $body,
 	) );

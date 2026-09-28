@@ -18,7 +18,8 @@ export async function tenantByHost(hostHeader) {
 
   const tenant = await one(
     `SELECT id, slug, name, collector_host, allowed_origins, cookie_domain,
-            consent_mode, consent_prefix, keep_path
+            consent_mode, consent_prefix, keep_path,
+            ingest_secret, ingest_secret_prev, legacy_ingest, server_only_events
        FROM tenants
       WHERE lower(collector_host) = $1 AND active = TRUE`,
     [host],

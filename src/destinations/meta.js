@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { buildUserData } from '../lib/hash.js';
+import { testModeActive } from './test-mode.js';
 
 /**
  * Meta error codes that will never succeed on retry — a bad token or a malformed
@@ -53,7 +54,9 @@ export function buildPayload(event, settings) {
   if (Object.keys(custom).length) data.custom_data = custom;
 
   const body = { data: [data] };
-  if (settings.test_event_code) body.test_event_code = settings.test_event_code;
+  // A forgotten test code once kept a client's events out of their campaigns for
+  // a week; it now lapses on its own an hour after it was saved.
+  if (testModeActive(settings)) body.test_event_code = settings.test_event_code;
   return body;
 }
 

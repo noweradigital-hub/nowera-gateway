@@ -192,7 +192,10 @@ switch ( $event ) {
 
 $captured = nwr_captured();
 foreach ( $captured as &$c ) {
-	$c['signature_valid'] = hash_equals( hash_hmac( 'sha256', $c['raw'], NWR_TEST_SECRET ), (string) $c['signature'] );
+	// Signed as the gateway checks it: the timestamp, a dot, the body; and recent.
+	$c['signature_valid'] = null !== $c['timestamp']
+		&& abs( time() - (int) $c['timestamp'] ) < 300
+		&& hash_equals( hash_hmac( 'sha256', $c['timestamp'] . '.' . $c['raw'], NWR_TEST_SECRET ), (string) $c['signature'] );
 	unset( $c['raw'] );
 }
 nwr_out( array( 'event' => $event, 'sent' => $captured, 'footer' => $footer, 'purchase' => $purchase ?? null ) );
