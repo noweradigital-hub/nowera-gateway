@@ -592,3 +592,35 @@ test('nothing is kept without marketing consent, from ignored forms, or from non
   submit(b, form([field({ type: 'email', name: 'email', value: 'not-an-email' })]));
   assert.equal(b.jar.value('_nwr_ud'), undefined);
 });
+
+test('an AJAX add to cart is reported under the id the server already used', () => {
+  const b = browser();
+  const handlers = {};
+  b.window.jQuery = () => ({ on: (name, fn) => { handlers[name] = fn; } });
+  b.document.body = {};
+  b.run();
+  assert.ok(handlers.added_to_cart, 'listens for WooCommerce adding to cart');
+  const data = { content_ids: ['10'], value: 24.9, currency: 'EUR', content_type: 'product' };
+  handlers.added_to_cart({}, { 'div.widget_shopping_cart_content': '<div></div>', nwr_atc: JSON.stringify({ event_id: 'srv-atc-1', data }) });
+  const atc = b.posts.find((p) => p.body.event_name === 'AddToCart');
+  assert.equal(atc.body.event_id, 'srv-atc-1', 'one id with the server leg, so Meta counts one');
+  assert.deepEqual(atc.body.custom_data, data);
+  const pixel = tracked(b.fbq).find((c) => c[1] === 'AddToCart');
+  assert.equal(pixel[3].eventID, 'srv-atc-1');
+
+  const before = b.posts.length;
+  handlers.added_to_cart({}, { 'div.widget_shopping_cart_content': '<div></div>' });
+  handlers.added_to_cart({}, undefined);
+  handlers.added_to_cart({}, { nwr_atc: '{broken' });
+  assert.equal(b.posts.length, before, 'other themes and plugins adding to cart send nothing extra');
+});
+
+test('without jQuery yet, the cart listener waits for the page to load', () => {
+  const b = browser();
+  b.run();
+  const handlers = {};
+  b.window.jQuery = () => ({ on: (name, fn) => { handlers[name] = fn; } });
+  b.document.body = {};
+  b.fire('DOMContentLoaded');
+  assert.ok(handlers.added_to_cart);
+});

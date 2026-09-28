@@ -632,12 +632,6 @@ test('a plain add-to-cart post shows the browser leg on the next page, which is 
   assert.equal(purchase.left, null, 'shown once');
 });
 
-test('the page listens for AJAX adds to cart and reports them under the server id', async () => {
-  const page = await html(`/?post_type=product&p=${ids.simple}`);
-  assert.match(page, /jQuery\(document\.body\)\.on\('added_to_cart'/);
-  assert.match(page, /f\.nwr_atc/);
-});
-
 test('a gateway outage pauses sending, and the purchase is retried from the order', async () => {
   const { sent, purchase } = await fire('purchase_gateway_down');
   assert.equal(purchase.attempts, 1, 'after the first timeout the next event is not even tried');

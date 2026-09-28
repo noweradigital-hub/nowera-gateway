@@ -1,9 +1,9 @@
 {
   "version": "1.0.0",
   "file": "nowera-capi-1.0.0.zip",
-  "sha256": "81870bd330e624b542f1dda7ef8dfb45db99e42cbe04beb34dcc33809c0fbebc",
-  "signature": "OqdhavMNAK03HMgKJAfYEltYAI+xfEOg2jHYp9QTkaxFFIs5TwbsqNjmRKcEK/J0ZN/iJjzYVUqUc/mN9Rb6AA==",
-  "released_at": "2026-09-28T10:11:21.988Z",
+  "sha256": "ee28c4e7302ecb593515f4b1756c1a9378a89a6b000385991e9f12e280a6f75a",
+  "signature": "mxUyNOL8QWoKlZ4Sj/dsrBLdG12vj9JuwYkP/j0mNNenuj150uHMsyfLfF6WzGoBoLMoBDkJpd6ATLc1rk7QDA==",
+  "released_at": "2026-09-28T12:20:08.775Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,

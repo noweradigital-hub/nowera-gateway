@@ -1363,17 +1363,8 @@ function nowera_capi_pending_legs(): void {
 }
 add_action( 'template_redirect', 'nowera_capi_pending_legs', 6 );
 
-// The AJAX half: WooCommerce fires added_to_cart with the fragments of the response.
-add_action( 'wp_footer', function () {
-	$s = nowera_capi_settings();
-	if ( empty( $s['collector_host'] ) || empty( $s['load_script'] ) || ! function_exists( 'WC' ) ) {
-		return;
-	}
-	echo "<script>(function(){if(!window.jQuery)return;jQuery(document.body).on('added_to_cart',function(e,f){" .
-		"if(!f||!f.nwr_atc)return;try{var l=JSON.parse(f.nwr_atc);" .
-		"window.nwr=window.nwr||function(){(window.nwr.q=window.nwr.q||[]).push(arguments)};" .
-		"window.nwr('track','AddToCart',l.data,{eventID:l.event_id});}catch(x){}});})();</script>\n";
-}, 99 );
+// The AJAX half is picked up by px.js, which WooCommerce's added_to_cart hands the
+// fragments to; px.js comes fresh from the gateway even on pages cached long ago.
 
 /**
  * InitiateCheckout when the checkout page opens, classic or built from blocks.

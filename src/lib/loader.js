@@ -517,6 +517,31 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   d.addEventListener('submit', onFormSubmit, true);
   d.addEventListener('click', onFormClick, true);
 
+  // ---- add to cart in WooCommerce --------------------------------------------
+
+  // An AJAX add to cart answers with cart fragments, and the WordPress plugin puts
+  // the AddToCart it has just sent from the server into them (nwr_atc). Reported
+  // from here under the same id, Meta counts one. Here rather than in the page, so
+  // pages a site cached before the plugin knew it are covered as well.
+  var cartHooked = false;
+  function hookCart() {
+    if (cartHooked || !w.jQuery || !d.body) return;
+    cartHooked = true;
+    w.jQuery(d.body).on('added_to_cart', function (e, fragments) {
+      var raw = fragments && fragments.nwr_atc;
+      if (!raw) return;
+      try {
+        var leg = JSON.parse(raw);
+        if (leg && leg.event_id) track('AddToCart', leg.data || {}, { eventID: String(leg.event_id) });
+      } catch (err) {}
+    });
+  }
+  hookCart();
+  if (!cartHooked) {
+    d.addEventListener('DOMContentLoaded', hookCart);
+    if (w.addEventListener) w.addEventListener('load', hookCart);
+  }
+
   var queued = (w.nwr && w.nwr.q) || [];
   w.nwr = function (cmd) {
     var args = Array.prototype.slice.call(arguments, 1);
