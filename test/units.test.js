@@ -340,3 +340,19 @@ test('the limiter counts per key and forgets when the window ends', async () => 
   assert.equal(limit.hit('b', t0), true, 'another key is unaffected');
   assert.equal(limit.blocked('a', t0 + 1000), false, 'a new window starts clean');
 });
+
+test('token check reads the token itself, not the dataset it may only write to', async () => {
+  const { verifyMeta } = await import('../src/destinations/verify.js');
+  const calls = [];
+  const fake = (status, body) => async (url, opts) => {
+    calls.push({ url, auth: opts.headers.authorization });
+    return { ok: status === 200, status, json: async () => body };
+  };
+  const ok = await verifyMeta({ dataset_id: '1', access_token: 'tok' }, fake(200, { id: '9', name: 'Conversions API System User' }));
+  assert.deepEqual(ok, { ok: true, name: 'Conversions API System User' });
+  assert.match(calls[0].url, /\/me\?fields=id,name$/);
+  assert.equal(calls[0].auth, 'Bearer tok', 'the token goes in the header, never in the URL');
+  assert.ok(!calls[0].url.includes('tok'));
+  const bad = await verifyMeta({ dataset_id: '1', access_token: 'tok' }, fake(400, { error: { code: 190, message: 'x' } }));
+  assert.deepEqual(bad, { ok: false, error: 'token je neplatný alebo expirovaný' });
+});
