@@ -1,4 +1,5 @@
 import { many, one } from '../db.js';
+import { open } from './secrets.js';
 
 const TTL_MS = 30_000;
 const cache = new Map(); // host -> { at, value }
@@ -26,6 +27,8 @@ export async function tenantByHost(hostHeader) {
   );
   let value = null;
   if (tenant) {
+    tenant.ingest_secret = open(tenant.ingest_secret);
+    tenant.ingest_secret_prev = open(tenant.ingest_secret_prev);
     tenant.destinations = await many(
       `SELECT id, kind, settings FROM destinations
         WHERE tenant_id = $1 AND active = TRUE`,

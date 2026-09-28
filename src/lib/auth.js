@@ -1,4 +1,4 @@
-import { randomBytes, scrypt as _scrypt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, scrypt as _scrypt, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { one, query } from '../db.js';
 
@@ -21,12 +21,18 @@ export async function verifyPassword(password, stored) {
   return timingSafeEqual(derived, expected);
 }
 
+/**
+ * The database keeps only a hash of each session token, so a copy of the
+ * database (or a backup) cannot be turned into a signed-in cookie.
+ */
+const tokenHash = (token) => createHash('sha256').update(String(token)).digest('hex');
+
 export async function createSession(userId) {
   const token = randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + SESSION_DAYS * 86400_000);
   await query(
     'INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)',
-    [token, userId, expires],
+    [tokenHash(token), userId, expires],
   );
   return { token, expires };
 }
@@ -38,12 +44,12 @@ export async function getSessionUser(token) {
        FROM sessions s
        JOIN admin_users u ON u.id = s.user_id
       WHERE s.token = $1 AND s.expires_at > now()`,
-    [token],
+    [tokenHash(token)],
   );
 }
 
 export const destroySession = (token) =>
-  query('DELETE FROM sessions WHERE token = $1', [token]);
+  query('DELETE FROM sessions WHERE token = $1', [tokenHash(token || '')]);
 
 export const purgeExpiredSessions = () =>
   query('DELETE FROM sessions WHERE expires_at < now()');
@@ -73,7 +79,7 @@ export async function changePassword(userId, newPassword, keepToken) {
   await query('UPDATE admin_users SET password_hash = $1 WHERE id = $2', [hash, userId]);
   const { rowCount } = await query(
     'DELETE FROM sessions WHERE user_id = $1 AND token <> $2',
-    [userId, keepToken || ''],
+    [userId, keepToken ? tokenHash(keepToken) : ''],
   );
   return rowCount;
 }

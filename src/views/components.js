@@ -18,6 +18,13 @@ export const money = (v, currency = 'EUR') => {
 };
 export const seconds = (s) => (s === null || s === undefined ? '—' : `${Number(s).toLocaleString('sk-SK', { maximumFractionDigits: 1 })} s`);
 export const dateTime = (d) => (d ? new Date(d).toLocaleString('sk-SK', { dateStyle: 'short', timeStyle: 'medium', timeZone: 'Europe/Bratislava' }) : '—');
+/** A file size: "840 kB", "12,4 MB". */
+export const bytes = (n) => {
+  const v = Number(n) || 0;
+  if (v < 1000) return `${v} B`;
+  if (v < 1e6) return `${Math.round(v / 1000)} kB`;
+  return `${(v / 1e6).toLocaleString('sk-SK', { maximumFractionDigits: v < 1e8 ? 1 : 0 })} MB`;
+};
 export const time = (d) => new Date(d).toLocaleTimeString('sk-SK', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Bratislava' });
 
 export const LEVEL_TEXT = { ok: 'v poriadku', warn: 'varovanie', bad: 'chyba', off: 'vypnutý' };

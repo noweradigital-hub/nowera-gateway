@@ -111,23 +111,105 @@ export function tenantForm(t) {
   </div>`;
 }
 
-export function newTenantPage() {
+/**
+ * A new client in three steps on one form: the website (everything else follows
+ * from its address), the DNS record, consent and plugin.
+ */
+export function newTenantPage({ serverIp, adminHost }) {
+  const optional = (id, label, hint, placeholder) => `
+      <div><label for="${id}">${label}</label>
+        <input id="${id}" name="${id}" type="text" class="mono" placeholder="${esc(placeholder)}" data-derived>
+        ${hint ? `<div class="hint">${hint}</div>` : ''}</div>`;
   return `
   <p class="crumbs"><a href="/admin">Prehľad</a> / Nový klient</p>
-  <div class="head"><div><h1>Nový klient</h1><p class="meta"><span>Po vytvorení dostanete kľúč pre plugin a kontrolný zoznam inštalácie.</span></p></div></div>
-  <div style="max-width:720px">${tenantForm(null)}</div>`;
+  <div class="head"><div><h1>Nový klient</h1><p class="meta"><span>tri kroky, zvyšok sa overí sám</span></p></div></div>
+  <div class="grid two">
+    <div class="card">
+      <form class="card-b form" method="post" action="/admin/tenants" id="new-tenant">
+        <div class="group-t">1 · Web</div>
+        <div><label for="name">Názov</label><input id="name" name="name" type="text" required placeholder="Klient s.r.o."></div>
+        <div><label for="site">Adresa webu</label>
+          <input id="site" name="site" type="text" class="mono" required placeholder="https://www.klient.sk" autocomplete="off">
+          <div class="hint">Z nej sa doplní collector host, povolené adresy aj cookie doména.</div></div>
+        <details><summary class="dim" style="cursor:pointer;font-size:13px">Upresniť doplnené údaje</summary>
+          <div class="form" style="margin-top:12px">
+            ${optional('collector_host', 'Collector host', 'Subdoména klienta, na ktorej beží px.js a prijímajú sa eventy.', 't.klient.sk')}
+            ${optional('allowed_origins', 'Povolené adresy webu', 'Čiarkou oddelené. Iba z nich sa prijmú eventy z prehliadača.', 'https://klient.sk,https://www.klient.sk')}
+            ${optional('cookie_domain', 'Cookie doména', '', '.klient.sk')}
+            ${optional('slug', 'Slug', 'Malé písmená, čísla a pomlčky.', 'klient')}
+          </div>
+        </details>
+
+        <div class="group-t">2 · DNS</div>
+        <p class="dim" style="margin:0;font-size:13px">U klienta pridajte záznam
+          <span class="mono" id="dns-name">t.klient.sk</span> → <span class="mono">CNAME ${esc(adminHost)}</span>${serverIp ? ` (alebo <span class="mono">A ${esc(serverIp)}</span>)` : ''}.
+          Ak je doména v Cloudflare, môže ísť cez proxy. Certifikát si gateway vybaví sám, keď záznam začne platiť.</p>
+
+        <div class="group-t">3 · Súhlasy a plugin</div>
+        <div><label for="consent_mode">Nástroj na súhlasy</label>
+          <select id="consent_mode" name="consent_mode">
+            <option value="auto" selected>Rozpoznať automaticky z webu</option>
+            ${Object.entries(CONSENT_MODES).map(([k, label]) => `<option value="${k}">${esc(label)}</option>`).join('')}
+          </select></div>
+        <label class="check"><input type="checkbox" name="wordpress" checked>
+          <span>WordPress s pluginom Nowera CAPI<br><span class="dim" style="font-size:12.5px">Podpísané eventy zo servera webu a cookie keeper, ktorý v Safari drží cookies 90 dní.</span></span></label>
+        <div class="actions"><button class="btn primary" type="submit">Vytvoriť klienta</button><a class="btn" href="/admin">Späť</a></div>
+      </form>
+      <script>
+      (function () {
+        var multi = ['co.uk','org.uk','com.pl','net.pl','org.pl','com.au','co.at','or.at','com.hr','co.hu','com.ua','com.ro','com.cy'];
+        var site = document.getElementById('site');
+        var fields = { collector_host: '', allowed_origins: '', cookie_domain: '', slug: '' };
+        function derive(value) {
+          var raw = value.trim(); if (!raw) return null;
+          try { var u = new URL(/^https?:\\/\\//i.test(raw) ? raw : 'https://' + raw); } catch (e) { return null; }
+          var host = u.hostname.toLowerCase().replace(/\\.$/, '');
+          if (!/^[a-z0-9.-]+\\.[a-z]{2,}$/.test(host)) return null;
+          var labels = host.split('.');
+          var keep = multi.indexOf(labels.slice(-2).join('.')) >= 0 ? 3 : 2;
+          var domain = labels.slice(-keep).join('.');
+          var origins = ['https://' + domain, 'https://www.' + domain];
+          if (origins.indexOf('https://' + host) < 0) origins.push('https://' + host);
+          return { collector_host: 't.' + domain, allowed_origins: origins.join(','), cookie_domain: '.' + domain,
+            slug: labels.slice(-keep)[0].replace(/[^a-z0-9-]/g, '-').slice(0, 40) };
+        }
+        site.addEventListener('input', function () {
+          var d = derive(site.value);
+          Object.keys(fields).forEach(function (k) {
+            var input = document.getElementById(k);
+            input.placeholder = d ? d[k] : input.defaultValue || input.placeholder;
+          });
+          document.getElementById('dns-name').textContent = d ? d.collector_host : 't.klient.sk';
+        });
+      })();
+      </script>
+    </div>
+    <div class="card"><div class="card-b dim" style="font-size:13px;display:grid;gap:8px">
+      <b style="color:var(--text);font-weight:600">Po vytvorení</b>
+      <span>Dostanete párovací kód pre plugin (ukáže sa raz) a otvorí sa záložka Inštalácia s kontrolným zoznamom.</span>
+      <span>Nový klient začína s vlastným kľúčom, bez spoločného kľúča a so starými verziami pluginu vypnutými.</span>
+      <span>Destinácie (Meta, GA4) pridáte v záložke Destinácie.</span>
+    </div></div>
+  </div>`;
 }
 
-/** The tenant's new signing key, shown once. It never goes into a URL or a log. */
-export function ingestKeyPage(t, key, { created = false } = {}) {
+/**
+ * The tenant's new signing key, shown once, and the same key with the host as a
+ * pairing code for plugin 1.0. It never goes into a URL or a log.
+ */
+export function ingestKeyPage(t, key, { created = false, pairing = null, notes = [] } = {}) {
   return `
   <p class="crumbs"><a href="/admin">Prehľad</a> / <a href="/admin/tenants/${t.id}">${esc(t.name)}</a> / Kľúč</p>
   <div class="head"><div><h1>Kľúč pre plugin</h1><p class="meta"><span>${esc(t.name)}</span><span class="mono">${esc(t.collector_host)}</span></p></div></div>
+  ${notes.map((n) => `<p class="dim" style="margin:-6px 0 14px;font-size:13px">${esc(n)}</p>`).join('')}
   <div class="card" style="max-width:640px">
     <div class="card-b form">
+      ${pairing ? `<div><label for="pairing_code">Párovací kód</label>
+        <input id="pairing_code" type="text" class="mono" readonly value="${esc(pairing)}" onclick="this.select()">
+        <div class="hint">Plugin Nowera CAPI 1.0 a novší: Nastavenia → Nowera CAPI → Párovací kód. Vyplní collector host aj kľúč naraz.</div></div>` : ''}
       <div><label for="ingest_key">Kľúč</label>
         <input id="ingest_key" type="text" class="mono" readonly value="${esc(key)}" onclick="this.select()">
-        <div class="hint">Zobrazí sa len teraz. Vložte ho do WordPressu: Nastavenia → Nowera CAPI → Kľúč.</div></div>
+        <div class="hint">Zobrazí sa len teraz. Staršie verzie pluginu: Nastavenia → Nowera CAPI → Kľúč.</div></div>
       ${created ? '' : `<p class="hint" style="margin:0">Predchádzajúci kľúč platí ďalej, kým ho na stránke klienta
         nezrušíte, takže web medzitým nestratí žiadne eventy.</p>`}
       <div class="actions"><a class="btn primary" href="/admin/tenants/${t.id}${created ? '/instalacia' : '/nastavenia'}">Pokračovať</a></div>

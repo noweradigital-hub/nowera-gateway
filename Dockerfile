@@ -7,6 +7,8 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
 COPY src ./src
+# Signed plugin releases, served to the plugin's updater (scripts/release-plugin.mjs).
+COPY wp-plugin/releases ./wp-plugin/releases
 
 # Run unprivileged; the image holds no writable state (everything lives in Postgres).
 USER node

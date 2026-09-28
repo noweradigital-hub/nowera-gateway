@@ -2,8 +2,13 @@ const env = process.env;
 
 export const config = {
   port: Number(env.PORT || 8080),
+  // Container-internal: the collector list for Traefik. Not routed from outside.
+  internalPort: Number(env.INTERNAL_PORT || 8081),
   isProd: env.NODE_ENV === 'production',
   sessionSecret: env.SESSION_SECRET || '',
+  // Optional: the key that seals secrets in the database. Without it the key is
+  // derived from SESSION_SECRET. See src/lib/secrets.js.
+  secretsKey: env.SECRETS_KEY || '',
   ingestSecret: env.INGEST_SECRET || '',
   databaseUrl: env.DATABASE_URL || '',
   adminHost: env.ADMIN_HOST || '',

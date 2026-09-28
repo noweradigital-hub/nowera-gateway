@@ -101,3 +101,47 @@ test('the alerts page never shows the stored webhook and escapes messages', asyn
   assert.match(html, /name="rule_token" checked/);
   assert.doesNotMatch(html, /name="rule_failing" checked/);
 });
+
+test('inline scripts on the pages are valid JavaScript', async () => {
+  const { newTenantPage } = await import('../src/views/pages.js');
+  const { backupsPage } = await import('../src/views/backups.js');
+  const pages = {
+    newTenant: newTenantPage({ serverIp: '31.97.179.201', adminHost: 'signals.nwra.sk' }),
+    backups: backupsPage({ settings: { keep_days: 30 }, state: {}, list: [], emptyInstall: true, keySource: 'SESSION_SECRET', isConfigured: false }),
+    destinations: destinationsTab(tenant, [], SCHEMAS, 'v26.0'),
+  };
+  for (const [name, html] of Object.entries(pages)) {
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    assert.ok(scripts.length, `${name} has a script`);
+    for (const js of scripts) assert.doesNotThrow(() => new Function(js), `${name}: script does not parse`);
+  }
+});
+
+test('the new client form derives the rest from the website address in the browser too', async () => {
+  const { newTenantPage } = await import('../src/views/pages.js');
+  const html = newTenantPage({ serverIp: '31.97.179.201', adminHost: 'signals.nwra.sk' });
+  assert.match(html, /CNAME signals\.nwra\.sk/);
+  assert.match(html, /A 31\.97\.179\.201/);
+  assert.match(html, /<option value="auto" selected>/);
+  const js = html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const derive = new Function(`${js.replace(/site\.addEventListener[\s\S]*$/, '').replace(/var site = [^;]+;/, '').replace(/^\s*\(function \(\) \{/, '')}; return derive;`)();
+  assert.deepEqual(derive('https://www.klient.sk/'), {
+    collector_host: 't.klient.sk', allowed_origins: 'https://klient.sk,https://www.klient.sk', cookie_domain: '.klient.sk', slug: 'klient',
+  });
+});
+
+test('backups never show the stored storage secret, and the key only after a password', async () => {
+  const { backupsPage, recoveryKeyPage } = await import('../src/views/backups.js');
+  const html = backupsPage({
+    settings: { endpoint: 'https://a.r2.cloudflarestorage.com', bucket: 'b', prefix: 'gw/', access_key_id: 'AKID', secret_access_key: 'SUPERSECRET', keep_days: 30 },
+    state: { last_ok_at: new Date().toISOString(), last_ok_size: 2_100_000, last_counts: { tenants: 3, events: 5344 } },
+    list: [{ key: 'gw/2026-09-28T033000Z.nwrb', size: 2_100_000, modified: new Date() }],
+    emptyInstall: false, keySource: 'SESSION_SECRET', totpEnabled: true, isConfigured: true,
+  });
+  assert.ok(!html.includes('SUPERSECRET'));
+  assert.match(html, /uložený — nechajte prázdne/);
+  assert.match(html, /name="code"/, 'with 2FA on, the key needs a code too');
+  assert.doesNotMatch(html, /restore-form/, 'restore only on an empty installation');
+  assert.match(html, /stiahnut\?key=gw%2F2026-09-28T033000Z\.nwrb/);
+  assert.match(recoveryKeyPage('nwrk1_abc'), /value="nwrk1_abc"/);
+});

@@ -2,6 +2,8 @@ import { config } from '../config.js';
 import { many, one, query } from '../db.js';
 import { destinationStats } from './stats.js';
 import { runChecks } from './checks.js';
+import { open, seal } from './secrets.js';
+import { backupCondition } from './backup.js';
 
 /**
  * Problems worth a message: the gateway checks every few minutes and sends each
@@ -15,6 +17,7 @@ export const RULES = {
   no_events: { title: 'Žiadne eventy', hint: 'Klient nič nepošle 2 hodiny medzi 7:00 a 23:00.' },
   plugin_silent: { title: 'Plugin mlčí', hint: '24 hodín bez podpísaného eventu zo servera webu.' },
   site_down: { title: 'Collector nedostupný', hint: 'px.js sa nenačíta pri kontrole inštalácie (každých 15 minút).' },
+  backup: { title: 'Záloha zlyhala', hint: '36 hodín bez úspešnej zálohy databázy (len keď sú zálohy nastavené).' },
 };
 
 const DEFAULTS = { webhook_url: '', rules: Object.fromEntries(Object.keys(RULES).map((k) => [k, true])) };
@@ -22,14 +25,15 @@ const DEFAULTS = { webhook_url: '', rules: Object.fromEntries(Object.keys(RULES)
 export async function alertSettings() {
   const row = await one(`SELECT value FROM app_settings WHERE key = 'alerts'`);
   const value = row?.value || {};
-  return { ...DEFAULTS, ...value, rules: { ...DEFAULTS.rules, ...(value.rules || {}) } };
+  // The webhook path is as good as a password to whoever can post to n8n.
+  return { ...DEFAULTS, ...value, webhook_url: open(value.webhook_url || ''), rules: { ...DEFAULTS.rules, ...(value.rules || {}) } };
 }
 
 export async function saveAlertSettings(value) {
   await query(
     `INSERT INTO app_settings (key, value, updated_at) VALUES ('alerts', $1, now())
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [JSON.stringify(value)],
+    [JSON.stringify({ ...value, webhook_url: seal(value.webhook_url || '') })],
   );
 }
 
@@ -92,13 +96,16 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
       }
     }
   }
+  const backup = await backupCondition(now).catch(() => null);
+  if (backup) out.push(backup);
   return out;
 }
 
 function payload(event, alert, tenant) {
   const base = `https://${config.adminHost}`;
   const tab = ['token', 'failing'].includes(alert.rule) ? 'destinacie' : alert.rule === 'site_down' ? 'instalacia' : '';
-  const url = tenant ? `${base}/admin/tenants/${tenant.id}${tab ? `/${tab}` : ''}` : `${base}/admin/upozornenia`;
+  const url = tenant ? `${base}/admin/tenants/${tenant.id}${tab ? `/${tab}` : ''}`
+    : `${base}/admin/${alert.rule === 'backup' ? 'zalohy' : 'upozornenia'}`;
   const title = RULES[alert.rule]?.title || alert.rule;
   const mark = event === 'alert.resolved' ? 'Vyriešené' : event === 'alert.test' ? 'Skúška' : 'Problém';
   return {

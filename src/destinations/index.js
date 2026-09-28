@@ -1,5 +1,6 @@
 import * as meta from './meta.js';
 import * as ga4 from './ga4.js';
+import { open, seal } from '../lib/secrets.js';
 
 export const drivers = { meta, ga4 };
 
@@ -58,3 +59,20 @@ export const SCHEMAS = {
     { key: 'api_secret', label: 'API secret', required: true, secret: true },
   ],
 };
+
+/** Names of the settings fields that hold secrets for this kind of destination. */
+export const secretKeys = (kind) => (SCHEMAS[kind] || []).filter((f) => f.secret).map((f) => f.key);
+
+/** Settings as stored: the secret fields sealed. */
+export function sealSettings(kind, settings = {}) {
+  const out = { ...settings };
+  for (const key of secretKeys(kind)) if (out[key]) out[key] = seal(out[key]);
+  return out;
+}
+
+/** Settings as a driver needs them: the secret fields opened. */
+export function openSettings(kind, settings = {}) {
+  const out = { ...settings };
+  for (const key of secretKeys(kind)) if (out[key]) out[key] = open(out[key]);
+  return out;
+}

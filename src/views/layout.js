@@ -39,6 +39,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .nav a:hover{background:var(--surface-2);color:var(--text);text-decoration:none}
 .nav a.on{background:var(--accent-soft);color:var(--accent)}
 .nav .count{font:600 11px/1 var(--mono);padding:3px 6px;border-radius:99px;background:var(--bad-soft);color:var(--bad)}
+.nav .count.warn{background:var(--warn-soft);color:var(--warn)}
 .nav-label{font:600 10.5px/1 var(--mono);text-transform:uppercase;letter-spacing:.09em;color:var(--faint);padding:0 10px 6px}
 .side-foot{margin-top:auto;font-size:12.5px;color:var(--dim);padding:0 10px;display:grid;gap:6px}
 .side-foot b{color:var(--text);font-weight:500;overflow-wrap:anywhere}
@@ -161,7 +162,7 @@ const NAV = [
  * The dashboard frame. Without a user (the sign-in page) there is no sidebar.
  * `nav` marks the active sidebar item.
  */
-export function page({ title, user, body, flash, nav = 'prehlad', alerts = 0 }) {
+export function page({ title, user, body, flash, nav = 'prehlad', alerts = 0, backupWarn = false }) {
   const counts = { alerts };
   const flashHtml = flash ? `<div class="flash ${flash.type === 'err' ? 'err' : 'ok'}" role="status">${esc(flash.text)}</div>` : '';
   const head = `<!doctype html><html lang="sk"><head><meta charset="utf-8">
@@ -176,6 +177,7 @@ export function page({ title, user, body, flash, nav = 'prehlad', alerts = 0 }) 
     ${NAV.map((n) => `<a href="${n.href}"${n.key === nav ? ' class="on"' : ''}>${n.label}${n.count && counts[n.count] ? ` <span class="count">${counts[n.count]}</span>` : ''}</a>`).join('')}
     <div class="nav-label" style="margin-top:14px">Správa</div>
     <a href="/admin/pouzivatelia"${nav === 'pouzivatelia' ? ' class="on"' : ''}>Používatelia</a>
+    <a href="/admin/zalohy"${nav === 'zalohy' ? ' class="on"' : ''}>Zálohy${backupWarn ? ' <span class="count warn" title="Zálohy nie sú nastavené">!</span>' : ''}</a>
   </nav>
   <div class="side-foot"><b>${esc(user.email)}</b>
     <span><a href="/admin/account">Môj účet</a> · <form class="inline" method="post" action="/admin/logout"><button class="linkbtn">Odhlásiť</button></form></span>

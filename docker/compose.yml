@@ -54,7 +54,11 @@ services:
       NODE_ENV: production
       PORT: "8080"
       DATABASE_URL: postgres://gateway:${DB_PASSWORD}@db:5432/gateway
+      # SESSION_SECRET also derives the key that seals tokens in the database and
+      # encrypts backups, unless SECRETS_KEY is set. Before ever changing it, set
+      # SECRETS_KEY to the recovery key from Zálohy, or the stored tokens are lost.
       SESSION_SECRET: ${SESSION_SECRET}
+      SECRETS_KEY: ${SECRETS_KEY:-}
       INGEST_SECRET: ${INGEST_SECRET}
       ADMIN_HOST: ${ADMIN_HOST}
     depends_on:
@@ -76,8 +80,10 @@ services:
       - traefik.http.routers.nwrgw-admin.tls.certresolver=mytlschallenge
       - traefik.http.routers.nwrgw-admin.service=nwrgw
 
-      # Client collector hosts. Add one Host(`...`) per client, OR-joined, and
-      # redeploy; Traefik requests the certificate itself once DNS resolves here.
+      # Client collector hosts. Once Traefik in the `root` project reads the
+      # gateway's list (HTTP provider, below), new clients need nothing here.
+      # Until then: add one Host(`...`) per client, OR-joined, and redeploy;
+      # Traefik requests the certificate itself once DNS resolves here.
       # Keep hosts you do not control out of this rule - failed ACME challenges
       # count against the Let's Encrypt rate limit. The record must be DNS-only:
       # behind a Cloudflare proxy the TLS-ALPN challenge never reaches us.
@@ -106,6 +112,12 @@ services:
 
 volumes:
   gateway-db-data:
+
+# Automatic routing: Traefik (project `root`) polls the collector list from the
+# gateway's internal port, reachable only on the Docker networks:
+#   --providers.http.endpoint=http://nowera-gateway-gateway-1:8081/traefik/config
+#   --providers.http.pollInterval=30s
+# A host appears there once its DNS points at this server or at Cloudflare.
 
 networks:
   proxy:

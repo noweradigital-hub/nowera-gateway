@@ -50,7 +50,12 @@ different approval process. Configure the `ga4` destination and import in Ads.
 | `src/lib/hash.js` | Meta PII normalization + SHA-256 |
 | `src/lib/queue.js` | Postgres-backed delivery queue with backoff |
 | `src/destinations/` | One module per destination (`meta`, `ga4`) |
+| `src/lib/secrets.js` | Seals tokens and keys stored in Postgres (AES-256-GCM) |
+| `src/lib/backup.js` | Nightly encrypted backups to S3-compatible storage, restore |
+| `src/lib/routing.js` | Collector hosts for Traefik's HTTP provider |
+| `src/routes/updates.js` | Signed plugin releases for the plugin's updater |
 | `wp-plugin/nowera-capi/` | WordPress/WooCommerce server-leg plugin |
+| `scripts/release-plugin.mjs` | Builds and signs a plugin release into `wp-plugin/releases/` |
 
 ## Local development
 
@@ -98,27 +103,51 @@ by label using the existing `mytlschallenge` ACME resolver.
 
 ## Adding a client
 
-1. **DNS:** the client points `t.<their-domain>` at the gateway's address.
-2. **Traefik:** append `Host(\`t.klient.sk\`)` to the `nwrgw-collector` router
-   rule in `docker/compose.yml` and redeploy. The certificate issues on its own.
-3. **Admin:** create the tenant (collector host, allowed origins, cookie domain),
-   then add a `meta` destination (dataset ID + CAPI token) and a `ga4` one.
-4. **Site:** install `wp-plugin/nowera-capi`, set the collector host and the
-   ingest secret. Leave the loader checkbox on unless GTM injects it.
-5. Press **Poslať testovací event** and confirm it in Meta Events Manager under
-   Test Events, then check the event shows `sent` in the log.
+1. **Admin → Nový klient:** the name and the website address; the collector host,
+   allowed origins, cookie domain and the consent tool follow from it. The page
+   after it shows the pairing code (host and key for the plugin) once.
+2. **DNS:** the client adds `t.<their-domain>` → `CNAME <ADMIN_HOST>` (or an A
+   record to the VPS), directly or proxied by Cloudflare (SSL mode Full).
+3. **Routing:** once Traefik reads the gateway's host list (HTTP provider, see
+   `docker/compose.yml`), the host is routed as soon as its DNS points here, and a
+   direct one gets its certificate. Until then: append `Host(\`t.klient.sk\`)`
+   to the `nwrgw-collector` router rule and redeploy.
+4. **Destinations:** add Meta (dataset ID + CAPI token) and optionally GA4.
+5. **Site:** install `wp-plugin/nowera-capi` and paste the pairing code (older
+   plugins: host and key separately). The Inštalácia tab checks the rest.
+6. Turn on Meta test mode, press **Poslať testovací event**, confirm it in Events
+   Manager under Test Events.
+
+## Backups and secrets
+
+- Tokens, the sites' signing keys, authenticator secrets, the alert webhook and
+  the backup credentials are sealed in Postgres with AES-256-GCM. The key is
+  `SECRETS_KEY`, or derived from `SESSION_SECRET` when that is unset — **never
+  change `SESSION_SECRET` without first setting `SECRETS_KEY` to the recovery key**
+  (Zálohy → Kľúč na obnovu), or the stored tokens cannot be opened.
+- **Zálohy** backs the whole database up every night (3–6 h Bratislava) to any
+  S3-compatible storage (Cloudflare R2 recommended), encrypted with that key,
+  kept `keep_days`. "Overiť poslednú zálohu" downloads and checks the latest one.
+- Restore on a new server: set `SECRETS_KEY` to the recovery key, deploy, sign in
+  with the seeded admin, and upload the `.nwrb` file under Zálohy (only offered
+  while the installation has no clients).
+- Plugin releases are signed with an Ed25519 key kept outside the repository
+  (`~/.config/nowera-gateway/plugin-signing-key.pem`); the plugin refuses an
+  update whose signature does not match a key built into it.
 
 ## Security model
 
 - `/e` is authenticated by `Origin` against the tenant's allowlist — the page is
   public, so there is no secret to hold. It can only write to that tenant.
-- `/s` is authenticated by HMAC-SHA256 over the raw body with `INGEST_SECRET`.
-  Without it anyone could inject fake purchases into a client's dataset.
+- `/s` is authenticated by HMAC-SHA256 over the timestamp and raw body with the
+  tenant's own key (±5 minutes). Without it anyone could inject fake purchases
+  into a client's dataset.
 - The admin UI answers only on `ADMIN_HOST`; a client's collector subdomain
   resolves to the same process but 404s every admin route.
 - Admin sessions use a `SameSite=Strict` HttpOnly cookie, which also blocks
   cross-site form POSTs.
-- Access tokens live in Postgres and are masked in the UI.
+- Access tokens are sealed in Postgres and never rendered in the UI; session
+  tokens are stored only as hashes.
 
 ## Operational notes
 

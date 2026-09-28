@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { many, query } from '../db.js';
-import { consentAllows, dedupeKeyFor, driverFor } from '../destinations/index.js';
+import { consentAllows, dedupeKeyFor, driverFor, openSettings } from '../destinations/index.js';
 
 // Exponential backoff, capped. Index = attempt number.
 const BACKOFF_SECONDS = [10, 30, 120, 600, 1800, 3600];
@@ -118,7 +118,7 @@ export async function tick(log) {
       return;
     }
     try {
-      const result = await driverFor(dest.kind).send(row.payload, dest.settings || {});
+      const result = await driverFor(dest.kind).send(row.payload, openSettings(dest.kind, dest.settings || {}));
       if (result.ok) {
         await query(`UPDATE events SET status = 'sent', sent_at = now(), last_error = NULL, response = $2 WHERE id = $1`,
           [row.id, result.response ? String(result.response).slice(0, 500) : null]);
