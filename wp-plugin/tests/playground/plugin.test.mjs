@@ -695,3 +695,46 @@ test('an update installs only with a valid signature from the release key', asyn
   assert.equal(r.auto_on, true);
   assert.equal(r.update_uri, 'https://signals.nwra.sk/wp/nowera-capi');
 });
+
+// ------------------------------------------------------------- plugin 1.0.1
+
+test('a partial refund goes from the server with the refunded items, marked as never seen by a browser', async () => {
+  const { sent, purchase } = await fire('refund_partial');
+  const refunds = sent.filter((e) => e.body.event_name === 'Refund');
+  assert.equal(refunds.length, 1);
+  const b = refunds[0].body;
+  assert.equal(b.browserless, true);
+  assert.match(b.event_id, /^refund-\d+$/);
+  assert.equal(b.custom_data.order_id, purchase.order, 'GA4 matches it to the purchase by this id');
+  assert.equal(b.custom_data.contents.length, 1);
+  assert.equal(b.custom_data.contents[0].quantity, 1);
+  assert.ok(b.custom_data.value > 0 && b.custom_data.value < purchase.total);
+  assert.equal(Object.keys(b.user_data).length, 0, 'no contact details: GA4 needs none');
+  assert.equal(refunds[0].signature_valid, true);
+});
+
+test('a full refund reports the whole order', async () => {
+  const { sent, purchase } = await fire('refund_full');
+  const refunds = sent.filter((e) => e.body.event_name === 'Refund');
+  assert.equal(refunds.length, 1);
+  assert.equal(refunds[0].body.custom_data.value, purchase.total);
+});
+
+test('no refund for a buyer who allowed no statistics: GA4 never counted the purchase', async () => {
+  await setConsent('cookiescript');
+  try {
+    const { sent } = await fireCs('refund_partial', 'targeting');
+    assert.equal(sent.filter((e) => e.body.event_name === 'Refund').length, 0);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('only a purchase whose thank-you page never loaded is marked as browserless', async () => {
+  const noReturn = await fire('paid_no_return', '_fbp:fb.1.1700000000000.1234567890');
+  assert.equal(noReturn.sent[0].body.browserless, true, 'nothing in the browser reported it');
+  const thankYou = await fire('purchase');
+  assert.equal(thankYou.sent[0].body.browserless, undefined, 'the page loaded, its own tags reported it');
+  const retried = await fire('purchase_gateway_down');
+  assert.equal(retried.sent[0].body.browserless, undefined, 'a retry after the page loaded is not the only copy');
+});

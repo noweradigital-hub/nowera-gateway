@@ -22,6 +22,29 @@ export const DELIVERY = {
 };
 
 /**
+ * Events a kind of destination has no use for. Meta has no refund event; a custom
+ * "Refund" would only clutter the dataset and its reports.
+ */
+const SKIP = { meta: new Set(['Refund']) };
+
+/** What a destination may be set to receive (settings.scope). */
+export const SCOPES = {
+  all: 'Všetky udalosti',
+  browserless: 'Len udalosti bez prehliadača (nákupy bez návratu na web, refundácie)',
+};
+
+/**
+ * Whether this destination takes this event at all, before consent is asked.
+ * "browserless" is for a GA4 property the site already measures in the browser
+ * (GTM, gtag): it gets only what no browser could have sent, so nothing doubles.
+ */
+export function wants(dest, event) {
+  if (SKIP[dest.kind]?.has(event.event_name)) return false;
+  if (dest.settings?.scope === 'browserless' && event.browserless !== true) return false;
+  return true;
+}
+
+/**
  * Whether an event may be delivered to this kind of destination. An event that
  * carries no consent information predates consent handling (or comes from a site
  * that does not use it), and is delivered as before.
@@ -57,6 +80,8 @@ export const SCHEMAS = {
   ga4: [
     { key: 'measurement_id', label: 'Measurement ID (G-XXXXXXX)', required: true },
     { key: 'api_secret', label: 'API secret', required: true, secret: true },
+    { key: 'scope', label: 'Čo posielať', options: SCOPES, default: 'all',
+      hint: 'Ak web meria GA4 aj v prehliadači (GTM, gtag), zvoľte len udalosti bez prehliadača — inak sa v GA4 zdvoja.' },
   ],
 };
 

@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.0.0
+ * Version:      1.0.1
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.0.0';
+const NOWERA_CAPI_VERSION = '1.0.1';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -925,6 +925,11 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 	if ( 'none' !== $s['consent_mode'] ) {
 		$payload['consent'] = array( 'marketing' => $marketing, 'statistics' => $statistics );
 	}
+	// No page ever showed this event (a refund, a purchase paid without a return
+	// to the site): an analytics tag in the browser cannot have reported it.
+	if ( ! empty( $ctx['browserless'] ) ) {
+		$payload['browserless'] = true;
+	}
 	nowera_capi_outbox( array(
 		'event'    => $event_name,
 		'body'     => wp_json_encode( $payload ),
@@ -1197,6 +1202,12 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 	if ( ! $order ) {
 		return;
 	}
+	// The page loaded, so the site's own tags (GTM, gtag) had their chance to
+	// report the purchase; a later retry from the server is no longer the only copy.
+	if ( ! $order->get_meta( '_nowera_capi_thankyou' ) ) {
+		$order->update_meta_data( '_nowera_capi_thankyou', time() );
+		$order->save_meta_data();
+	}
 	// The thank-you page is refreshed and bookmarked; send Purchase exactly once.
 	if ( $order->get_meta( '_nowera_capi_purchase_sent' ) ) {
 		return;
@@ -1279,6 +1290,7 @@ add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
 		'ua'            => (string) $order->get_customer_user_agent(),
 		'event_time'    => $paid ? $paid->getTimestamp() : time(),
 		'referrer_url'  => null,
+		'browserless'   => ! $order->get_meta( '_nowera_capi_thankyou' ),
 	);
 	$user = nowera_capi_user_from_order( $order );
 	if ( ! $order->get_customer_id() && ! empty( $stored['visitor'] ) ) {
@@ -1407,6 +1419,65 @@ function nowera_capi_maybe_initiate_checkout(): void {
 	}
 }
 add_action( 'template_redirect', 'nowera_capi_maybe_initiate_checkout', 20 );
+
+/**
+ * A refund, partial or full, made in the administration or by the payment
+ * gateway. No browser sees it, so it goes from here, marked as browserless: GA4
+ * subtracts it from the purchase it recorded under the same transaction id. Only
+ * for orders whose buyer allowed statistics at checkout, the ones GA4 can have
+ * counted; Meta has no refund event and the gateway does not pass it there.
+ */
+function nowera_capi_refund( $order_id, $refund_id ): void {
+	$order  = wc_get_order( $order_id );
+	$refund = wc_get_order( $refund_id );
+	if ( ! $order || ! $refund instanceof \WC_Order_Refund ) {
+		return;
+	}
+	$stored = $order->get_meta( '_nowera_capi_ctx' );
+	if ( ! is_array( $stored ) || empty( $stored['statistics'] ) ) {
+		return;
+	}
+
+	$contents = array();
+	foreach ( $refund->get_items() as $item ) {
+		$quantity = abs( (int) $item->get_quantity() );
+		if ( ! $quantity ) {
+			continue;
+		}
+		$product    = $item->get_product();
+		$contents[] = array(
+			'id'         => $product ? nowera_capi_content_id( $product ) : (string) ( $item->get_variation_id() ?: $item->get_product_id() ),
+			'item_name'  => $item->get_name(),
+			'quantity'   => $quantity,
+			'item_price' => abs( (float) $refund->get_item_total( $item, false, true ) ),
+		);
+	}
+	$props = array(
+		'order_id' => $order->get_id(),
+		'value'    => abs( (float) $refund->get_amount() ),
+		'currency' => $order->get_currency(),
+	);
+	// Without items GA4 takes it as a refund of the whole order.
+	if ( $contents ) {
+		$props['contents'] = $contents;
+	}
+
+	nowera_capi_send( 'Refund', 'refund-' . $refund->get_id(), array(), $props, $order->get_checkout_order_received_url(), array(
+		'marketing'     => ! empty( $stored['marketing'] ),
+		'statistics'    => true,
+		'fbp'           => null,
+		'fbc'           => null,
+		'fbclid'        => null,
+		'ga_client_id'  => $stored['ga_client_id'] ?? null, // the buyer, as GA4 knows them
+		'ga_session_id' => null,
+		'ip'            => (string) $order->get_customer_ip_address(),
+		'ua'            => (string) $order->get_customer_user_agent(),
+		'event_time'    => time(),
+		'referrer_url'  => null,
+		'browserless'   => true,
+	) );
+}
+add_action( 'woocommerce_order_refunded', 'nowera_capi_refund', 10, 2 );
 
 /**
  * Best identity available before an order exists. Most checkouts are guests, so

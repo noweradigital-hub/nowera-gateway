@@ -1,11 +1,11 @@
 {
-  "version": "1.0.0",
-  "file": "nowera-capi-1.0.0.zip",
-  "sha256": "ee28c4e7302ecb593515f4b1756c1a9378a89a6b000385991e9f12e280a6f75a",
-  "signature": "mxUyNOL8QWoKlZ4Sj/dsrBLdG12vj9JuwYkP/j0mNNenuj150uHMsyfLfF6WzGoBoLMoBDkJpd6ATLc1rk7QDA==",
-  "released_at": "2026-09-28T12:20:08.775Z",
+  "version": "1.0.1",
+  "file": "nowera-capi-1.0.1.zip",
+  "sha256": "b7ac7dbb2247116a62f474620cc658a3779d7376c86efc8f4817d0d43b569ddd",
+  "signature": "ezESdRjjGlcmwc2o/zaOm1VqrwBDB/IRxpFK1PH7/esFFqMeBYqNyYt+y/lfXXjmi/M2hhPHH3KKqDdnb1UBCQ==",
+  "released_at": "2026-10-01T07:34:51.118Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Odosielanie až po načítaní stránky a pozastavenie pri výpadku gatewaya; nákup sa pri chybe zopakuje z objednávky. InitiateCheckout aj pri blokovej pokladni, len raz na košík. AddToCart aj z prehliadača s rovnakým ID. Párovací kód, test spojenia a stav doručovania v nastaveniach. Podpisované automatické aktualizácie. Kompatibilita s HPOS a blokovou pokladňou."
+  "notes": "Refundácie (čiastočné aj celé) idú zo servera, aby ich GA4 odpočítala od nákupu. Nákupy zaplatené bez návratu na web sú označené, takže GA4 v signals ich dostane bez duplicity s GTM."
 }

@@ -396,3 +396,17 @@ test('a flood from one address is cut off, other visitors are not', async () => 
   assert.equal((await hit('81.0.0.2')).statusCode, 200);
   await small.close();
 });
+
+test('only the signed server leg may mark an event as never seen by a browser', async () => {
+  inserted.length = 0;
+  const ts = String(Math.floor(Date.now() / 1000));
+  const body = JSON.stringify({ event_name: 'Refund', event_id: 'refund-9', browserless: true, custom_data: { order_id: 9, value: 5, currency: 'EUR' } });
+  const sig = createHmac('sha256', 'tenant-key').update(`${ts}.${body}`).digest('hex');
+  const res = await app.inject({ method: 'POST', url: '/s', headers: { host: 't.prisny.sk', 'content-type': 'application/json', 'x-nwr-timestamp': ts, 'x-nwr-signature': sig }, payload: body });
+  assert.equal(res.statusCode, 200);
+  assert.equal(inserted.at(-1).event.browserless, true);
+
+  await app.inject({ method: 'POST', url: '/e', headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'Purchase', browserless: true } });
+  assert.notEqual(inserted.at(-1).event.browserless, true, 'a browser cannot claim it');
+});

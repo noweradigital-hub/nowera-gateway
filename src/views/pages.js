@@ -35,6 +35,14 @@ export function accountPage(user, minLength) {
 export function destinationForm(tenant, dest, schema) {
   const fields = schema.map((f) => {
     const stored = dest.settings?.[f.key] ?? '';
+    if (f.options) {
+      const current = stored || f.default;
+      return `
+      <div><label for="${f.key}">${esc(f.label)}</label>
+      <select id="${f.key}" name="${f.key}">${Object.entries(f.options).map(([k, label]) =>
+        `<option value="${esc(k)}"${k === current ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select>
+      ${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ''}</div>`;
+    }
     return `
       <div><label for="${f.key}">${esc(f.label)}</label>
       <input id="${f.key}" name="${f.key}" class="mono" type="${f.secret ? 'password' : 'text'}"

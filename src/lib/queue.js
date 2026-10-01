@@ -1,6 +1,6 @@
 import { config } from '../config.js';
 import { many, query } from '../db.js';
-import { consentAllows, dedupeKeyFor, driverFor, openSettings } from '../destinations/index.js';
+import { consentAllows, dedupeKeyFor, driverFor, openSettings, wants } from '../destinations/index.js';
 
 // Exponential backoff, capped. Index = attempt number.
 const BACKOFF_SECONDS = [10, 30, 120, 600, 1800, 3600];
@@ -13,7 +13,7 @@ const MAX_ATTEMPTS = BACKOFF_SECONDS.length;
  * Returns how many rows were actually queued.
  */
 export async function enqueue(tenantId, event, allDestinations) {
-  const destinations = allDestinations.filter((d) => consentAllows(d.kind, event));
+  const destinations = allDestinations.filter((d) => wants(d, event) && consentAllows(d.kind, event));
   if (!destinations.length) return 0;
   const values = [];
   const params = [];

@@ -272,6 +272,9 @@ export default async function collectRoutes(app, opts = {}) {
     }
 
     event.source = 'server';
+    // The plugin marks events no browser can have reported (a refund, a purchase
+    // paid without a return to the site); a GA4 fed by GTM takes only those.
+    event.browserless = body.browserless === true;
     stats.recordReceived(tenant.id, event, 'server');
     const queued = await enqueue(tenant.id, event, tenant.destinations);
     return reply.send({ ok: true, event_id: event.event_id, queued });

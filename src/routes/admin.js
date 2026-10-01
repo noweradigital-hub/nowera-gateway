@@ -511,6 +511,10 @@ export default async function adminRoutes(app) {
     const settings = {};
     for (const field of schema) {
       const value = String(b[field.key] || '').trim();
+      if (field.options) {
+        settings[field.key] = Object.hasOwn(field.options, value) ? value : field.default;
+        continue;
+      }
       if (field.required && !value) {
         return redirect(reply, tabUrl(id, 'destinacie'), `Chýba pole: ${field.label}`, 'err');
       }
@@ -546,6 +550,10 @@ export default async function adminRoutes(app) {
     const settings = { ...(dest.settings || {}) };
     for (const field of SCHEMAS[dest.kind] || []) {
       const value = String(b[field.key] ?? '').trim();
+      if (field.options) {
+        settings[field.key] = Object.hasOwn(field.options, value) ? value : (settings[field.key] || field.default);
+        continue;
+      }
       if (field.secret && !value) continue;      // blank means keep the stored secret
       if (value) settings[field.key] = value;
       else delete settings[field.key];           // clearing an optional field is deliberate

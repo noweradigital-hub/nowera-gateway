@@ -187,3 +187,43 @@ test('plugin updates are served only on known hosts, with a download address on 
   assert.equal((await app.inject({ method: 'GET', url: '/wp/nowera-capi/..%2Fsecret.zip', headers: { host: 't.klient.sk' } })).statusCode, 404);
   await app.close();
 });
+
+test('GA4 next to a browser tag takes only what no browser sent; Meta never takes a refund', async () => {
+  const { wants } = await import('../src/destinations/index.js');
+  const { buildPayload } = await import('../src/destinations/ga4.js');
+  const meta = { kind: 'meta', settings: {} };
+  const ga4All = { kind: 'ga4', settings: {} };
+  const ga4Gtm = { kind: 'ga4', settings: { scope: 'browserless' } };
+  const purchase = { event_name: 'Purchase' };
+  const paidWithoutReturn = { event_name: 'Purchase', browserless: true };
+  const refund = { event_name: 'Refund', browserless: true };
+
+  assert.equal(wants(meta, purchase), true);
+  assert.equal(wants(meta, refund), false, 'Meta has no refund event');
+  assert.equal(wants(ga4All, purchase), true, 'a GA4 without a browser tag gets everything, as before');
+  assert.equal(wants(ga4Gtm, purchase), false, 'the browser tag already reported it');
+  assert.equal(wants(ga4Gtm, paidWithoutReturn), true);
+  assert.equal(wants(ga4Gtm, refund), true);
+
+  const body = buildPayload({
+    event_name: 'Refund', event_id: 'refund-55', event_time: 1790000000,
+    properties: { order_id: 2025003367, value: 24.9, currency: 'EUR', contents: [{ id: '10', quantity: 1, item_price: 24.9 }] },
+    context: { gaClientId: '123.456', gaSessionId: '789' },
+  }, {});
+  assert.equal(body.events[0].name, 'refund');
+  assert.equal(body.events[0].params.transaction_id, '2025003367', 'matches the purchase GTM reported');
+  assert.equal(body.events[0].params.value, 24.9);
+  assert.deepEqual(body.events[0].params.items, [{ item_id: '10', item_name: undefined, quantity: 1, price: 24.9 }]);
+  assert.equal(body.client_id, '123.456', 'the buyer, as GA4 knows them from the browser');
+});
+
+test('the GA4 destination form offers the scope, set to everything for a new one', async () => {
+  const { SCHEMAS } = await import('../src/destinations/index.js');
+  const { destinationsTab } = await import('../src/views/tenant.js');
+  const { destinationForm } = await import('../src/views/pages.js');
+  const add = destinationsTab({ id: 1 }, [], SCHEMAS, 'v26.0');
+  assert.match(add, /<select id="ga4_scope" name="scope"><option value="all" selected>/);
+  const edit = destinationForm({ id: 1, name: 'K' }, { id: 6, kind: 'ga4', settings: { measurement_id: 'G-1', api_secret: 'enc:v1:x', scope: 'browserless' } }, SCHEMAS.ga4);
+  assert.match(edit, /<option value="browserless" selected>/);
+  assert.ok(!edit.includes('enc:v1:x'), 'the secret stays hidden');
+});

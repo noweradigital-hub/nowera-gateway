@@ -118,9 +118,13 @@ export function qualityTab(rows, findings) {
 // ------------------------------------------------------------------ Destinácie
 
 function destinationFields(kind, schema) {
-  return schema.map((f) => `
+  return schema.map((f) => (f.options ? `
     <div><label for="${kind}_${f.key}">${esc(f.label)}</label>
-    <input id="${kind}_${f.key}" name="${f.key}" class="mono" type="${f.secret ? 'password' : 'text'}" ${f.required ? 'required' : ''} autocomplete="off"></div>`).join('');
+    <select id="${kind}_${f.key}" name="${f.key}">${Object.entries(f.options).map(([k, label]) =>
+      `<option value="${esc(k)}"${k === f.default ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select>
+    ${f.hint ? `<div class="hint">${esc(f.hint)}</div>` : ''}</div>` : `
+    <div><label for="${kind}_${f.key}">${esc(f.label)}</label>
+    <input id="${kind}_${f.key}" name="${f.key}" class="mono" type="${f.secret ? 'password' : 'text'}" ${f.required ? 'required' : ''} autocomplete="off"></div>`)).join('');
 }
 
 function destinationCard(t, d, metaVersion) {
@@ -136,7 +140,8 @@ function destinationCard(t, d, metaVersion) {
         : s.verified_at ? `overený ${esc(formatAgo(s.verified_at))}${s.verified_name ? ` · ${esc(s.verified_name)}` : ''}` : 'uložený, zatiaľ neoverený'}</dd>`
     : `
       <dt>Measurement ID</dt><dd class="mono">${esc(s.measurement_id)}</dd>
-      <dt>API secret</dt><dd>uložený</dd>`;
+      <dt>API secret</dt><dd>uložený</dd>
+      <dt>Posiela</dt><dd>${s.scope === 'browserless' ? 'len udalosti bez prehliadača (nákupy bez návratu na web, refundácie)' : 'všetky udalosti'}</dd>`;
   const testBox = d.kind !== 'meta' ? '' : testing ? `
     <div class="box"><span>Testovací režim:</span>${pill('warn', `do ${time(s.test_until)}`)}<span class="mono">${esc(s.test_event_code)}</span>
       <form class="inline" method="post" action="/admin/destinations/${d.id}/test-off"><button class="btn sm" type="submit">Ukončiť</button></form></div>` : `
@@ -187,7 +192,7 @@ export function destinationsTab(t, destinations, schemas, metaVersion) {
             group.hidden = !active;
             // A hidden required input blocks the submit and cannot be focused, so
             // the button looks dead. Disabling skips it in validation and the POST.
-            Array.prototype.forEach.call(group.querySelectorAll('input'), function (input) {
+            Array.prototype.forEach.call(group.querySelectorAll('input, select'), function (input) {
               input.disabled = !active;
             });
           });

@@ -101,6 +101,32 @@ switch ( $event ) {
 		do_action( 'wp_footer' );
 		$footer = ob_get_clean();
 		break;
+	case 'refund_partial':
+	case 'refund_full':
+		// The buyer checks out (consent recorded with the order), pays, then the shop refunds.
+		$order = nwr_order( $ids );
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		$order = wc_get_order( $order->get_id() );
+		$order->set_status( 'processing' );
+		$order->save();
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		if ( 'refund_partial' === $event ) {
+			$items = $order->get_items();
+			$first = array_key_first( $items );
+			$line  = $items[ $first ];
+			$unit  = $order->get_item_total( $line, false, true );
+			wc_create_refund( array(
+				'order_id'   => $order->get_id(),
+				'amount'     => $unit,
+				'reason'     => 'test',
+				'line_items' => array( $first => array( 'qty' => 1, 'refund_total' => $unit ) ),
+			) );
+		} else {
+			$order->update_status( 'refunded' );
+		}
+		$purchase = array( 'order' => $order->get_id(), 'total' => (float) $order->get_total() );
+		break;
 	case 'queued':
 		// Nothing leaves while the page is still being built.
 		WC()->cart->empty_cart();
