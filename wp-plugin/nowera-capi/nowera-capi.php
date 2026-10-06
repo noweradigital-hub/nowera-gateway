@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.0.1
+ * Version:      1.0.2
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.0.1';
+const NOWERA_CAPI_VERSION = '1.0.2';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -541,6 +541,18 @@ function nowera_capi_phone_digits( string $value, ?string $country ): string {
  * GA4 joins a Measurement Protocol hit to the visitor's browser session by these
  * two ids. Without them the event lands as Direct and is useless for Ads import.
  */
+/**
+ * The session id inside a _ga_<stream> cookie, in either format GA4 writes:
+ * GS2.1.s<session>$o<count>$g… (current) or GS1.1.<session>.<count>.… (older).
+ */
+function nowera_capi_ga_session( string $raw ): ?string {
+	if ( preg_match( '/^GS2\.\d+\.(.*)$/', $raw, $m ) ) {
+		return preg_match( '/(?:^|\$)s(\d+)/', $m[1], $s ) ? $s[1] : null;
+	}
+	$parts = explode( '.', $raw );
+	return count( $parts ) >= 3 && ctype_digit( $parts[2] ) ? $parts[2] : null;
+}
+
 function nowera_capi_ga_ids(): array {
 	$client_id = null;
 	$session_id = null;
@@ -558,9 +570,8 @@ function nowera_capi_ga_ids(): array {
 		if ( strpos( $name, '_ga_' ) !== 0 ) {
 			continue;
 		}
-		$parts = explode( '.', sanitize_text_field( wp_unslash( $value ) ) );
-		if ( count( $parts ) >= 3 ) {
-			$session_id = $parts[2];
+		$session_id = nowera_capi_ga_session( sanitize_text_field( wp_unslash( $value ) ) );
+		if ( null !== $session_id ) {
 			break;
 		}
 	}

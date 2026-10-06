@@ -1,11 +1,11 @@
 {
-  "version": "1.0.1",
-  "file": "nowera-capi-1.0.1.zip",
-  "sha256": "b7ac7dbb2247116a62f474620cc658a3779d7376c86efc8f4817d0d43b569ddd",
-  "signature": "ezESdRjjGlcmwc2o/zaOm1VqrwBDB/IRxpFK1PH7/esFFqMeBYqNyYt+y/lfXXjmi/M2hhPHH3KKqDdnb1UBCQ==",
-  "released_at": "2026-10-01T07:34:51.118Z",
+  "version": "1.0.2",
+  "file": "nowera-capi-1.0.2.zip",
+  "sha256": "650ce873bebc5b248a8443aa6d7e2338ffcfc46d01635e6381cc025c1f16534c",
+  "signature": "p0un56l9bxfj7eTypCW2rH0HHK+xEXplnDBSrQmW5/POWZmfKjEZxdPEi3M2braRm90Gm3kZI1PxTjKISGF9AQ==",
+  "released_at": "2026-10-06T21:04:12.259Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Refundácie (čiastočné aj celé) idú zo servera, aby ich GA4 odpočítala od nákupu. Nákupy zaplatené bez návratu na web sú označené, takže GA4 v signals ich dostane bez duplicity s GTM."
+  "notes": "GA4: session_id sa číta aj z nového formátu cookie (GS2), aby sa serverové udalosti spojili s návštevou a kliknutím na reklamu."
 }

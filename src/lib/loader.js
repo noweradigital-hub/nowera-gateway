@@ -231,10 +231,16 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
 
   function gaSessionId() {
     if (!GA_STREAM) return null;
-    var raw = cookie('_ga_' + GA_STREAM); // GS1.1.<session>.<count>....
+    var raw = cookie('_ga_' + GA_STREAM);
     if (!raw) return null;
+    // GS2.1.s<session>$o<count>$g…  (current) or GS1.1.<session>.<count>.…  (older)
+    var gs2 = /^GS2\\.\\d+\\.(.*)$/.exec(raw);
+    if (gs2) {
+      var s = /(?:^|\\$)s(\\d+)/.exec(gs2[1]);
+      return s ? s[1] : null;
+    }
     var parts = raw.split('.');
-    return parts.length >= 3 ? parts[2] : null;
+    return parts.length >= 3 && /^\\d+$/.test(parts[2]) ? parts[2] : null;
   }
 
   function merge(base, extra) {

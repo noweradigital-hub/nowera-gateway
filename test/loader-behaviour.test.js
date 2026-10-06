@@ -624,3 +624,16 @@ test('without jQuery yet, the cart listener waits for the page to load', () => {
   b.fire('DOMContentLoaded');
   assert.ok(handlers.added_to_cart);
 });
+
+test('the GA4 session id is read from both the current GS2 and the older GS1 cookie', () => {
+  const gs2 = browser({ cookie: '_ga=GA1.1.123456789.1700000000; _ga_ABC=GS2.1.s1759740000$o12$g1$t1759740300$j60$l0$h0' });
+  gs2.run();
+  assert.equal(gs2.posts[0].body.ga_client_id, '123456789.1700000000');
+  assert.equal(gs2.posts[0].body.ga_session_id, '1759740000');
+  const gs1 = browser({ cookie: '_ga_ABC=GS1.1.1700000500.4.1.1700000600.0.0.0' });
+  gs1.run();
+  assert.equal(gs1.posts[0].body.ga_session_id, '1700000500');
+  const junk = browser({ cookie: '_ga_ABC=GS2.1.o12$g1' });
+  junk.run();
+  assert.equal(junk.posts[0].body.ga_session_id, null);
+});

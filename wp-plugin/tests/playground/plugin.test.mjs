@@ -738,3 +738,11 @@ test('only a purchase whose thank-you page never loaded is marked as browserless
   const retried = await fire('purchase_gateway_down');
   assert.equal(retried.sent[0].body.browserless, undefined, 'a retry after the page loaded is not the only copy');
 });
+
+test('the GA4 session id is read from the current GS2 cookie as well', async () => {
+  const gs2 = await fire('checkout', '_ga:GA1.1.123456789.1700000000,_ga_XYZ:GS2.1.s1759740000$o12$g1$t1759740300$j60$l0$h0');
+  assert.equal(gs2.sent[0].body.ga_client_id, '123456789.1700000000');
+  assert.equal(gs2.sent[0].body.ga_session_id, '1759740000');
+  const gs1 = await fire('checkout', '_ga_XYZ:GS1.1.1700000500.4.1.1700000600.0.0.0');
+  assert.equal(gs1.sent[0].body.ga_session_id, '1700000500');
+});
