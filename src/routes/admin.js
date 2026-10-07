@@ -16,7 +16,7 @@ import { enqueue } from '../lib/queue.js';
 import { newEventId } from '../lib/ids.js';
 import { page } from '../views/layout.js';
 import { CONSENT_MODES, normalizeConsent, normalizeKeepPath } from '../lib/consent.js';
-import { normalizeCronUrl } from '../lib/site-cron.js';
+import { cronProblem, normalizeCronUrl } from '../lib/site-cron.js';
 import {
   accountPage, destinationForm, ingestKeyPage, loginPage, newTenantPage,
 } from '../views/pages.js';
@@ -473,6 +473,11 @@ export default async function adminRoutes(app) {
     invalidateTenantCache();
     forgetChecks(id);
     await audit(req, 'tenant.update', b.name);
+    // A typed WP-Cron address that is not one is dropped (the default applies); say so.
+    if (String(b.cron_url || '').trim() && !normalizeCronUrl(b.cron_url, { allowed_origins: String(b.allowed_origins || '').trim() })) {
+      return redirect(reply, tabUrl(id, 'nastavenia'),
+        `Uložené, ale adresu WP-Cron som nepoužil: ${cronProblem({ allowed_origins: String(b.allowed_origins || ''), cron_url: b.cron_url })}`, 'err');
+    }
     return redirect(reply, tabUrl(id, 'nastavenia'), 'Uložené.');
   });
 

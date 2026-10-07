@@ -319,6 +319,10 @@ test('WP-Cron address: the site\'s own wp-cron.php, never anywhere else', async 
   assert.equal(cronUrl({ ...t, cron_url: 'https://evil.example/wp-cron.php' }), null);
   assert.equal(cronUrl({ ...t, cron_url: 'http://www.kidvak.cz/wp-cron.php' }), null, 'https only');
   assert.equal(normalizeCronUrl('', t), null, 'empty keeps the default');
+  assert.equal(cronUrl({ allowed_origins: 'https://kidvak.pl/, https://WWW.kidvak.pl/ ' }), 'https://www.kidvak.pl/wp-cron.php', 'typed with slashes and capitals');
+  const { cronProblem } = await import('../src/lib/site-cron.js');
+  assert.match(cronProblem({ allowed_origins: '' }), /povolené adresy/);
+  assert.match(cronProblem({ ...t, cron_url: 'https://evil.example/wp-cron.php' }), /evil\.example/);
   for (const ip of ['10.0.0.5', '127.0.0.1', '172.18.0.6', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:127.0.0.1']) {
     assert.equal(publicAddress(ip), false, ip);
   }

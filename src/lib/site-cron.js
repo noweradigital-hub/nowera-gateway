@@ -2,7 +2,6 @@ import { lookup as dnsLookup } from 'node:dns';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import { many, query } from '../db.js';
-import { siteOrigin } from './checks.js';
 
 /**
  * WordPress runs its scheduled tasks (WP-Cron, and through it Action Scheduler:
@@ -25,9 +24,17 @@ const REPORT_FRESH_MS = 8 * 3600_000;
  * https address on one of the client's own allowed origins is used, so the
  * setting cannot point the gateway at anything else.
  */
+/** The client's allowed origins as the browser writes them (scheme://host[:port]), whatever was typed. */
+function originsOf(tenant) {
+  return String(tenant.allowed_origins || '').split(/[\s,]+/).map((s) => {
+    try { return new URL(s.trim()).origin; } catch { return null; }
+  }).filter(Boolean);
+}
+
 export function cronUrl(tenant) {
-  const origins = String(tenant.allowed_origins || '').split(',').map((s) => s.trim()).filter(Boolean);
-  const fallback = siteOrigin(tenant) ? `${siteOrigin(tenant)}/wp-cron.php` : null;
+  const origins = originsOf(tenant);
+  const site = origins.find((o) => /\/\/www\./.test(o)) || origins[0] || null;
+  const fallback = site ? `${site}/wp-cron.php` : null;
   const raw = String(tenant.cron_url || '').trim() || fallback;
   if (!raw) return null;
   let url;
@@ -55,6 +62,15 @@ export function publicAddress(ip) {
       || x.startsWith('fea') || x.startsWith('feb') || x.startsWith('ff'));
   }
   return false;
+}
+
+/** Why there is no address to call, in words the settings page can act on. */
+export function cronProblem(tenant) {
+  const origins = originsOf(tenant).filter((o) => o.startsWith('https://'));
+  if (!origins.length) return 'Klient nemá v Nastaveniach povolené adresy webu s https.';
+  const typed = String(tenant.cron_url || '').trim();
+  if (typed) return `${typed} nie je wp-cron.php na niektorej z povolených adries (${origins.join(', ')}).`;
+  return 'Adresa WP-Cron sa nedá odvodiť z povolených adries webu.';
 }
 
 /** What the settings form may store: a clean address on the client's site, or null (the default). */
@@ -98,7 +114,7 @@ export function guardedGet(url, { headers = {}, timeoutMs = TIMEOUT_MS } = {}) {
 
 export async function runSiteCron(tenant, fetchImpl = null, now = Date.now()) {
   const url = cronUrl(tenant);
-  if (!url) return { ok: false, text: 'Adresa nie je wp-cron.php na webe klienta (https).' };
+  if (!url) return { ok: false, text: cronProblem(tenant) };
   const started = Date.now();
   try {
     // No doing_wp_cron: WordPress only honours one that matches its own lock, and
