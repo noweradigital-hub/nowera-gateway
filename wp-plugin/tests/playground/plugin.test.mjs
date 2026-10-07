@@ -547,6 +547,8 @@ test('the order list for the completeness check: signed, paged, no contact data,
   assert.equal(line(purchase.failed).ready, false);
   assert.equal(line(purchase.admin).via, 'admin');
   assert.doesNotMatch(JSON.stringify(orders), /example\.com|Novák|903/i, 'no contact data');
+  assert.deepEqual(Object.keys(sent[0].body.cron).sort(), ['disabled', 'due', 'oldest'], 'how the scheduler is doing');
+  assert.equal(typeof sent[0].body.cron.disabled, 'boolean');
 });
 
 test('taking things out of the cart reports the removed quantity', async () => {

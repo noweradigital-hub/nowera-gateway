@@ -3,6 +3,7 @@ import { fromCloudflare } from './client-ip.js';
 import { config } from '../config.js';
 import { polls, routeOf } from './routing.js';
 import { newer, pluginRelease } from './plugin-release.js';
+import { cronCheck } from './site-cron.js';
 
 /**
  * The installation checklist on a tenant's page: can a browser reach the
@@ -128,6 +129,7 @@ export async function runChecks(tenant, destinations, { force = false, fetchImpl
       { title: 'Smerovanie na serveri', ...routing },
       { title: 'HTTPS', ...https },
       { title: 'Plugin Nowera CAPI', ...plugin },
+      { title: 'Plánovač úloh (WP-Cron)', ...cronCheck(tenant) },
       { title: 'Kľúč pre plugin', ...key },
       { title: 'Súhlas s cookies', ...consent },
       { title: 'Cookie keeper', ...keeper },

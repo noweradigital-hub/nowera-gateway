@@ -302,6 +302,61 @@ test('order audit: the snapshot must be one day, a list, at most 500 lines', asy
   assert.throws(() => parseSnapshot({ day: '2026-10-06' }));
   assert.throws(() => parseSnapshot({ day: '2026-10-06', orders: new Array(501).fill({ id: 1 }) }));
   assert.throws(() => parseSnapshot({ day: '2026-10-06', page: 3, pages: 2, orders: [] }));
-  assert.deepEqual(parseSnapshot({ day: '2026-10-06', orders: [] }), { day: '2026-10-06', page: 1, pages: 1, total: null, orders: [] });
+  assert.deepEqual(parseSnapshot({ day: '2026-10-06', orders: [] }), { day: '2026-10-06', page: 1, pages: 1, total: null, cron: null, orders: [] });
+  assert.deepEqual(parseSnapshot({ day: '2026-10-06', cron: { disabled: true, due: '3', oldest: 900, x: 1 }, orders: [] }).cron, { disabled: true, due: 3, oldest: 900 });
   assert.equal(parseSnapshot({ day: '2026-10-06', total: 201, orders: [] }).total, 201);
+});
+
+// ------------------------------------------------------------ site WP-Cron
+
+test('WP-Cron address: the site\'s own wp-cron.php, never anywhere else', async () => {
+  const { cronUrl, normalizeCronUrl, publicAddress } = await import('../src/lib/site-cron.js');
+  const t = { allowed_origins: 'https://kidvak.cz,https://www.kidvak.cz' };
+  assert.equal(cronUrl(t), 'https://www.kidvak.cz/wp-cron.php');
+  assert.equal(cronUrl({ ...t, cron_url: 'https://kidvak.cz/wp-cron.php?x=1' }), 'https://kidvak.cz/wp-cron.php');
+  assert.equal(cronUrl({ ...t, cron_url: 'https://kidvak.cz/sub/wp-cron.php' }), 'https://kidvak.cz/sub/wp-cron.php', 'WordPress in a folder');
+  assert.equal(cronUrl({ ...t, cron_url: 'https://www.kidvak.cz/moj-ucet/zmazat' }), null, 'only wp-cron.php');
+  assert.equal(cronUrl({ ...t, cron_url: 'https://evil.example/wp-cron.php' }), null);
+  assert.equal(cronUrl({ ...t, cron_url: 'http://www.kidvak.cz/wp-cron.php' }), null, 'https only');
+  assert.equal(normalizeCronUrl('', t), null, 'empty keeps the default');
+  for (const ip of ['10.0.0.5', '127.0.0.1', '172.18.0.6', '192.168.1.1', '169.254.169.254', '::1', 'fd00::1', '::ffff:127.0.0.1']) {
+    assert.equal(publicAddress(ip), false, ip);
+  }
+  assert.equal(publicAddress('193.163.77.230'), true);
+  assert.equal(publicAddress('2a02:4780:41:bf7f::1'), true);
+});
+
+test('WP-Cron call: plain external call, a line for the dashboard whatever happens', async () => {
+  const { runSiteCron } = await import('../src/lib/site-cron.js');
+  const t = { allowed_origins: 'https://www.klient.sk' };
+  const res = (status, headers = {}) => ({ status, headers: { get: (n) => headers[n] ?? null }, body: null });
+  const urls = [];
+  const ok = await runSiteCron(t, async (url) => { urls.push(url); return res(200); }, 1791380400000);
+  assert.equal(ok.ok, true);
+  assert.equal(urls[0], 'https://www.klient.sk/wp-cron.php?nwr=1791380400');
+  assert.doesNotMatch(urls[0], /doing_wp_cron/, 'WordPress would take it as someone else\'s lock and do nothing');
+  assert.deepEqual(await runSiteCron(t, async () => res(403), 0), { ok: false, text: 'HTTP 403' });
+  assert.match((await runSiteCron(t, async () => res(403, { 'cf-mitigated': 'challenge' }), 0)).text, /Cloudflare/);
+  assert.match((await runSiteCron(t, async () => res(301), 0)).text, /presmerovanie/);
+  assert.match((await runSiteCron(t, async () => { const e = new Error('t'); e.name = 'TimeoutError'; throw e; }, 0)).text, /neodpovedal/);
+  // The connection itself refuses a name that resolves inside the server's network.
+  const { publicLookup } = await import('../src/lib/site-cron.js');
+  const err = await new Promise((r) => publicLookup('localhost', {}, (e) => r(e)));
+  assert.equal(err.code, 'ENOTPUBLIC');
+});
+
+test('WP-Cron install check: calls, fresh plugin reports, server cron, unknown', async () => {
+  const { cronCheck } = await import('../src/lib/site-cron.js');
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const fresh = (r) => ({ ...r, at: '2026-10-07T09:00:00Z' });
+  const calling = { cron_enabled: true, cron_last_at: '2026-10-07T11:58:00Z', cron_ok_at: '2026-10-07T11:58:00Z', cron_last_ok: true, cron_last_status: 'HTTP 200, 300 ms' };
+  assert.equal(cronCheck(calling, now).state, 'todo', 'WordPress answered; the plugin has not confirmed the tasks yet');
+  assert.equal(cronCheck({ ...calling, cron_report: fresh({ disabled: false, due: 0 }) }, now).state, 'ok');
+  assert.equal(cronCheck({ ...calling, cron_report: fresh({ disabled: false, due: 3, oldest: 3600 }) }, now).state, 'warn', 'answered, but tasks are late');
+  assert.equal(cronCheck({ cron_enabled: true, cron_last_at: '2026-10-07T11:58:00Z', cron_last_ok: false, cron_last_status: 'HTTP 403' }, now).state, 'bad');
+  assert.equal(cronCheck({ cron_enabled: false, cron_report: fresh({ disabled: true, due: 0 }) }, now).state, 'ok', 'a server cron is fine');
+  assert.equal(cronCheck({ cron_enabled: false, cron_report: fresh({ disabled: true, due: 5, oldest: 7200 }) }, now).state, 'bad');
+  assert.match(cronCheck({ cron_enabled: false, cron_report: fresh({ disabled: false, due: 4, oldest: 900 }) }, now).text, /4 úloh/);
+  assert.equal(cronCheck({ cron_enabled: false, cron_report: { disabled: true, due: 0, at: '2026-10-05T00:00:00Z' } }, now).state, 'warn', 'an old report proves nothing');
+  assert.equal(cronCheck({ cron_enabled: false }, now).state, 'warn');
 });

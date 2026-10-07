@@ -1,3 +1,4 @@
+import { cronUrl } from '../lib/site-cron.js';
 import { esc } from './layout.js';
 import { CONSENT_MODES } from '../lib/consent.js';
 
@@ -109,6 +110,14 @@ export function tenantForm(t) {
         <input id="server_only_events" name="server_only_events" type="text" class="mono" value="${esc(t?.server_only_events)}" placeholder="Purchase">
         <div class="hint">Eventy, ktoré posiela podpísané len server webu (plugin). Rovnaký event z prehliadača sa ignoruje,
           takže nikto nepodvrhne napr. nákup s vymyslenou sumou. Nechajte prázdne pri webe bez pluginu.</div></div>
+      ${t ? `<div class="group-t">Plánovač úloh webu</div>
+      <label class="check"><input type="checkbox" name="cron_enabled" ${t.cron_enabled ? 'checked' : ''}>
+        <span>Spúšťať WP-Cron webu z gatewaya (každých 5 minút)<br><span class="dim" style="font-size:12.5px">Plugin cezeň posiela nákupy po platbe bez návratu na web, opakuje udalosti po výpadku a posiela zoznam objednávok.
+        Stránky z cache WP-Cron nespúšťajú a niektoré hostingy ho vypínajú (DISABLE_WP_CRON). Ak web už má skutočný cron, netreba.</span></span></label>
+      <div><label for="cron_url">Adresa WP-Cron</label>
+        <input id="cron_url" name="cron_url" type="text" class="mono" value="${esc(t.cron_url || '')}" placeholder="${esc(cronUrl(t) || 'https://www.klient.sk/wp-cron.php')}">
+        <div class="hint">Prázdne = <span class="mono">wp-cron.php</span> na adrese webu. Musí byť https a na niektorej z povolených adries webu.
+          ${t.cron_enabled && t.cron_last_at ? `Naposledy: ${esc(t.cron_last_status || '')}.` : ''}</div></div>` : ''}
       ${t ? `<div><label for="quiet_alert_hours">Upozornenie „Žiadne eventy“ po (hodinách)</label>
         <input id="quiet_alert_hours" name="quiet_alert_hours" type="number" min="0.5" max="72" step="0.5" class="mono" value="${esc(t.quiet_alert_hours ?? '')}" placeholder="automaticky">
         <div class="hint">Prázdne = podľa návštevnosti klienta za posledných 14 dní (kým by bežne prišlo 5 eventov, 2–12 h).</div></div>` : ''}
@@ -165,6 +174,8 @@ export function newTenantPage({ serverIp, adminHost }) {
           </select></div>
         <label class="check"><input type="checkbox" name="wordpress" checked>
           <span>WordPress s pluginom Nowera CAPI<br><span class="dim" style="font-size:12.5px">Podpísané eventy zo servera webu a cookie keeper, ktorý v Safari drží cookies 90 dní.</span></span></label>
+        <label class="check"><input type="checkbox" name="cron_enabled" checked>
+          <span>Spúšťať WP-Cron webu z gatewaya<br><span class="dim" style="font-size:12.5px">Každých 5 minút zavolá <span class="mono">wp-cron.php</span> na webe, aby plugin posielal nákupy po platbe a zoznam objednávok aj pri webe z cache. Adresa sa dá zmeniť v Nastaveniach.</span></span></label>
         <div class="actions"><button class="btn primary" type="submit">Vytvoriť klienta</button><a class="btn" href="/admin">Späť</a></div>
       </form>
       <script>

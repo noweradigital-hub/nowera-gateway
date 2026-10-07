@@ -9,6 +9,7 @@ import { startStatsWriter } from './lib/stats-writer.js';
 import { startAlerts } from './lib/alerts.js';
 import { sealStoredSecrets } from './lib/seal-stored.js';
 import { startBackups } from './lib/backup.js';
+import { startSiteCron } from './lib/site-cron.js';
 import { polls, traefikConfig } from './lib/routing.js';
 import collectRoutes from './routes/collect.js';
 import adminRoutes from './routes/admin.js';
@@ -40,6 +41,7 @@ const stopWorker = startWorker(app.log);
 const stopStats = startStatsWriter(app.log);
 const stopAlerts = startAlerts(app.log);
 const stopBackups = startBackups(app.log);
+const stopSiteCron = startSiteCron(app.log);
 let internal = null;
 
 async function shutdown(signal) {
@@ -47,6 +49,7 @@ async function shutdown(signal) {
   stopWorker();
   stopAlerts();
   stopBackups();
+  stopSiteCron();
   internal?.close();
   await stopStats();
   await app.close();

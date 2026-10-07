@@ -1,11 +1,11 @@
 {
   "version": "1.2.0",
   "file": "nowera-capi-1.2.0.zip",
-  "sha256": "c525231c39b06f802aa1781403c4b0ede88ae28d4376729f42f5534050132e2a",
-  "signature": "s/72kCnI7HlJejp4sSS0RB19phEtEM1oXBCyXPA3MnNbVmxdtW/hkbUFDQHWgPfOJi/MRtOhU2aWxxpcdollDw==",
-  "released_at": "2026-10-07T14:21:39.151Z",
+  "sha256": "ae5befbf8aee5161143f97fda6485921dfe4ab8f049779c8adf71de57a6fc397",
+  "signature": "LPJFou/1lDd1xlbU9UOqLI/vSxZiES1tuvr65UA+G218z2Abn4bNa0n0Wosdl6k+U+QJNoRJ7hTpf/txpNXuDw==",
+  "released_at": "2026-10-07T14:43:13.778Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Úplnosť nákupov (zoznam objednávok pre signals), nové udalosti: košík, odobratie z košíka, doprava, klik v zozname, registrácia, leady z formulárov."
+  "notes": "Úplnosť nákupov (zoznam objednávok pre signals) s hlásením stavu WP-Cron; nové udalosti: košík, odobratie z košíka, doprava, klik v zozname, registrácia, leady z formulárov."
 }

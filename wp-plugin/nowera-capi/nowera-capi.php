@@ -1829,6 +1829,7 @@ function nowera_capi_send_audit( int $days = 3 ): bool {
 			'page'     => $page,
 			'pages'    => $pages,
 			'total'    => (int) $found->total,
+			'cron'     => 1 === $page ? nowera_capi_cron_report() : null,
 			'orders'   => $lines,
 		) );
 		if ( null !== nowera_capi_deliver( $body, '/r', 15 ) ) {
@@ -1837,6 +1838,33 @@ function nowera_capi_send_audit( int $days = 3 ): bool {
 		$page++;
 	} while ( $page <= $pages );
 	return true;
+}
+
+/**
+ * How the site's scheduler is doing: WP-Cron switched off, and the plugin's
+ * tasks waiting past their time (a fallback purchase, a retry).
+ */
+function nowera_capi_cron_report(): array {
+	global $wpdb;
+	$due    = 0;
+	$oldest = 0;
+	$table  = $wpdb->prefix . 'actionscheduler_actions';
+	if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table ) {
+		$row = $wpdb->get_row( $wpdb->prepare(
+			"SELECT COUNT(*) AS n, MIN(a.scheduled_date_gmt) AS first FROM {$table} a
+			   JOIN {$wpdb->prefix}actionscheduler_groups g ON g.group_id = a.group_id
+			  WHERE g.slug = %s AND a.status = 'pending' AND a.scheduled_date_gmt < %s",
+			'nowera-capi',
+			gmdate( 'Y-m-d H:i:s', time() - 15 * MINUTE_IN_SECONDS )
+		) );
+		$due    = (int) ( $row->n ?? 0 );
+		$oldest = $due && ! empty( $row->first ) ? max( 0, time() - strtotime( $row->first . ' UTC' ) ) : 0;
+	}
+	return array(
+		'disabled' => defined( 'DISABLE_WP_CRON' ) && DISABLE_WP_CRON,
+		'due'      => $due,
+		'oldest'   => $oldest,
+	);
 }
 
 /** One order as the completeness check sees it. */

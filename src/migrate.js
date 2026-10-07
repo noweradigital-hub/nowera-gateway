@@ -124,6 +124,15 @@ CREATE TABLE IF NOT EXISTS audit_snapshots (
   completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, day)
 );
+-- The gateway can run the site's WP-Cron itself (pages served from a cache never do).
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_url TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_last_at TIMESTAMPTZ;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_last_ok BOOLEAN;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_ok_at TIMESTAMPTZ;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_last_status TEXT;
+-- What the plugin last said about the site's scheduler (sent with the order list).
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_report JSONB;
 -- When the site started running its current plugin version (the order audit's grace period).
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plugin_version_since TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS received_purchase_idx ON received(tenant_id, event_id) WHERE event_name = 'Purchase';

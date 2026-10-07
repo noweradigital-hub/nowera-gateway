@@ -157,3 +157,12 @@ test('the completeness card lists days and missing orders, escaped', async () =>
   assert.match(html, /neprišiel do signals/);
   assert.ok(!html.includes('12<b>'), 'escaped');
 });
+
+test('WP-Cron: a switch in the new-client setup and in the client settings', async () => {
+  const { newTenantPage, tenantForm } = await import('../src/views/pages.js');
+  assert.match(newTenantPage({ serverIp: '1.2.3.4', adminHost: 'gw.example.com' }), /name="cron_enabled" checked/);
+  const form = tenantForm({ id: 1, name: 'K', allowed_origins: 'https://www.klient.sk', cron_enabled: true, cron_url: '', cron_last_at: '2026-10-07T11:58:00Z', cron_last_status: 'HTTP 200, 300 ms' });
+  assert.match(form, /name="cron_enabled" checked/);
+  assert.match(form, /placeholder="https:\/\/www\.klient\.sk\/wp-cron\.php"/);
+  assert.match(form, /Naposledy: HTTP 200, 300 ms/);
+});

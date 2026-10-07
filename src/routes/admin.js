@@ -15,7 +15,8 @@ import { invalidateTenantCache } from '../lib/tenants.js';
 import { enqueue } from '../lib/queue.js';
 import { newEventId } from '../lib/ids.js';
 import { page } from '../views/layout.js';
-import { normalizeConsent, normalizeKeepPath } from '../lib/consent.js';
+import { CONSENT_MODES, normalizeConsent, normalizeKeepPath } from '../lib/consent.js';
+import { normalizeCronUrl } from '../lib/site-cron.js';
 import {
   accountPage, destinationForm, ingestKeyPage, loginPage, newTenantPage,
 } from '../views/pages.js';
@@ -368,8 +369,8 @@ export default async function adminRoutes(app) {
       const found = derived ? await detectConsent(derived.site_url) : null;
       mode = found || 'none';
       notes.push(found === null ? 'Web sa nepodarilo načítať, súhlasy sa zatiaľ nekontrolujú — nastavte ich v Nastaveniach.'
-        : found === 'none' ? 'Na webe sa nenašiel CookieScript ani Complianz, súhlasy sa nekontrolujú. Skontrolujte to v Nastaveniach.'
-          : `Rozpoznaný nástroj na súhlasy: ${found === 'cookiescript' ? 'CookieScript' : 'Complianz'}.`);
+        : found === 'none' ? 'Na webe sa nenašiel FAZ, CookieScript ani Complianz, súhlasy sa nekontrolujú. Skontrolujte to v Nastaveniach.'
+          : `Rozpoznaný nástroj na súhlasy: ${CONSENT_MODES[found] || found}.`);
     }
     const consent = normalizeConsent(mode, b.consent_prefix);
     // The old single form sends keep_path; the new one a WordPress checkbox.
@@ -382,12 +383,13 @@ export default async function adminRoutes(app) {
       const row = await one(
         `INSERT INTO tenants (slug, name, collector_host, allowed_origins, cookie_domain, active,
                               consent_mode, consent_prefix, keep_path,
-                              ingest_secret, legacy_ingest, server_only_events)
-         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, FALSE, $10)
+                              ingest_secret, legacy_ingest, server_only_events, cron_enabled)
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, FALSE, $10, $11)
          RETURNING id, name, collector_host`,
         [slug, String(b.name || derived?.domain || slug).trim(), collectorHost,
          pick('allowed_origins'), pick('cookie_domain') || null,
-         consent.mode, consent.prefix, keepPath, seal(key), cleanEventNames(b.server_only_events)],
+         consent.mode, consent.prefix, keepPath, seal(key), cleanEventNames(b.server_only_events),
+         b.wordpress === 'on' && b.cron_enabled === 'on'],
       );
       invalidateTenantCache();
       await audit(req, 'tenant.create', row.name);
@@ -459,12 +461,14 @@ export default async function adminRoutes(app) {
     await query(
       `UPDATE tenants SET name = $2, collector_host = $3, allowed_origins = $4,
               cookie_domain = $5, active = $6, consent_mode = $7, consent_prefix = $8,
-              keep_path = $9, legacy_ingest = $10, server_only_events = $11, quiet_alert_hours = $12
+              keep_path = $9, legacy_ingest = $10, server_only_events = $11, quiet_alert_hours = $12,
+              cron_enabled = $13, cron_url = $14
         WHERE id = $1`,
       [id, String(b.name || '').trim(), String(b.collector_host || '').trim().toLowerCase(),
        String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
        b.active === 'on', consent.mode, consent.prefix, normalizeKeepPath(b.keep_path),
-       b.legacy_ingest === 'on', cleanEventNames(b.server_only_events), parseQuietHours(b.quiet_alert_hours)],
+       b.legacy_ingest === 'on', cleanEventNames(b.server_only_events), parseQuietHours(b.quiet_alert_hours),
+       b.cron_enabled === 'on', normalizeCronUrl(b.cron_url, { allowed_origins: String(b.allowed_origins || '').trim() })],
     );
     invalidateTenantCache();
     forgetChecks(id);

@@ -54,7 +54,14 @@ export function parseSnapshot(body) {
   const orders = body.orders.map(cleanOrder).filter(Boolean);
   // The plugin says how many orders the whole run has; older ones did not.
   const total = Number.isInteger(Number(body.total)) && Number(body.total) >= 0 ? Number(body.total) : null;
-  return { day, page, pages, total, orders };
+  // How the site's scheduler is doing, for the install check.
+  const c = body.cron && typeof body.cron === 'object' ? body.cron : null;
+  const cron = c ? {
+    disabled: c.disabled === true,
+    due: Number.isInteger(Number(c.due)) && Number(c.due) >= 0 ? Number(c.due) : 0,
+    oldest: Number.isInteger(Number(c.oldest)) && Number(c.oldest) >= 0 ? Number(c.oldest) : 0,
+  } : null;
+  return { day, page, pages, total, cron, orders };
 }
 
 const toTime = (s) => (s ? new Date(s * 1000) : null);
@@ -81,6 +88,9 @@ export async function saveSnapshot(tenantId, snap) {
          reported_at = now()`,
       params,
     );
+  }
+  if (snap.cron) {
+    await query(`UPDATE tenants SET cron_report = $2 WHERE id = $1`, [tenantId, JSON.stringify({ ...snap.cron, at: new Date().toISOString() })]);
   }
   if (snap.page === snap.pages) {
     await query(
