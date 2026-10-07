@@ -1,11 +1,11 @@
 {
-  "version": "1.0.2",
-  "file": "nowera-capi-1.0.2.zip",
-  "sha256": "650ce873bebc5b248a8443aa6d7e2338ffcfc46d01635e6381cc025c1f16534c",
-  "signature": "p0un56l9bxfj7eTypCW2rH0HHK+xEXplnDBSrQmW5/POWZmfKjEZxdPEi3M2braRm90Gm3kZI1PxTjKISGF9AQ==",
-  "released_at": "2026-10-06T21:04:12.259Z",
+  "version": "1.1.0",
+  "file": "nowera-capi-1.1.0.zip",
+  "sha256": "fd611ea31db474a8cdf2ceca32c5a80b51274ce1185d84fe052bfc537ec58956",
+  "signature": "lGotkbIANN3iZDXhTFnU+5nSJwnM19FxOXbbe+zhXc1Jpv2NiuAgqFKHW86qAKy2PEp9KXUDE7zmoKervJ5LAQ==",
+  "released_at": "2026-10-07T09:17:21.764Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "GA4: session_id sa číta aj z nového formátu cookie (GS2), aby sa serverové udalosti spojili s návštevou a kliknutím na reklamu."
+  "notes": "FAZ Cookie Manager ako nástroj na súhlasy; voliteľný Google tag (GA4 config) s Consent Mode; udalosti pre GA4 počkajú na cookies _ga."
 }

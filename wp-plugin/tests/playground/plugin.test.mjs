@@ -317,6 +317,100 @@ test('a buyer without consent at checkout is not reported after payment either',
   }
 });
 
+// ---------------------------------------------------------- FAZ Cookie Manager
+
+test('FAZ: the page tells the loader to read FAZ', async () => {
+  await setConsent('faz');
+  try {
+    assert.deepEqual(inline(await html('/'), 'nwrConsent'), { mode: 'faz', prefix: 'cmplz_' });
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('FAZ: marketing goes to Meta, analytics alone only to GA4, no decision nowhere', async () => {
+  await setConsent('faz');
+  try {
+    const both = await fire('purchase', '', '&faz=marketing|analytics');
+    assert.equal(both.purchase.consent, 'marketing');
+    assert.deepEqual(both.sent[0].body.consent, { marketing: true, statistics: true });
+
+    const statsOnly = await fire('purchase', '', '&faz=analytics');
+    assert.equal(statsOnly.purchase.consent, 'statistics');
+    assert.deepEqual(statsOnly.sent[0].body.consent, { marketing: false, statistics: true });
+
+    // "performance" is a different FAZ category; it is not GA4's.
+    const perf = await fire('purchase', '', '&faz=performance');
+    assert.equal(perf.sent.length, 0);
+
+    const undecided = await fire('purchase', '', '&faz=marketing|analytics&faz_undecided=1');
+    assert.equal(undecided.purchase.consent, 'none', 'a cookie without a decision does not count');
+    assert.equal(undecided.sent.length, 0);
+
+    const none = await fire('purchase');
+    assert.equal(none.sent.length, 0);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('FAZ: a decision under an older policy revision no longer counts', async () => {
+  await json('/nwr-test/set.php?consent=faz&rev=2');
+  try {
+    const old = await fire('purchase', '', '&faz=marketing|analytics');
+    assert.equal(old.purchase.consent, 'none');
+    assert.equal(old.sent.length, 0);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('FAZ: without FAZ itself nobody counts as consenting', async () => {
+  await json('/nwr-test/set.php?consent=faz&stub=0');
+  try {
+    const r = await fire('purchase', '', '&faz=marketing|analytics');
+    assert.equal(r.purchase.consent, 'none');
+    assert.equal(r.sent.length, 0);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+// ------------------------------------------------------------- Google tag
+
+test('the Google tag is only printed when set, configuration only, consent default first', async () => {
+  assert.doesNotMatch(await html('/'), /googletagmanager\.com\/gtag/);
+  await json('/nwr-test/set.php?consent=faz&ga4=G-TEST1234');
+  try {
+    const page = await html('/');
+    assert.match(page, /<script async src="https:\/\/www\.googletagmanager\.com\/gtag\/js\?id=G-TEST1234"><\/script>/);
+    const inlineTag = page.match(/<script>(window\.dataLayer=[^<]*)<\/script>/)[1];
+    assert.ok(inlineTag.indexOf("gtag('consent','default'") < inlineTag.indexOf("gtag('config'"), 'denied default before config');
+    assert.match(inlineTag, /analytics_storage:'denied'/);
+    assert.match(inlineTag, /gtag\('config',"G-TEST1234"\)/);
+    assert.doesNotMatch(page, /gtag\('event'/, 'events come from the gateway');
+    assert.ok(page.indexOf('gtag/js?id=G-TEST1234') > page.indexOf('/px.js'), 'after the head scripts');
+
+    // The safety default only applies when nothing set one: run it against a
+    // dataLayer that already holds the consent tool's default.
+    const run = new Function('window', 'dataLayer', `var w=window; ${inlineTag.replace('window.dataLayer=window.dataLayer||[];', '')} return dataLayer;`);
+    const preset = [['consent', 'default', { analytics_storage: 'denied' }]];
+    const after = run({}, preset);
+    assert.equal(after.filter((a) => a[0] === 'consent').length, 1, 'the tool\'s own default is kept, not duplicated');
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('with FAZ but its Google Consent Mode off, the Google tag is not printed', async () => {
+  await json('/nwr-test/set.php?consent=faz&ga4=G-TEST1234&gcm=0');
+  try {
+    assert.doesNotMatch(await html('/'), /googletagmanager\.com\/gtag/);
+  } finally {
+    await setConsent('none');
+  }
+});
+
 // ------------------------------------------------------------ cookie keeper
 
 test('pages publish where px.js can refresh the identifiers', async () => {
@@ -658,6 +752,11 @@ test('the settings page never prints the key, and takes a pairing code', async (
   assert.match(s.bad_pairing.error, /Párovací kód/);
   assert.equal(s.blank_key_kept, true, 'an empty key field keeps the stored key');
   assert.equal(s.host_cleaned, 'collector.test');
+  assert.equal(s.has_faz, true);
+  assert.equal(s.faz_mode, 'faz');
+  assert.equal(s.has_ga4_input, true);
+  assert.equal(s.ga4_ok, 'G-ABC1234');
+  assert.equal(s.ga4_bad, '', 'anything but a measurement id is dropped');
 });
 
 test('the visitor address comes from Cloudflare or a local proxy only', async () => {

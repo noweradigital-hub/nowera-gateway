@@ -179,11 +179,41 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     }
   }
 
+  // FAZ Cookie Manager calls statistics "analytics".
+  var FAZ_CATEGORY = { marketing: 'marketing', statistics: 'analytics' };
+  // Categories FAZ last announced as accepted. Its events carry the state itself.
+  var fazAnnounced = null;
+
+  // Accepted FAZ categories, or null while nothing is known yet. Only FAZ's own
+  // state counts, and only once FAZ has started (window._fazConsentReady): until
+  // then its cookie may still hold a decision FAZ is about to discard (an older
+  // policy revision, another banner), so it is never read directly.
+  function fazAccepted() {
+    if (fazAnnounced) return fazAnnounced;
+    var ready = w._fazConsentReady;
+    if (!ready) return null;
+    try {
+      if (typeof w.getFazConsent === 'function') {
+        var st = w.getFazConsent();
+        var cats = st && st.categories;
+        if (!st || !st.isUserActionCompleted || !cats) return null;
+        return Object.keys(cats).filter(function (k) { return cats[k] === true; });
+      }
+    } catch (e) {}
+    return ready.action !== 'init' && Object.prototype.toString.call(ready.accepted) === '[object Array]'
+      ? ready.accepted : null;
+  }
+
   function hasConsent(category) {
     if (!consentActive()) return true;
 
     if (CONSENT.mode === 'cookiescript') {
       return cookieScriptCategories().indexOf(CS_CATEGORY[category]) !== -1;
+    }
+
+    if (CONSENT.mode === 'faz') {
+      var accepted = fazAccepted();
+      return !!accepted && accepted.indexOf(FAZ_CATEGORY[category]) !== -1;
     }
 
     if (CONSENT.mode === 'complianz') {
@@ -206,6 +236,10 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     if (CONSENT.mode === 'cookiescript') {
       var cats = cookieScriptCategories();
       return cats.length > 0 && cats.indexOf(CS_CATEGORY.marketing) === -1;
+    }
+    if (CONSENT.mode === 'faz') {
+      var accepted = fazAccepted();
+      return !!accepted && accepted.indexOf(FAZ_CATEGORY.marketing) === -1;
     }
     return cookie((CONSENT.prefix || 'cmplz_') + 'marketing') === 'deny';
   }
@@ -377,6 +411,61 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       } catch (e) {}
     }
 
+    deliver(ev, c, false);
+  }
+
+  // A new visitor's Google tag writes _ga only once it runs, after the same
+  // consent that released this event. Sent before that, GA4 would file the event
+  // under a stranger, outside the visitor's session and the Ads click. So, when
+  // the page has a Google tag (a dataLayer), wait briefly for its cookie. If it
+  // never comes on this page, later events stop waiting.
+  var GA_WAIT_MS = 2000;
+  var GA_WAIT_STEP = 200;
+  var gaGaveUp = false;
+  var gaQueue = [];
+  var gaWaited = 0;
+
+  // Both cookies: _ga names the visitor, _ga_<stream> their current session.
+  function gaReady() {
+    return !!(gaClientId() && gaSessionId());
+  }
+
+  function gaWaitOver() {
+    var queued = gaQueue;
+    gaQueue = [];
+    queued.forEach(function (ev) {
+      // The visitor may have changed their mind while the event waited.
+      var c = consentSnapshot();
+      if (!c.marketing && !c.statistics) pending.push(ev);
+      else deliver(ev, c, true);
+    });
+  }
+
+  function gaPoll() {
+    gaWaited += GA_WAIT_STEP;
+    if (gaReady() || gaWaited >= GA_WAIT_MS) {
+      if (!gaReady()) gaGaveUp = true;
+      gaWaitOver();
+    } else {
+      setTimeout(gaPoll, GA_WAIT_STEP);
+    }
+  }
+
+  // Leaving the page cancels timers: whatever still waits goes now.
+  if (w.addEventListener) {
+    w.addEventListener('pagehide', function () {
+      gaGaveUp = true;
+      gaWaitOver();
+    });
+  }
+
+  function deliver(ev, c, now) {
+    // Later events queue behind waiting ones, so the order stays as it happened.
+    if (!now && (gaQueue.length || (c.statistics && GA_STREAM && w.dataLayer && !gaGaveUp && !gaReady()))) {
+      gaQueue.push(ev);
+      if (gaQueue.length === 1) { gaWaited = 0; setTimeout(gaPoll, GA_WAIT_STEP); }
+      return;
+    }
     var body = {
       event_name: ev.name,
       event_id: ev.id,
@@ -441,6 +530,26 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     // Complianz announces both the initial state and every later change.
     d.addEventListener('cmplz_fire_categories', onConsentChange);
     d.addEventListener('cmplz_status_change', onConsentChange);
+  }
+
+  if (CONSENT.mode === 'faz') {
+    // fazcookie_consent_ready comes on every page ("init" for a visitor who has
+    // not decided, "restore" for one who has, "update" after a choice);
+    // fazcookie_consent_update with every change. Both carry {accepted, rejected}.
+    // FAZ's live state (getFazConsent) is read first; the event's own list is
+    // only kept for a FAZ build without that function.
+    var fazListen = function (e) {
+      var detail = e && e.detail;
+      if (typeof w.getFazConsent !== 'function' && detail &&
+          Object.prototype.toString.call(detail.accepted) === '[object Array]') {
+        // Before a decision FAZ only reports its defaults, which are not a refusal.
+        if (detail.action === 'init') fazAnnounced = null;
+        else if (detail.action) fazAnnounced = detail.accepted;
+      }
+      onConsentChange();
+    };
+    d.addEventListener('fazcookie_consent_ready', fazListen);
+    d.addEventListener('fazcookie_consent_update', fazListen);
   }
 
   if (CONSENT.mode === 'cookiescript') {

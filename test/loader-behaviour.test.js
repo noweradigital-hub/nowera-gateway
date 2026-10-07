@@ -637,3 +637,180 @@ test('the GA4 session id is read from both the current GS2 and the older GS1 coo
   junk.run();
   assert.equal(junk.posts[0].body.ga_session_id, null);
 });
+
+// ------------------------------------------------------------ FAZ Cookie Manager
+
+// Plays FAZ 1.33 as its script.min.js behaves: getFazConsent() reads its store,
+// window._fazConsentReady is set before each fazcookie_consent_ready event, and a
+// choice fires fazcookie_consent_update and then ready "update".
+function faz(b, { decided = false, accepted = [] } = {}) {
+  const cats = ['necessary', 'functional', 'analytics', 'performance', 'uncategorized', 'marketing'];
+  let state = { decided, accepted: ['necessary', ...accepted] };
+  const detail = (action) => ({
+    accepted: state.accepted, rejected: cats.filter((c) => !state.accepted.includes(c)), ...(action ? { action } : {}),
+  });
+  b.window.getFazConsent = () => ({
+    activeLaw: 'gdpr', services: {}, consentID: 'abc', languageCode: 'sk',
+    categories: Object.fromEntries(cats.map((c) => [c, state.accepted.includes(c)])),
+    isUserActionCompleted: state.decided,
+  });
+  const ready = (action) => { b.window._fazConsentReady = detail(action); b.fire('fazcookie_consent_ready', detail(action)); };
+  return {
+    // Page load: defaults first, then "init" (undecided) or "restore".
+    start() { b.fire('fazcookie_consent_update', detail()); ready(state.decided ? 'restore' : 'init'); },
+    choose(list) { state = { decided: true, accepted: ['necessary', ...list] }; b.fire('fazcookie_consent_update', detail()); ready('update'); },
+  };
+}
+const fazCookie = (list) => 'fazcookie-consent=' + encodeURIComponent(
+  ['consentid:abc', 'consent:yes', 'action:yes', 'necessary:yes']
+    .concat(['analytics', 'marketing'].map((c) => `${c}:${list.includes(c) ? 'yes' : 'no'}`)).concat(['rev:1']).join(','));
+
+test('FAZ: nothing is sent before the visitor decides', () => {
+  const b = browser({ consent: { mode: 'faz' }, page: { type: 'product', data: {} } });
+  const f = faz(b);
+  b.run();
+  f.start();
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.fbq.length, 0);
+});
+
+test('FAZ: its cookie alone is not trusted before FAZ has checked it', () => {
+  // FAZ may be about to discard it (a newer policy revision, another banner).
+  const b = browser({ consent: { mode: 'faz' }, cookie: fazCookie(['analytics', 'marketing']) });
+  b.run();
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.fbq.length, 0);
+});
+
+test('FAZ: a returning visitor who accepted is tracked once FAZ restores the decision', () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  const f = faz(b, { decided: true, accepted: ['analytics', 'marketing'] });
+  b.run();
+  assert.equal(b.posts.length, 0, 'not before FAZ has started');
+  f.start();
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: true });
+  assert.ok(isInit(b.fbq[0]));
+});
+
+test('FAZ already started before px.js: its state is read at once', () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  const f = faz(b, { decided: true, accepted: ['analytics'] });
+  f.start();
+  b.run();
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: false, statistics: true });
+});
+
+test('FAZ: accepting in the banner releases waiting events once, analytics maps to statistics', () => {
+  const b = browser({ consent: { mode: 'faz' }, page: { type: 'product', data: {} }, cookie: '_fbp=fb.1.1.2' });
+  const f = faz(b);
+  b.run();
+  f.start();
+  f.choose(['analytics']);
+  assert.deepEqual(b.posts.map((p) => p.body.event_name), ['PageView', 'ViewContent'], 'each sent once');
+  assert.deepEqual(b.posts[0].body.consent, { marketing: false, statistics: true });
+  assert.equal(b.posts[0].body.fbp, undefined, 'no marketing identifier');
+  assert.equal(b.fbq.length, 0, 'no pixel');
+});
+
+test('FAZ: marketing consent starts the pixel with the shared event id', () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  const f = faz(b);
+  b.run();
+  f.start();
+  f.choose(['analytics', 'marketing']);
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: true });
+  assert.equal(tracked(b.fbq)[0][3].eventID, b.posts[0].body.event_id);
+});
+
+test('FAZ: refusing marketing removes our advertising identifiers', () => {
+  const b = browser({ consent: { mode: 'faz' }, cookie: '_nwr_id=v1; _nwr_ud=%7B%7D' });
+  const f = faz(b, { decided: true, accepted: ['analytics'] });
+  b.run();
+  f.start();
+  assert.equal(b.jar.value('_nwr_id'), undefined);
+  assert.equal(b.jar.value('_nwr_ud'), undefined);
+  assert.equal(b.posts.length, 1, 'statistics still measured');
+  assert.equal(b.posts[0].body.consent.marketing, false);
+});
+
+test('FAZ: an undecided visitor keeps their identifiers until they actually refuse', () => {
+  const b = browser({ consent: { mode: 'faz' }, cookie: '_nwr_id=v1' });
+  const f = faz(b);
+  b.run();
+  f.start();
+  assert.equal(b.jar.value('_nwr_id'), 'v1');
+});
+
+// ------------------------------------------------- waiting for the Google tag
+
+test('GA4-bound events wait for the Google tag to write _ga, then carry it', async () => {
+  const b = browser({ consent: { mode: 'faz' }, cookie: '_fbp=fb.1.1.2' });
+  b.window.dataLayer = [];
+  const f = faz(b);
+  b.run();
+  f.start();
+  f.choose(['analytics', 'marketing']);
+  assert.equal(b.posts.length, 0, 'held while _ga is missing');
+  assert.equal(tracked(b.fbq).length, 1, 'the Meta pixel does not wait');
+  b.document.cookie = '_ga=GA1.1.111.222; path=/';
+  b.document.cookie = '_ga_ABC=GS2.1.s1759740000$o1$g0; path=/';
+  await new Promise((r) => setTimeout(r, 450));
+  assert.equal(b.posts.length, 1);
+  assert.equal(b.posts[0].body.ga_client_id, '111.222');
+  assert.equal(b.posts[0].body.ga_session_id, '1759740000');
+  assert.equal(b.posts[0].body.event_id, tracked(b.fbq)[0][3].eventID);
+});
+
+test('without _ga after two seconds the events go anyway, and later ones stop waiting', async () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  b.window.dataLayer = [];
+  const f = faz(b);
+  b.run();
+  f.start();
+  f.choose(['analytics']);
+  assert.equal(b.posts.length, 0);
+  await new Promise((r) => setTimeout(r, 2300));
+  assert.equal(b.posts.length, 1);
+  b.window.nwr('track', 'Search', { search_string: 'x' });
+  assert.equal(b.posts.length, 2, 'no second wait on the same page');
+});
+
+test('the wait covers the session cookie too, keeps the order, and rechecks consent', async () => {
+  const b = browser({ consent: { mode: 'faz' }, page: { type: 'product', data: {} } });
+  b.window.dataLayer = [];
+  const f = faz(b);
+  b.run();
+  f.start();
+  f.choose(['analytics']);
+  b.document.cookie = '_ga=GA1.1.111.222; path=/';
+  b.window.nwr('track', 'Search', { search_string: 'x' });
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(b.posts.length, 0, '_ga alone is not enough: the session id is still missing');
+  b.document.cookie = '_ga_ABC=GS2.1.s1759740000$o1$g0; path=/';
+  await new Promise((r) => setTimeout(r, 250));
+  assert.deepEqual(b.posts.map((p) => p.body.event_name), ['PageView', 'ViewContent', 'Search'], 'in the order they happened');
+  assert.ok(b.posts.every((p) => p.body.ga_session_id === '1759740000'));
+});
+
+test('consent withdrawn while waiting for _ga: the waiting events do not go', async () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  b.window.dataLayer = [];
+  const f = faz(b);
+  b.run();
+  f.start();
+  f.choose(['analytics']);
+  f.choose([]);
+  await new Promise((r) => setTimeout(r, 2300));
+  assert.equal(b.posts.length, 0);
+});
+
+test('a page without a Google tag does not wait for _ga', () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  const f = faz(b, { decided: true, accepted: ['analytics'] });
+  b.run();
+  f.start();
+  assert.equal(b.posts.length, 1);
+});

@@ -4,6 +4,7 @@ import {
 } from './components.js';
 import { formatAgo, siteOrigin } from '../lib/checks.js';
 import { testModeActive } from '../destinations/test-mode.js';
+import { SCOPES } from '../destinations/index.js';
 import { tenantForm } from './pages.js';
 
 export const TABS = [
@@ -141,7 +142,7 @@ function destinationCard(t, d, metaVersion) {
     : `
       <dt>Measurement ID</dt><dd class="mono">${esc(s.measurement_id)}</dd>
       <dt>API secret</dt><dd>uložený</dd>
-      <dt>Posiela</dt><dd>${s.scope === 'browserless' ? 'len udalosti bez prehliadača (nákupy bez návratu na web, refundácie)' : 'všetky udalosti'}</dd>`;
+      <dt>Posiela</dt><dd>${esc(SCOPES[s.scope] || SCOPES.all)}</dd>`;
   const testBox = d.kind !== 'meta' ? '' : testing ? `
     <div class="box"><span>Testovací režim:</span>${pill('warn', `do ${time(s.test_until)}`)}<span class="mono">${esc(s.test_event_code)}</span>
       <form class="inline" method="post" action="/admin/destinations/${d.id}/test-off"><button class="btn sm" type="submit">Ukončiť</button></form></div>` : `

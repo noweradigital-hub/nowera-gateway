@@ -33,6 +33,18 @@ if ( isset( $_GET['cs_raw'] ) ) {
 if ( isset( $_GET['ud'] ) ) {
 	$cookies['_nwr_ud'] = wp_unslash( $_GET['ud'] );
 }
+// FAZ Cookie Manager: &faz=marketing|analytics accepts those; &faz=none decides
+// against everything; &faz_undecided=1 writes a cookie without a decision.
+if ( isset( $_GET['faz'] ) ) {
+	$accepted = array_filter( explode( '|', (string) $_GET['faz'] ) );
+	$action   = empty( $_GET['faz_undecided'] ) ? 'yes' : 'no';
+	$pairs    = array( 'consentid:t1', "consent:$action", "action:$action", 'necessary:yes' );
+	foreach ( array( 'functional', 'analytics', 'performance', 'marketing' ) as $cat ) {
+		$pairs[] = $cat . ':' . ( in_array( $cat, $accepted, true ) ? 'yes' : 'no' );
+	}
+	$pairs[]                       = 'rev:1';
+	$cookies['fazcookie-consent'] = implode( ',', $pairs );
+}
 nwr_cookies( $cookies );
 
 if ( isset( $_GET['ref'] ) ) {

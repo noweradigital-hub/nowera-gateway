@@ -24,6 +24,11 @@ First boot downloads WordPress and WooCommerce and takes a minute or two.
 
 ## Gotchas this suite already hit
 
+- Playground serves requests from several PHP workers, each with its own copy
+  of the unmounted filesystem. A file a script writes at runtime (say into
+  `mu-plugins`) exists in one worker only; switch test behaviour with options,
+  and ship files through the blueprint or a mount.
+
 - A product search with exactly one hit is redirected by WooCommerce to that
   product, which fires ViewContent, not Search. Search tests need two hits.
 - `woocommerce_before_checkout_form` prints markup; buffer it in scripts.

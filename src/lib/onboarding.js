@@ -46,6 +46,7 @@ export async function detectConsent(siteUrl, fetchImpl = fetch) {
   } catch {
     return null;
   }
+  if (/faz-cookie-manager|fazcookie-consent|fazConfig/i.test(html)) return 'faz';
   if (/cookie-script\.com|CookieScript/i.test(html)) return 'cookiescript';
   if (/complianz|cmplz[-_]/i.test(html)) return 'complianz';
   return 'none';

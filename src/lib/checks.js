@@ -88,7 +88,7 @@ export async function runChecks(tenant, destinations, { force = false, fetchImpl
       ? { state: 'warn', text: 'Vlastný kľúč nastavený, spoločný kľúč ešte povolený.' }
       : { state: 'warn', text: 'Web podpisuje spoločným kľúčom všetkých klientov.' };
 
-  const consentNames = { cookiescript: 'CookieScript', complianz: 'Complianz', custom: 'vlastný nástroj', none: null };
+  const consentNames = { faz: 'FAZ Cookie Manager', cookiescript: 'CookieScript', complianz: 'Complianz', custom: 'vlastný nástroj', none: null };
   const consentName = consentNames[tenant.consent_mode];
   const consent = consentName
     ? { state: 'ok', text: `${consentName}: eventy čakajú na rozhodnutie návštevníka.` }

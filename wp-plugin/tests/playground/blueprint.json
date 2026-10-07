@@ -1,15 +1,33 @@
 {
 	"$schema": "https://playground.wordpress.net/blueprint-schema.json",
-	"preferredVersions": { "php": "8.3", "wp": "latest" },
-	"features": { "networking": true },
+	"preferredVersions": {
+		"php": "8.3",
+		"wp": "latest"
+	},
+	"features": {
+		"networking": true
+	},
 	"login": false,
 	"steps": [
 		{
 			"step": "installPlugin",
-			"pluginData": { "resource": "wordpress.org/plugins", "slug": "woocommerce" },
-			"options": { "activate": true }
+			"pluginData": {
+				"resource": "wordpress.org/plugins",
+				"slug": "woocommerce"
+			},
+			"options": {
+				"activate": true
+			}
 		},
-		{ "step": "activatePlugin", "pluginPath": "nowera-capi/nowera-capi.php" },
+		{
+			"step": "activatePlugin",
+			"pluginPath": "nowera-capi/nowera-capi.php"
+		},
+		{
+			"step": "writeFile",
+			"path": "/wordpress/wp-content/mu-plugins/nwr-faz-stub.php",
+			"data": "<?php\n// Test only: stands in for FAZ Cookie Manager while a test turns it on (set.php?consent=faz).\nif ( get_option( 'nwr_test_faz_stub' ) && file_exists( '/wordpress/nwr-test/faz-stub.php' ) ) {\n\trequire '/wordpress/nwr-test/faz-stub.php';\n}\n"
+		},
 		{
 			"step": "runPHP",
 			"code": "<?php require '/wordpress/wp-load.php'; delete_transient( '_wc_activation_redirect' ); update_option( 'woocommerce_onboarding_profile', array( 'skipped' => true ) ); update_option( 'woocommerce_currency', 'EUR' ); update_option( 'woocommerce_default_country', 'SK' ); update_option( 'permalink_structure', '' );"

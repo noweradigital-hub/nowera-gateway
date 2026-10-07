@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.0.2
+ * Version:      1.1.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.0.2';
+const NOWERA_CAPI_VERSION = '1.1.0';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -63,6 +63,7 @@ function nowera_capi_settings(): array {
 		'consent_mode'   => 'none',
 		'consent_prefix' => 'cmplz_',
 		'auto_update'    => 1,
+		'ga4_tag'        => '',
 	);
 	return wp_parse_args( get_option( NOWERA_CAPI_OPTION, array() ), $defaults );
 }
@@ -116,10 +117,13 @@ add_action( 'admin_init', function () {
 				'ingest_secret'  => $key,
 				'auto_update'    => empty( $input['auto_update'] ) ? 0 : 1,
 				'load_script'    => empty( $input['load_script'] ) ? 0 : 1,
-				'consent_mode'   => in_array( $input['consent_mode'] ?? 'none', array( 'none', 'cookiescript', 'complianz', 'custom' ), true )
+				'consent_mode'   => in_array( $input['consent_mode'] ?? 'none', array( 'none', 'faz', 'cookiescript', 'complianz', 'custom' ), true )
 					? $input['consent_mode']
 					: 'none',
 				'consent_prefix' => preg_replace( '/[^a-zA-Z0-9_\-]/', '', $input['consent_prefix'] ?? 'cmplz_' ) ?: 'cmplz_',
+				'ga4_tag'        => preg_match( '/^G-[A-Z0-9]{4,20}$/', strtoupper( trim( (string) ( $input['ga4_tag'] ?? '' ) ) ) )
+					? strtoupper( trim( (string) $input['ga4_tag'] ) )
+					: '',
 			);
 		},
 	) );
@@ -210,13 +214,14 @@ function nowera_capi_render_settings(): void {
 					<td>
 						<select id="nwr_consent" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[consent_mode]">
 							<option value="none" <?php selected( $s['consent_mode'], 'none' ); ?>>Nekontrolovať (meria sa vždy)</option>
+							<option value="faz" <?php selected( $s['consent_mode'], 'faz' ); ?>>FAZ Cookie Manager</option>
 							<option value="cookiescript" <?php selected( $s['consent_mode'], 'cookiescript' ); ?>>CookieScript</option>
 							<option value="complianz" <?php selected( $s['consent_mode'], 'complianz' ); ?>>Complianz</option>
 							<option value="custom" <?php selected( $s['consent_mode'], 'custom' ); ?>>Iný nástroj (cookie s prefixom)</option>
 						</select>
 						<p class="description">
 							Meta dostane eventy len so súhlasom <strong>marketing</strong>, GA4 so súhlasom <strong>statistics</strong>
-							(v CookieScripte kategórie <code>targeting</code> a <code>performance</code>).
+							(vo FAZ kategórie <code>marketing</code> a <code>analytics</code>, v CookieScripte <code>targeting</code> a <code>performance</code>).
 							Pri inom nástroji zavolajte po rozhodnutí návštevníka <code>nwr('consent')</code>.
 						</p>
 					</td>
@@ -227,6 +232,21 @@ function nowera_capi_render_settings(): void {
 						<input id="nwr_prefix" class="regular-text code" type="text" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[consent_prefix]"
 						       value="<?php echo esc_attr( $s['consent_prefix'] ); ?>">
 						<p class="description">Complianz predvolene <code>cmplz_</code> — cookie <code>cmplz_marketing=allow</code>.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="nwr_ga4_tag">Google tag (GA4)</label></th>
+					<td>
+						<input id="nwr_ga4_tag" class="regular-text code" type="text" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[ga4_tag]"
+						       value="<?php echo esc_attr( $s['ga4_tag'] ); ?>" placeholder="G-XXXXXXXXXX">
+						<p class="description">
+							Vloží do hlavičky len <code>gtag('config')</code>: page_view, relácie, cookies <code>_ga</code> a gclid pre Google Ads.
+							E-commerce udalosti posiela signals (GA4 destinácia „Všetky okrem page_view“). Iný GA4 kód (GTM, Site Kit, ručný v hlavičke) odstráňte.
+							Súhlas rieši nástroj na súhlasy cez Google Consent Mode — vo FAZ ho zapnite.
+						</p>
+						<?php if ( $s['ga4_tag'] && 'faz' === $s['consent_mode'] && ! nowera_capi_faz_gcm_enabled() ) : ?>
+							<p class="description" style="color:#b32d2e"><strong>Google Consent Mode vo FAZ je vypnutý, preto sa Google tag nevkladá.</strong> Zapnite ho vo FAZ (Google Consent Mode).</p>
+						<?php endif; ?>
 					</td>
 				</tr>
 			</table>
@@ -292,6 +312,40 @@ add_action( 'wp_head', function () {
 	);
 }, 1 );
 
+/**
+ * The Google tag, configuration only. It keeps what only a browser tag can do:
+ * page views, sessions, the _ga cookies and gclid, which the server events then
+ * join. Ecommerce events come from the gateway, so none are sent from here.
+ *
+ * Printed after the head scripts so the consent tool's Google Consent Mode
+ * default is already queued; the same for every visitor, so cache-safe.
+ */
+add_action( 'wp_head', function () {
+	$s  = nowera_capi_settings();
+	$id = $s['ga4_tag'];
+	if ( ! $id ) {
+		return;
+	}
+	// With FAZ the consent defaults come from its Google Consent Mode; without
+	// it nothing would ever grant or deny, so the tag is not printed at all.
+	if ( 'faz' === $s['consent_mode'] && ! nowera_capi_faz_gcm_enabled() ) {
+		return;
+	}
+	$js = 'window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}';
+	// Google requires a consent default before config. The consent tool sets one;
+	// should it not have (yet), everything starts denied until it updates.
+	if ( 'none' !== $s['consent_mode'] ) {
+		$js .= 'if(!dataLayer.some(function(a){return a&&a[0]===\'consent\'&&a[1]===\'default\';}))'
+			. 'gtag(\'consent\',\'default\',{ad_storage:\'denied\',ad_user_data:\'denied\',ad_personalization:\'denied\',analytics_storage:\'denied\',wait_for_update:500});';
+	}
+	$js .= 'gtag(\'js\',new Date());gtag(\'config\',' . wp_json_encode( $id ) . ');';
+	printf(
+		'<script async src="https://www.googletagmanager.com/gtag/js?id=%1$s"></script>' . "\n" . '<script>%2$s</script>' . "\n",
+		esc_attr( $id ),
+		$js
+	);
+}, 20 );
+
 /* -------------------------------------------------------------------------
  * Consent, catalog ids, page context
  * ---------------------------------------------------------------------- */
@@ -306,6 +360,12 @@ function nowera_capi_has_consent( string $category ): bool {
 		return true;
 	}
 
+	if ( 'faz' === $s['consent_mode'] ) {
+		$map = array( 'marketing' => 'marketing', 'statistics' => 'analytics' );
+		$faz = nowera_capi_faz_consent();
+		return isset( $map[ $category ] ) && 'yes' === ( $faz['action'] ?? '' ) && 'yes' === ( $faz[ $map[ $category ] ] ?? '' );
+	}
+
 	if ( 'cookiescript' === $s['consent_mode'] ) {
 		$map = array( 'marketing' => 'targeting', 'statistics' => 'performance' );
 		return isset( $map[ $category ] ) && in_array( $map[ $category ], nowera_capi_cookiescript_categories(), true );
@@ -317,6 +377,33 @@ function nowera_capi_has_consent( string $category ): bool {
 	}
 	$name = $s['consent_prefix'] . $category;
 	return isset( $_COOKIE[ $name ] ) && 'allow' === sanitize_text_field( wp_unslash( $_COOKIE[ $name ] ) );
+}
+
+/**
+ * The visitor's FAZ Cookie Manager decision as key => value, e.g.
+ *   array( 'action' => 'yes', 'analytics' => 'no', 'marketing' => 'yes', 'rev' => '1' ).
+ * Read only through FAZ's own helpers, which also discard a decision made under
+ * an older policy revision. Without FAZ there is no valid decision at all.
+ */
+function nowera_capi_faz_consent(): array {
+	if ( ! function_exists( 'faz_get_valid_consent_cookie' ) || ! function_exists( 'faz_parse_consent_cookie' ) ) {
+		return array();
+	}
+	$raw = faz_get_valid_consent_cookie();
+	return '' === $raw ? array() : faz_parse_consent_cookie( $raw );
+}
+
+/** Whether FAZ emits Google Consent Mode, without which a Google tag would run unchecked. */
+function nowera_capi_faz_gcm_enabled(): bool {
+	if ( ! class_exists( 'FazCookie\\Admin\\Modules\\Gcm\\Includes\\Gcm_Settings' ) ) {
+		return false;
+	}
+	try {
+		$gcm = new \FazCookie\Admin\Modules\Gcm\Includes\Gcm_Settings();
+		return true === $gcm->is_gcm_enabled();
+	} catch ( \Throwable $e ) {
+		return false;
+	}
 }
 
 /**

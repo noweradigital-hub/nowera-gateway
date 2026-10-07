@@ -132,6 +132,7 @@ test('the consent tool is recognised from the page', async () => {
   const page = (html) => async () => ({ text: async () => html });
   assert.equal(await detectConsent('https://x', page('<script src="https://geo.cookie-script.com/s/abc.js">')), 'cookiescript');
   assert.equal(await detectConsent('https://x', page('<div id="cmplz-cookiebanner-container">')), 'complianz');
+  assert.equal(await detectConsent('https://x', page('<script id="faz-cookie-manager-js" src="/wp-content/plugins/faz-cookie-manager/frontend/js/script.min.js">')), 'faz');
   assert.equal(await detectConsent('https://x', page('<html></html>')), 'none');
   assert.equal(await detectConsent('https://x', async () => { throw new Error('timeout'); }), null);
 });
@@ -217,13 +218,27 @@ test('GA4 next to a browser tag takes only what no browser sent; Meta never take
   assert.equal(body.client_id, '123.456', 'the buyer, as GA4 knows them from the browser');
 });
 
-test('the GA4 destination form offers the scope, set to everything for a new one', async () => {
+test('the GA4 destination form offers the scope: no page_view for a new one, all for an old one', async () => {
   const { SCHEMAS } = await import('../src/destinations/index.js');
   const { destinationsTab } = await import('../src/views/tenant.js');
   const { destinationForm } = await import('../src/views/pages.js');
   const add = destinationsTab({ id: 1 }, [], SCHEMAS, 'v26.0');
-  assert.match(add, /<select id="ga4_scope" name="scope"><option value="all" selected>/);
+  assert.match(add, /<select id="ga4_scope" name="scope"><option value="no_page_view" selected>/);
   const edit = destinationForm({ id: 1, name: 'K' }, { id: 6, kind: 'ga4', settings: { measurement_id: 'G-1', api_secret: 'enc:v1:x', scope: 'browserless' } }, SCHEMAS.ga4);
   assert.match(edit, /<option value="browserless" selected>/);
   assert.ok(!edit.includes('enc:v1:x'), 'the secret stays hidden');
+  // Saved before the field existed: it sends everything, and the form must say so
+  // rather than offer a value that a save would silently switch to.
+  const old = destinationForm({ id: 1, name: 'K' }, { id: 7, kind: 'ga4', settings: { measurement_id: 'G-1' } }, SCHEMAS.ga4);
+  assert.match(old, /<option value="all" selected>/);
+});
+
+test('GA4 "no page_view" leaves page views to the Google tag and sends everything else', async () => {
+  const { wants } = await import('../src/destinations/index.js');
+  const dest = { kind: 'ga4', settings: { scope: 'no_page_view' } };
+  assert.equal(wants(dest, { event_name: 'PageView' }), false);
+  for (const name of ['ViewContent', 'AddToCart', 'InitiateCheckout', 'AddPaymentInfo', 'Purchase', 'Refund', 'Search']) {
+    assert.equal(wants(dest, { event_name: name }), true, name);
+  }
+  assert.equal(wants({ kind: 'ga4', settings: {} }, { event_name: 'PageView' }), true, 'unset means all');
 });

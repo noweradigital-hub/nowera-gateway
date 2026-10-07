@@ -29,6 +29,7 @@ const SKIP = { meta: new Set(['Refund']) };
 
 /** What a destination may be set to receive (settings.scope). */
 export const SCOPES = {
+  no_page_view: 'Všetky okrem page_view (web má Google tag, ten meria page_view)',
   all: 'Všetky udalosti',
   browserless: 'Len udalosti bez prehliadača (nákupy bez návratu na web, refundácie)',
 };
@@ -41,6 +42,9 @@ export const SCOPES = {
 export function wants(dest, event) {
   if (SKIP[dest.kind]?.has(event.event_name)) return false;
   if (dest.settings?.scope === 'browserless' && event.browserless !== true) return false;
+  // The Google tag on the page already counts page views and starts the session
+  // our events join; a second page_view from here would double them.
+  if (dest.settings?.scope === 'no_page_view' && event.event_name === 'PageView') return false;
   return true;
 }
 
@@ -80,8 +84,8 @@ export const SCHEMAS = {
   ga4: [
     { key: 'measurement_id', label: 'Measurement ID (G-XXXXXXX)', required: true },
     { key: 'api_secret', label: 'API secret', required: true, secret: true },
-    { key: 'scope', label: 'Čo posielať', options: SCOPES, default: 'all',
-      hint: 'Ak web meria GA4 aj v prehliadači (GTM, gtag), zvoľte len udalosti bez prehliadača — inak sa v GA4 zdvoja.' },
+    { key: 'scope', label: 'Čo posielať', options: SCOPES, default: 'no_page_view', unset: 'all',
+      hint: 'Štandard: web má len Google tag (config) a e-commerce posiela signals → „Všetky okrem page_view“. Ak e-commerce do GA4 posiela aj GTM alebo plugin, zvoľte „Len udalosti bez prehliadača“.' },
   ],
 };
 

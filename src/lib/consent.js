@@ -3,6 +3,7 @@ export const CONSENT_MODES = {
   none: 'Nekontrolovať (meria sa vždy)',
   cookiescript: 'CookieScript',
   complianz: 'Complianz',
+  faz: 'FAZ Cookie Manager',
   custom: 'Iný nástroj (cookie s prefixom)',
 };
 

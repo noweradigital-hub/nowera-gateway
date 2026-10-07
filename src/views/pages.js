@@ -36,7 +36,8 @@ export function destinationForm(tenant, dest, schema) {
   const fields = schema.map((f) => {
     const stored = dest.settings?.[f.key] ?? '';
     if (f.options) {
-      const current = stored || f.default;
+      // A destination saved before this field existed behaves as `unset`, so show that.
+      const current = stored || (dest?.id && f.unset ? f.unset : f.default);
       return `
       <div><label for="${f.key}">${esc(f.label)}</label>
       <select id="${f.key}" name="${f.key}">${Object.entries(f.options).map(([k, label]) =>
