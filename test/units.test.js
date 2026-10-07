@@ -480,3 +480,62 @@ test('ga4 counts revenue without VAT when the site sends it; meta keeps the full
   assert.equal(m.contents[0].item_price, 56.4);
   assert.equal(m.contents[0].price_net, undefined);
 });
+
+// ------------------------------------------------- how long a client may be quiet
+
+const day = (daytime, night = 0, morning = daytime) =>
+  Array.from({ length: 24 }, (_, h) => (h >= 7 && h < 10 ? morning : h >= 7 && h < 23 ? daytime : night));
+const at = (iso) => new Date(iso).getTime();
+
+test('quiet threshold: a busy shop keeps the 2-hour floor', async () => {
+  const { quietThreshold } = await import('../src/lib/alerts.js');
+  // kidvak.com: about 15 events an hour by day, 14 days of history.
+  const t = quietThreshold({ counts: day(15 * 14, 14), days: 14, now: at('2026-10-07T16:00:00Z') });
+  assert.deepEqual(t, { hours: 2, source: 'auto' });
+});
+
+test('quiet threshold: a small shop waits until five events would normally have come', async () => {
+  const { quietThreshold } = await import('../src/lib/alerts.js');
+  // About 0.8 events an hour by day (kidvak.pl after consent), 18:00 in Bratislava.
+  const t = quietThreshold({ counts: day(11), days: 14, now: at('2026-10-07T16:00:00Z') });
+  assert.equal(t.source, 'auto');
+  assert.ok(t.hours >= 6 && t.hours <= 8, `${t.hours} h`);
+});
+
+test('quiet threshold: a quiet morning after the night is not an outage', async () => {
+  const { quietThreshold } = await import('../src/lib/alerts.js');
+  // 9:00 in Bratislava: two slow morning hours and a silent night behind.
+  const t = quietThreshold({ counts: day(11, 0, 2), days: 14, now: at('2026-10-07T07:00:00Z') });
+  assert.equal(t.hours, 12, 'capped at 12 h');
+});
+
+test('quiet threshold: without enough history it stays at 2 hours; a manual value wins', async () => {
+  const { quietThreshold } = await import('../src/lib/alerts.js');
+  assert.deepEqual(quietThreshold({ counts: undefined, days: 14 }), { hours: 2, source: 'default' });
+  assert.deepEqual(quietThreshold({ counts: day(11), days: 1.5 }), { hours: 2, source: 'default' });
+  assert.deepEqual(quietThreshold({ counts: day(11), days: 14, manual: '5' }), { hours: 5, source: 'manual' });
+  assert.equal(quietThreshold({ counts: day(15 * 14), days: 14, manual: null, now: at('2026-10-07T16:00:00Z') }).source, 'auto');
+});
+
+test('quiet threshold: the settings field takes hours, empty means automatic', async () => {
+  const { parseQuietHours } = await import('../src/lib/alerts.js');
+  assert.equal(parseQuietHours(''), null);
+  assert.equal(parseQuietHours('abc'), null);
+  assert.equal(parseQuietHours('0'), null);
+  assert.equal(parseQuietHours('4,5'), 4.5);
+  assert.equal(parseQuietHours('100'), 72);
+});
+
+test('history days: two weeks at most, none without a first event', async () => {
+  const { historyDays } = await import('../src/lib/alerts.js');
+  const now = at('2026-10-07T16:00:00Z');
+  assert.equal(historyDays(null, now), 0);
+  assert.equal(historyDays('2026-10-05T16:00:00Z', now), 2);
+  assert.equal(historyDays('2026-09-01T00:00:00Z', now), 14);
+});
+
+test('quiet threshold: a manual value below two hours applies; a silent fortnight is a zero rate', async () => {
+  const { quietThreshold } = await import('../src/lib/alerts.js');
+  assert.deepEqual(quietThreshold({ counts: new Array(24).fill(0), days: 14, manual: '1' }), { hours: 1, source: 'manual' });
+  assert.deepEqual(quietThreshold({ counts: new Array(24).fill(0), days: 14, now: at('2026-10-07T16:00:00Z') }), { hours: 12, source: 'auto' });
+});

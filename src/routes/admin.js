@@ -31,7 +31,7 @@ import {
 } from '../views/tenant.js';
 import { eventBrowser } from '../views/events.js';
 import {
-  RULES, alertHistory, alertSettings, openAlertCount, saveAlertSettings, testWebhook, validWebhook,
+  RULES, alertHistory, alertSettings, openAlertCount, parseQuietHours, saveAlertSettings, testWebhook, validWebhook,
 } from '../lib/alerts.js';
 import { alertsPage } from '../views/alerts.js';
 import { newTotpSecret, otpauthUrl, verifyTotp } from '../lib/totp.js';
@@ -455,12 +455,12 @@ export default async function adminRoutes(app) {
     await query(
       `UPDATE tenants SET name = $2, collector_host = $3, allowed_origins = $4,
               cookie_domain = $5, active = $6, consent_mode = $7, consent_prefix = $8,
-              keep_path = $9, legacy_ingest = $10, server_only_events = $11
+              keep_path = $9, legacy_ingest = $10, server_only_events = $11, quiet_alert_hours = $12
         WHERE id = $1`,
       [id, String(b.name || '').trim(), String(b.collector_host || '').trim().toLowerCase(),
        String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
        b.active === 'on', consent.mode, consent.prefix, normalizeKeepPath(b.keep_path),
-       b.legacy_ingest === 'on', cleanEventNames(b.server_only_events)],
+       b.legacy_ingest === 'on', cleanEventNames(b.server_only_events), parseQuietHours(b.quiet_alert_hours)],
     );
     invalidateTenantCache();
     forgetChecks(id);

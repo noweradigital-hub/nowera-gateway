@@ -14,7 +14,7 @@ import { backupCondition } from './backup.js';
 export const RULES = {
   token: { title: 'Destinácia odmieta prístup', hint: 'Meta vráti chybu 190 alebo 2635 (neplatný token, zastaraná verzia API). Hlási sa hneď.' },
   failing: { title: 'Destinácia odmieta eventy', hint: 'Viac ako 5 % eventov za 30 minút zlyhalo (aspoň 5).' },
-  no_events: { title: 'Žiadne eventy', hint: 'Klient nič nepošle 2 hodiny medzi 7:00 a 23:00.' },
+  no_events: { title: 'Žiadne eventy', hint: 'Klient nič nepošle dlhšie, než je pri jeho návštevnosti bežné: kým by za to ticho bežne prišlo aspoň 5 eventov (podľa posledných 14 dní), najmenej 2 h, najviac 12 h; v Nastaveniach klienta sa dá prah zadať ručne. Hlási sa medzi 7:00 a 23:00.' },
   plugin_silent: { title: 'Plugin mlčí', hint: '24 hodín bez podpísaného eventu zo servera webu.' },
   site_down: { title: 'Collector nedostupný', hint: 'px.js sa nenačíta pri kontrole inštalácie (každých 15 minút).' },
   backup: { title: 'Záloha zlyhala', hint: '36 hodín bez úspešnej zálohy databázy (len keď sú zálohy nastavené).' },
@@ -47,6 +47,84 @@ export function validWebhook(url) {
   }
 }
 
+// ---- how long a client may stay quiet ----------------------------------------
+
+// A quiet stretch is an alert once that many events would normally have come in
+// it: with Poisson arrivals, five expected and none seen happens by chance in
+// under 1 % of cases.
+export const QUIET_EXPECTED = 5;
+export const QUIET_MIN_HOURS = 2;
+export const QUIET_MAX_HOURS = 12;
+const HISTORY_DAYS = 14;
+const MIN_HISTORY_DAYS = 3;
+const STEP_MS = 15 * 60_000;
+
+/**
+ * How long a tenant may go without an event at `now`. `counts` holds its events
+ * per hour of the Bratislava day over the last `days` days. Walking back from
+ * `now` through those hourly rates, the threshold is where five events would
+ * normally have arrived: a busy shop gets the 2-hour floor, a small one hours
+ * more, and a quiet morning counts as quiet. A manual value wins; too little
+ * history keeps the old 2 hours.
+ */
+export function quietThreshold({ counts, days, now = Date.now(), manual = null } = {}) {
+  const set = Number(manual);
+  if (manual !== null && manual !== undefined && manual !== '' && Number.isFinite(set) && set > 0) {
+    return { hours: set, source: 'manual' };
+  }
+  if (!Array.isArray(counts) || !(days >= MIN_HISTORY_DAYS)) return { hours: QUIET_MIN_HOURS, source: 'default' };
+  const rates = counts.map((n) => (Number(n) || 0) / days);
+  let expected = 0;
+  let elapsed = 0;
+  while (expected < QUIET_EXPECTED && elapsed < QUIET_MAX_HOURS * 3600_000) {
+    expected += rates[bratislavaHour(now - elapsed - STEP_MS / 2)] * (STEP_MS / 3600_000);
+    elapsed += STEP_MS;
+  }
+  return { hours: Math.min(QUIET_MAX_HOURS, Math.max(QUIET_MIN_HOURS, elapsed / 3600_000)), source: 'auto' };
+}
+
+/**
+ * Events per hour of the Bratislava day for every tenant, over the last two
+ * weeks. Two weeks of traffic hardly move in an hour, so the alert rounds
+ * (every two minutes) share one count an hour.
+ */
+let countsCache = { at: 0, value: null };
+export async function hourlyCounts(now = Date.now()) {
+  if (countsCache.value && now - countsCache.at < 3600_000 && now >= countsCache.at) return countsCache.value;
+  const value = await countHourly(now);
+  countsCache = { at: now, value };
+  return value;
+}
+
+async function countHourly(now) {
+  const rows = await many(
+    `SELECT tenant_id, extract(hour FROM created_at AT TIME ZONE 'Europe/Bratislava')::int AS h, count(*)::int AS n
+       FROM received WHERE created_at > $1 AND created_at <= $2 GROUP BY 1, 2`,
+    [new Date(now - HISTORY_DAYS * 86_400_000), new Date(now)]);
+  const out = new Map();
+  for (const r of rows) {
+    if (!out.has(r.tenant_id)) out.set(r.tenant_id, new Array(24).fill(0));
+    out.get(r.tenant_id)[r.h] = r.n;
+  }
+  return out;
+}
+
+/** Days of history behind those counts: two weeks, or less for a new client. */
+export function historyDays(firstEventAt, now = Date.now()) {
+  if (!firstEventAt) return 0;
+  return Math.min(HISTORY_DAYS, (now - new Date(firstEventAt).getTime()) / 86_400_000);
+}
+
+/** A manual no_events threshold from the settings form: hours 0.5–72, or null for automatic. */
+export function parseQuietHours(value) {
+  const text = String(value ?? '').trim().replace(',', '.');
+  const n = Number(text);
+  if (!text || !Number.isFinite(n) || n <= 0) return null;
+  return Math.min(72, Math.max(0.5, Math.round(n * 2) / 2));
+}
+
+const hoursText = (h) => `${String(Math.round(h * 2) / 2).replace('.', ',')} h`;
+
 const bratislavaHour = (now) => Number(new Date(now).toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Europe/Bratislava' }));
 const KIND = { meta: 'Meta', ga4: 'GA4' };
 
@@ -61,6 +139,7 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
        FROM events WHERE created_at > now() - interval '30 minutes' GROUP BY destination_id`);
   const out = [];
   const hour = bratislavaHour(now);
+  const counts = await hourlyCounts(now).catch(() => new Map());
 
   for (const t of tenants) {
     for (const d of dests.filter((x) => x.tenant_id === t.id && x.active)) {
@@ -78,9 +157,16 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
     }
 
     const quietMs = t.last_event_at ? now - new Date(t.last_event_at).getTime() : null;
-    if (t.first_event_at && quietMs !== null && quietMs > 2 * 3600_000 && hour >= 7 && hour < 23) {
-      out.push({ tenant_id: t.id, rule: 'no_events', subject: '',
-        message: `Žiadny event ${Math.floor(quietMs / 3600_000)} h (posledný ${new Date(t.last_event_at).toLocaleString('sk-SK', { timeZone: 'Europe/Bratislava' })}).` });
+    if (t.first_event_at && quietMs !== null && hour >= 7 && hour < 23) {
+      // No event in the whole window is a rate of zero, not missing history.
+      const limit = quietThreshold({
+        counts: counts.get(t.id) || new Array(24).fill(0), days: historyDays(t.first_event_at, now), now, manual: t.quiet_alert_hours,
+      });
+      if (quietMs > limit.hours * 3600_000) {
+        const usual = limit.source === 'manual' ? `nastavený prah ${hoursText(limit.hours)}` : `bežne do ${hoursText(limit.hours)}`;
+        out.push({ tenant_id: t.id, rule: 'no_events', subject: '',
+          message: `Žiadny event ${Math.floor(quietMs / 3600_000)} h, ${usual} (posledný ${new Date(t.last_event_at).toLocaleString('sk-SK', { timeZone: 'Europe/Bratislava' })}).` });
+      }
     }
 
     if (t.plugin_version && t.plugin_seen_at && now - new Date(t.plugin_seen_at).getTime() > 24 * 3600_000) {

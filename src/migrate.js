@@ -96,6 +96,8 @@ CREATE TABLE IF NOT EXISTS received (
   currency    TEXT
 );
 CREATE INDEX IF NOT EXISTS received_tenant_time_idx ON received(tenant_id, created_at DESC);
+-- The no_events alert counts every tenant's events of the last two weeks by time.
+CREATE INDEX IF NOT EXISTS received_time_idx ON received(created_at);
 
 -- What happened to requests that never became events: crawlers, floods, browser
 -- copies of server-only events. Per tenant and day.
@@ -111,6 +113,8 @@ ALTER TABLE tenants ADD COLUMN IF NOT EXISTS first_event_at TIMESTAMPTZ;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plugin_version TEXT;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plugin_seen_at TIMESTAMPTZ;
+-- Hours without an event before the no_events alert; NULL = derived from the client's traffic.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS quiet_alert_hours NUMERIC(4,1);
 
 -- The destination's last answer, for the event detail in the dashboard, and when
 -- a worker took the row, so a crashed worker's rows are recovered by that time.

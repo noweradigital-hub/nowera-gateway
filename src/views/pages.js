@@ -109,6 +109,9 @@ export function tenantForm(t) {
         <input id="server_only_events" name="server_only_events" type="text" class="mono" value="${esc(t?.server_only_events)}" placeholder="Purchase">
         <div class="hint">Eventy, ktoré posiela podpísané len server webu (plugin). Rovnaký event z prehliadača sa ignoruje,
           takže nikto nepodvrhne napr. nákup s vymyslenou sumou. Nechajte prázdne pri webe bez pluginu.</div></div>
+      ${t ? `<div><label for="quiet_alert_hours">Upozornenie „Žiadne eventy“ po (hodinách)</label>
+        <input id="quiet_alert_hours" name="quiet_alert_hours" type="number" min="0.5" max="72" step="0.5" class="mono" value="${esc(t.quiet_alert_hours ?? '')}" placeholder="automaticky">
+        <div class="hint">Prázdne = podľa návštevnosti klienta za posledných 14 dní (kým by bežne prišlo 5 eventov, 2–12 h).</div></div>` : ''}
       ${t ? `<label class="check"><input type="checkbox" name="legacy_ingest" ${t.legacy_ingest !== false ? 'checked' : ''}>
         <span>Prijímať aj spoločný kľúč a staré verzie pluginu<br><span class="dim" style="font-size:12.5px">Len na prechod. Vypnite, keď má plugin na webe vlastný kľúč a verziu 0.9 alebo novšiu.</span></span></label>
       <label class="check"><input type="checkbox" name="active" ${t.active ? 'checked' : ''}> <span>Aktívny</span></label>` : ''}
