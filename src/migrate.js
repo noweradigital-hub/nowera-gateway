@@ -124,6 +124,8 @@ CREATE TABLE IF NOT EXISTS audit_snapshots (
   completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, day)
 );
+-- When the site started running its current plugin version (the order audit's grace period).
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS plugin_version_since TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS received_purchase_idx ON received(tenant_id, event_id) WHERE event_name = 'Purchase';
 CREATE INDEX IF NOT EXISTS events_purchase_idx ON events(tenant_id, event_id) WHERE event_name = 'Purchase';
 -- The no_events alert counts every tenant's events of the last two weeks by time.

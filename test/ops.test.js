@@ -302,5 +302,6 @@ test('order audit: the snapshot must be one day, a list, at most 500 lines', asy
   assert.throws(() => parseSnapshot({ day: '2026-10-06' }));
   assert.throws(() => parseSnapshot({ day: '2026-10-06', orders: new Array(501).fill({ id: 1 }) }));
   assert.throws(() => parseSnapshot({ day: '2026-10-06', page: 3, pages: 2, orders: [] }));
-  assert.deepEqual(parseSnapshot({ day: '2026-10-06', orders: [] }), { day: '2026-10-06', page: 1, pages: 1, orders: [] });
+  assert.deepEqual(parseSnapshot({ day: '2026-10-06', orders: [] }), { day: '2026-10-06', page: 1, pages: 1, total: null, orders: [] });
+  assert.equal(parseSnapshot({ day: '2026-10-06', total: 201, orders: [] }).total, 201);
 });

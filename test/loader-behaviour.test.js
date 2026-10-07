@@ -891,3 +891,29 @@ test('GA4-only funnel steps never reach the Meta pixel', () => {
   assert.deepEqual(tracked(b.fbq).map((c) => c[1]), ['PageView', 'Lead']);
   assert.ok(b.posts.some((p) => p.body.event_name === 'ViewCart'), 'the gateway still gets them for GA4');
 });
+
+test('the cart page reports ViewCart, to the gateway only', () => {
+  const b = browser({ page: { type: 'cart', data: { value: 50, value_net: 40.65, currency: 'EUR', contents: [{ id: '7', quantity: 2, item_price: 25, price_net: 20.33 }] } } });
+  b.run();
+  assert.deepEqual(b.posts.map((p) => p.body.event_name), ['PageView', 'ViewCart']);
+  assert.deepEqual(tracked(b.fbq).map((c) => c[1]), ['PageView'], 'no Meta event for it');
+});
+
+test('a click on a listed product reports SelectItem once, with its list and position', () => {
+  const links = [
+    { id: '7', item_name: 'Deka', index: 0, item_list_name: 'Deky', item_price: 30, price_net: 24.39, url: 'https://klient.sk/produkt/deka/' },
+    { id: '8', item_name: 'Osuška', index: 1, item_list_name: 'Deky', item_price: 20, price_net: 16.26, url: 'https://klient.sk/produkt/osuska/' },
+  ];
+  const b = browser({ page: { type: 'category', links, data: { currency: 'EUR', contents: [] } } });
+  b.run();
+  const anchor = (href) => ({ tagName: 'A', getAttribute: () => href });
+  const click = (target) => b.listeners.click.forEach((fn) => fn({ target }));
+  click({ tagName: 'IMG', parentNode: anchor('/produkt/osuska?utm=x#top') });
+  click(anchor('https://klient.sk/produkt/osuska/'));
+  click(anchor('https://klient.sk/kontakt/'));
+  const sel = b.posts.filter((p) => p.body.event_name === 'SelectItem');
+  assert.equal(sel.length, 1);
+  assert.equal(sel[0].body.custom_data.item_list_name, 'Deky');
+  assert.deepEqual(sel[0].body.custom_data.contents, [{ id: '8', item_name: 'Osuška', index: 1, item_list_name: 'Deky', item_price: 20, price_net: 16.26 }]);
+  assert.equal(tracked(b.fbq).filter((c) => c[1] === 'SelectItem').length, 0);
+});

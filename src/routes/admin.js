@@ -415,7 +415,7 @@ export default async function adminRoutes(app) {
     } else if (tab === 'kvalita') {
       const rows = await quality(id);
       const audit = summarise(await auditRows(id), destinations.filter((d) => d.active)
-        .map((d) => ({ kind: d.kind, scope: d.settings?.scope || 'all' })));
+        .map((d) => ({ id: d.id, kind: d.kind, scope: d.settings?.scope || 'all' })));
       const snap = await one('SELECT max(completed_at) AS last FROM audit_snapshots WHERE tenant_id = $1', [id]);
       body = qualityTab(rows, qualityFindings(rows), completenessCard(audit, snap?.last));
     } else if (tab === 'destinacie') {

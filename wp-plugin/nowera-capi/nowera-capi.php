@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.1.0
+ * Version:      1.2.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.1.0';
+const NOWERA_CAPI_VERSION = '1.2.0';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -64,8 +64,20 @@ function nowera_capi_settings(): array {
 		'consent_prefix' => 'cmplz_',
 		'auto_update'    => 1,
 		'ga4_tag'        => '',
+		'forms'          => array(),
 	);
 	return wp_parse_args( get_option( NOWERA_CAPI_OPTION, array() ), $defaults );
+}
+
+/** Which forms count, as form key ("plugin:id") => lead | newsletter. */
+function nowera_capi_clean_forms( $input ): array {
+	$out = array();
+	foreach ( is_array( $input ) ? $input : array() as $key => $role ) {
+		if ( preg_match( '/^[a-z0-9]{2,20}:[A-Za-z0-9_-]{1,64}$/', (string) $key ) && in_array( $role, array( 'lead', 'newsletter' ), true ) ) {
+			$out[ (string) $key ] = $role;
+		}
+	}
+	return $out;
 }
 
 /** A pairing code from the gateway's dashboard: nwr1.<base64url of {"h": host, "k": key}>. */
@@ -121,6 +133,7 @@ add_action( 'admin_init', function () {
 					? $input['consent_mode']
 					: 'none',
 				'consent_prefix' => preg_replace( '/[^a-zA-Z0-9_\-]/', '', $input['consent_prefix'] ?? 'cmplz_' ) ?: 'cmplz_',
+				'forms'          => nowera_capi_clean_forms( $input['forms'] ?? array() ),
 				'ga4_tag'        => preg_match( '/^G-[A-Z0-9]{4,20}$/', strtoupper( trim( (string) ( $input['ga4_tag'] ?? '' ) ) ) )
 					? strtoupper( trim( (string) $input['ga4_tag'] ) )
 					: '',
@@ -232,6 +245,34 @@ function nowera_capi_render_settings(): void {
 						<input id="nwr_prefix" class="regular-text code" type="text" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[consent_prefix]"
 						       value="<?php echo esc_attr( $s['consent_prefix'] ); ?>">
 						<p class="description">Complianz predvolene <code>cmplz_</code> — cookie <code>cmplz_marketing=allow</code>.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">Formuláre</th>
+					<td>
+						<?php
+						$seen  = get_option( 'nowera_capi_forms_seen', array() );
+						$seen  = is_array( $seen ) ? $seen : array();
+						$forms = is_array( $s['forms'] ) ? $s['forms'] : array();
+						foreach ( array_keys( $forms ) as $k ) {
+							$seen[ $k ] = $seen[ $k ] ?? array( 'name' => $k, 'at' => 0 );
+						}
+						if ( ! $seen ) :
+							?>
+							<p class="description">Formuláre sa tu zobrazia, keď ich návštevník prvýkrát odošle (Contact Form 7, Forminator, Elementor Pro, WPForms, Fluent Forms, Gravity Forms, Bricks s akciou „Custom“).</p>
+						<?php else : ?>
+							<table class="widefat striped" style="max-width:640px"><tbody>
+							<?php foreach ( $seen as $k => $f ) : ?>
+								<tr><td><?php echo esc_html( $f['name'] ?: $k ); ?> <code><?php echo esc_html( $k ); ?></code></td>
+									<td><select name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[forms][<?php echo esc_attr( $k ); ?>]">
+										<option value="">Nepočítať</option>
+										<option value="lead" <?php selected( $forms[ $k ] ?? '', 'lead' ); ?>>Dopyt (Lead)</option>
+										<option value="newsletter" <?php selected( $forms[ $k ] ?? '', 'newsletter' ); ?>>Newsletter (Lead)</option>
+									</select></td></tr>
+							<?php endforeach; ?>
+							</tbody></table>
+							<p class="description">Odoslaný formulár ide do Mety ako Lead a do GA4 ako generate_lead, s druhom v <code>content_category</code>.</p>
+						<?php endif; ?>
 					</td>
 				</tr>
 				<tr>
@@ -605,12 +646,34 @@ function nowera_capi_page_context(): ?array {
 		);
 	}
 
+	// The cart page is never served from the page cache (WooCommerce excludes it),
+	// so it may describe this visitor's own cart.
+	if ( function_exists( 'is_cart' ) && is_cart() && WC()->cart && ! WC()->cart->is_empty() ) {
+		$items = nowera_capi_cart_items();
+		return array(
+			'type' => 'cart',
+			'data' => array(
+				'value'        => (float) WC()->cart->get_total( 'edit' ),
+				'value_net'    => round( (float) WC()->cart->get_subtotal() - (float) WC()->cart->get_discount_total(), wc_get_price_decimals() ),
+				'currency'     => $currency,
+				'content_ids'  => array_values( array_unique( array_column( $items, 'id' ) ) ),
+				'contents'     => $items,
+				'content_type' => 'product',
+				'num_items'    => WC()->cart->get_cart_contents_count(),
+			),
+		);
+	}
+
 	global $wp_query;
+	// The first ten products describe the list for ViewCategory/Search; every
+	// product on the page (with its address) lets px.js report which one was
+	// clicked (SelectItem).
 	$listed = function ( string $list ) use ( $wp_query ) {
 		$ids      = array();
 		$contents = array();
+		$links    = array();
 		$group    = false;
-		foreach ( array_slice( (array) $wp_query->posts, 0, 10 ) as $index => $post ) {
+		foreach ( array_slice( (array) $wp_query->posts, 0, 60 ) as $index => $post ) {
 			$product = wc_get_product( $post );
 			if ( ! $product ) {
 				continue;
@@ -618,18 +681,22 @@ function nowera_capi_page_context(): ?array {
 			$item                   = nowera_capi_item( $product );
 			$item['index']          = $index;
 			$item['item_list_name'] = $list;
-			$ids[]                  = $item['id'];
-			$contents[]             = $item;
-			$group                  = $group || $product->is_type( 'variable' );
+			$links[]                = array_merge( $item, array( 'url' => get_permalink( $product->get_id() ) ) );
+			if ( $index < 10 ) {
+				$ids[]      = $item['id'];
+				$contents[] = $item;
+			}
+			$group = $group || $product->is_type( 'variable' );
 		}
-		return array( $ids, $contents, $group ? 'product_group' : 'product' );
+		return array( $ids, $contents, $group ? 'product_group' : 'product', $links );
 	};
 
 	if ( is_product_category() ) {
 		$term = get_queried_object();
-		list( $ids, $contents, $type ) = $listed( wp_strip_all_tags( $term->name ) );
+		list( $ids, $contents, $type, $links ) = $listed( wp_strip_all_tags( $term->name ) );
 		return array(
-			'type' => 'category',
+			'type'  => 'category',
+			'links' => $links,
 			'data' => array(
 				'content_name'     => $term->name,
 				'content_category' => $term->name,
@@ -643,9 +710,10 @@ function nowera_capi_page_context(): ?array {
 	}
 
 	if ( is_search() && '' !== get_search_query() && 'product' === get_query_var( 'post_type' ) ) {
-		list( $ids, $contents, $type ) = $listed( 'search' );
+		list( $ids, $contents, $type, $links ) = $listed( 'search' );
 		return array(
-			'type' => 'search',
+			'type'  => 'search',
+			'links' => $links,
 			'data' => array(
 				'search_string' => get_search_query(),
 				'item_list_name' => 'search',
@@ -1307,7 +1375,7 @@ function nowera_capi_gateway_paused(): bool {
 }
 
 /** POST one event body to the gateway, signed. Null when it arrived, otherwise why not. */
-function nowera_capi_deliver( string $body, string $path = '/s' ): ?string {
+function nowera_capi_deliver( string $body, string $path = '/s', int $timeout = 3 ): ?string {
 	$s = nowera_capi_settings();
 	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) ) {
 		return 'plugin nemá vyplnený collector alebo kľúč';
@@ -1318,7 +1386,7 @@ function nowera_capi_deliver( string $body, string $path = '/s' ): ?string {
 	// The time is signed with the body, so a captured request cannot be sent again later.
 	$timestamp = (string) time();
 	$response  = wp_remote_post( 'https://' . $s['collector_host'] . $path, array(
-		'timeout'     => 3,
+		'timeout'     => $timeout,
 		'redirection' => 0,
 		'headers'     => array(
 			'Content-Type'    => 'application/json',
@@ -1523,16 +1591,195 @@ function nowera_capi_user_from_order( \WC_Order $order ): array {
 }
 
 /* -------------------------------------------------------------------------
+ * Cart changes, registration, forms
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Whether a cart change comes from the shopper: not cron, not the admin, not
+ * the checkout turning the cart into an order, not WooCommerce loading a cart.
+ * Other cases can be ruled out with the filter.
+ */
+function nowera_capi_shopper_cart_change(): bool {
+	$shopper = ! wp_doing_cron()
+		&& ! ( is_admin() && ! wp_doing_ajax() )
+		&& ! did_action( 'woocommerce_checkout_process' )
+		&& ! doing_action( 'woocommerce_cart_loaded_from_session' )
+		&& ! doing_action( 'woocommerce_load_cart_from_session' );
+	return (bool) apply_filters( 'nowera_capi_shopper_cart_change', $shopper );
+}
+
+/** A line taken out of the cart (GA4 remove_from_cart; Meta has no such event). */
+function nowera_capi_removed( \WC_Product $product, int $quantity ): void {
+	if ( $quantity < 1 || ! nowera_capi_shopper_cart_change() ) {
+		return;
+	}
+	$item = nowera_capi_item( $product, $quantity );
+	nowera_capi_send( 'RemoveFromCart', wp_generate_uuid4(), nowera_capi_current_user(), array(
+		'value'       => round( $item['item_price'] * $quantity, wc_get_price_decimals() ),
+		'value_net'   => round( $item['price_net'] * $quantity, wc_get_price_decimals() ),
+		'currency'    => get_woocommerce_currency(),
+		'content_ids' => array( $item['id'] ),
+		'contents'    => array( $item ),
+	), wc_get_cart_url() );
+}
+
+// Runs before the line leaves the cart, so it can still be read.
+add_action( 'woocommerce_remove_cart_item', function ( $key, $cart ) {
+	$line = $cart->get_cart_item( $key );
+	if ( ! empty( $line['data'] ) && $line['data'] instanceof \WC_Product ) {
+		nowera_capi_removed( $line['data'], (int) $line['quantity'] );
+	}
+}, 10, 2 );
+
+// A lower quantity takes some of a line out; zero goes through the removal above.
+add_action( 'woocommerce_after_cart_item_quantity_update', function ( $key, $quantity, $old_quantity, $cart ) {
+	$line = $cart->get_cart_item( $key );
+	if ( (int) $quantity < (int) $old_quantity && ! empty( $line['data'] ) && $line['data'] instanceof \WC_Product ) {
+		nowera_capi_removed( $line['data'], (int) $old_quantity - (int) $quantity );
+	}
+}, 10, 4 );
+
+/**
+ * A customer account created on the shop itself (My Account or at checkout),
+ * once per account. Users made by an administrator or an import do not pass here.
+ */
+add_action( 'woocommerce_created_customer', function ( $customer_id, $data = array() ) {
+	if ( get_user_meta( $customer_id, '_nowera_capi_registered', true ) ) {
+		return;
+	}
+	update_user_meta( $customer_id, '_nowera_capi_registered', time() );
+	$user = get_userdata( $customer_id );
+	nowera_capi_send( 'CompleteRegistration', 'reg-' . $customer_id, array_filter( array(
+		'em'          => $user ? $user->user_email : ( $data['user_email'] ?? '' ),
+		'fn'          => $user ? $user->first_name : '',
+		'ln'          => $user ? $user->last_name : '',
+		'external_id' => (string) $customer_id,
+		'account'     => (string) $customer_id,
+	) ), array(
+		'method'   => function_exists( 'is_checkout' ) && is_checkout() ? 'checkout' : 'account',
+		'currency' => get_woocommerce_currency(),
+	) );
+}, 10, 2 );
+
+/**
+ * A form sent successfully. Which forms count is chosen per form in the
+ * settings — an enquiry or a newsletter signup, both reported as Lead (Meta's
+ * Subscribe means a paid subscription) with the kind in content_category, so
+ * each can be its own conversion. The forms the site has used are listed there
+ * once they were sent. Nothing counts by default: a search box is no conversion.
+ */
+function nowera_capi_form_sent( string $plugin, string $form_id, string $form_name, array $values ): void {
+	$key  = $plugin . ':' . $form_id;
+	$seen = get_option( 'nowera_capi_forms_seen', array() );
+	$seen = is_array( $seen ) ? $seen : array();
+	if ( ! isset( $seen[ $key ] ) || ( $seen[ $key ]['at'] ?? 0 ) < time() - DAY_IN_SECONDS ) {
+		$seen[ $key ] = array( 'name' => mb_substr( wp_strip_all_tags( $form_name ), 0, 80 ), 'at' => time() );
+		uasort( $seen, function ( $a, $b ) { return $b['at'] <=> $a['at']; } );
+		update_option( 'nowera_capi_forms_seen', array_slice( $seen, 0, 40, true ), false );
+	}
+	$forms = nowera_capi_settings()['forms'];
+	$role  = is_array( $forms ) ? ( $forms[ $key ] ?? '' ) : '';
+	$kind  = array( 'lead' => 'enquiry', 'newsletter' => 'newsletter' )[ $role ] ?? null;
+	if ( ! $kind ) {
+		return;
+	}
+	$email = '';
+	$phone = '';
+	foreach ( $values as $name => $value ) {
+		if ( ! is_scalar( $value ) ) {
+			continue;
+		}
+		$value = trim( (string) $value );
+		if ( '' === $email && is_email( $value ) ) {
+			$email = $value;
+		} elseif ( '' === $phone && preg_match( '/phone|tel|mobil/i', (string) $name ) && strlen( preg_replace( '/\D/', '', $value ) ) >= 8 ) {
+			$phone = $value;
+		}
+	}
+	$user = array_merge( nowera_capi_current_user(), array_filter( array( 'em' => $email, 'ph' => $phone ) ) );
+	// Sent from the form's own request (often AJAX): the page it was on is the referrer.
+	// Without its query: a prefilled form field could ride along in it.
+	$page = wp_get_referer();
+	$page = $page ? strtok( strtok( $page, '#' ), '?' ) : home_url( '/' );
+	nowera_capi_send( 'Lead', 'form-' . wp_generate_uuid4(), $user, array(
+		'content_name'     => mb_substr( wp_strip_all_tags( $form_name ), 0, 80 ),
+		'content_category' => $kind,
+		'form_id'          => $key,
+	), $page );
+}
+
+// Contact Form 7: after the mail went out (spam already filtered).
+add_action( 'wpcf7_mail_sent', function ( $form ) {
+	$submission = class_exists( 'WPCF7_Submission' ) ? \WPCF7_Submission::get_instance() : null;
+	nowera_capi_form_sent( 'cf7', (string) $form->id(), (string) $form->title(), $submission ? (array) $submission->get_posted_data() : array() );
+} );
+
+// Forminator: AJAX submissions save the entry, page-reload ones finish the
+// submit handler; either counts, once per form and request.
+function nowera_capi_forminator( $form_id, $response = array() ): void {
+	static $done = array();
+	if ( isset( $done[ $form_id ] ) || ( is_array( $response ) && isset( $response['success'] ) && ! $response['success'] ) ) {
+		return;
+	}
+	$done[ $form_id ] = true;
+	$title = function_exists( 'forminator_get_form_name' ) ? forminator_get_form_name( $form_id ) : get_the_title( $form_id );
+	nowera_capi_form_sent( 'forminator', (string) $form_id, (string) $title, wp_unslash( $_POST ) ); // phpcs:ignore WordPress.Security.NonceVerification
+}
+add_action( 'forminator_form_after_save_entry', 'nowera_capi_forminator', 10, 2 );
+add_action( 'forminator_form_after_handle_submit', 'nowera_capi_forminator', 10, 2 );
+
+// Elementor Pro forms.
+add_action( 'elementor_pro/forms/new_record', function ( $record ) {
+	$values = array();
+	foreach ( (array) $record->get( 'fields' ) as $id => $field ) {
+		$values[ ( $field['type'] ?? '' ) . '_' . $id ] = $field['value'] ?? '';
+	}
+	nowera_capi_form_sent( 'elementor', (string) $record->get_form_settings( 'id' ), (string) $record->get_form_settings( 'form_name' ), $values );
+} );
+
+// WPForms.
+add_action( 'wpforms_process_complete', function ( $fields, $entry, $form_data ) {
+	$values = array();
+	foreach ( (array) $fields as $id => $field ) {
+		$values[ ( $field['type'] ?? '' ) . '_' . $id ] = $field['value'] ?? '';
+	}
+	nowera_capi_form_sent( 'wpforms', (string) ( $form_data['id'] ?? '' ), (string) ( $form_data['settings']['form_title'] ?? '' ), $values );
+}, 10, 3 );
+
+// Fluent Forms.
+add_action( 'fluentform/submission_inserted', function ( $entry_id, $data, $form ) {
+	nowera_capi_form_sent( 'fluent', (string) ( $form->id ?? '' ), (string) ( $form->title ?? '' ), (array) $data );
+}, 10, 3 );
+
+// Gravity Forms.
+add_action( 'gform_after_submission', function ( $entry, $form ) {
+	$values = array();
+	foreach ( (array) ( $form['fields'] ?? array() ) as $field ) {
+		$id                          = is_object( $field ) ? $field->id : ( $field['id'] ?? '' );
+		$type                        = is_object( $field ) ? $field->type : ( $field['type'] ?? '' );
+		$values[ $type . '_' . $id ] = $entry[ (string) $id ] ?? '';
+	}
+	nowera_capi_form_sent( 'gravity', (string) ( $form['id'] ?? '' ), (string) ( $form['title'] ?? '' ), $values );
+}, 10, 2 );
+
+// Bricks forms: runs when the form has "Custom" among its actions.
+add_action( 'bricks/form/custom_action', function ( $form ) {
+	$settings = method_exists( $form, 'get_settings' ) ? (array) $form->get_settings() : array();
+	$fields   = method_exists( $form, 'get_fields' ) ? (array) $form->get_fields() : array();
+	nowera_capi_form_sent( 'bricks', (string) ( $fields['formId'] ?? '' ), (string) ( $settings['formName'] ?? ( $fields['formId'] ?? 'Bricks' ) ), $fields );
+} );
+
+/* -------------------------------------------------------------------------
  * Order list for the completeness check
  * ---------------------------------------------------------------------- */
 
 /**
- * Every six hours the orders of the last three days (created then, in the shop's
- * time zone) go to the gateway, signed like the events: id, status, times, total
- * and what this plugin did with each. No contact data. The gateway sets them
- * against the Purchase events it received and delivered, so a shop can see that
- * every paid order with consent arrived — and why the others did not count.
- * Recent days are sent again because orders get paid, cancelled and refunded later.
+ * Every six hours the orders that changed in the last three days (new, paid,
+ * cancelled, refunded) go to the gateway, signed like the events: id, the day it
+ * was created (shop time zone), status, times, total and what this plugin did
+ * with it. No contact data. The gateway sets them against the Purchase events it
+ * received and delivered, so a shop can see that every paid order with consent
+ * arrived — and why the others did not count. Read and sent 200 at a time.
  */
 add_action( 'action_scheduler_init', function () {
 	$s = nowera_capi_settings();
@@ -1548,51 +1795,58 @@ add_action( 'nowera_capi_audit', function () {
 	nowera_capi_send_audit();
 } );
 
-/** Sends the order list of the last `$days` days; returns how many days went through. */
-function nowera_capi_send_audit( int $days = 3 ): int {
-	$tz   = wp_timezone();
-	$sent = 0;
-	for ( $back = $days - 1; $back >= 0; $back-- ) {
-		$start = ( new \DateTimeImmutable( 'today', $tz ) )->modify( "-{$back} days" );
-		$end   = $start->modify( '+1 day' );
-		$lines = array();
-		$ids   = wc_get_orders( array(
-			'type'         => 'shop_order',
-			'limit'        => -1,
-			'return'       => 'ids',
-			'status'       => array_keys( wc_get_order_statuses() ),
-			'date_created' => $start->getTimestamp() . '...' . ( $end->getTimestamp() - 1 ),
+/** Sends the orders changed in the last `$days` days; true when every page went through. */
+function nowera_capi_send_audit( int $days = 3 ): bool {
+	$tz    = wp_timezone();
+	$today = ( new \DateTimeImmutable( 'now', $tz ) )->format( 'Y-m-d' );
+	$since = time() - $days * DAY_IN_SECONDS;
+	$per   = 200;
+	$page  = 1;
+	$pages = 1;
+	do {
+		$found = wc_get_orders( array(
+			'type'          => 'shop_order',
+			'limit'         => $per,
+			'paged'         => $page,
+			'paginate'      => true,
+			'return'        => 'ids',
+			'orderby'       => 'ID',
+			'order'         => 'ASC',
+			'status'        => array_keys( wc_get_order_statuses() ),
+			'date_modified' => '>=' . $since,
 		) );
-		foreach ( $ids as $id ) {
+		$pages = max( 1, (int) $found->max_num_pages );
+		$lines = array();
+		foreach ( $found->orders as $id ) {
 			$order = wc_get_order( $id );
 			if ( $order instanceof \WC_Order ) {
-				$lines[] = nowera_capi_audit_line( $order );
+				$lines[] = nowera_capi_audit_line( $order, $tz );
 			}
 		}
-		$pages = max( 1, (int) ceil( count( $lines ) / 500 ) );
-		$ok    = true;
-		for ( $page = 1; $page <= $pages && $ok; $page++ ) {
-			$body = wp_json_encode( array(
-				'day'      => $start->format( 'Y-m-d' ),
-				'timezone' => $tz->getName(),
-				'page'     => $page,
-				'pages'    => $pages,
-				'orders'   => array_slice( $lines, ( $page - 1 ) * 500, 500 ),
-			) );
-			$ok = null === nowera_capi_deliver( $body, '/r' );
+		$body = wp_json_encode( array(
+			'day'      => $today,
+			'timezone' => $tz->getName(),
+			'page'     => $page,
+			'pages'    => $pages,
+			'total'    => (int) $found->total,
+			'orders'   => $lines,
+		) );
+		if ( null !== nowera_capi_deliver( $body, '/r', 15 ) ) {
+			return false; // the next run sends it all again
 		}
-		$sent += $ok ? 1 : 0;
-	}
-	return $sent;
+		$page++;
+	} while ( $page <= $pages );
+	return true;
 }
 
 /** One order as the completeness check sees it. */
-function nowera_capi_audit_line( \WC_Order $order ): array {
+function nowera_capi_audit_line( \WC_Order $order, ?\DateTimeZone $tz = null ): array {
 	$created = $order->get_date_created();
 	$paid    = $order->get_date_paid();
 	$consent = (string) $order->get_meta( '_nowera_capi_purchase_consent' );
 	return array(
 		'id'       => $order->get_id(),
+		'day'      => $created ? ( new \DateTimeImmutable( '@' . $created->getTimestamp() ) )->setTimezone( $tz ?: wp_timezone() )->format( 'Y-m-d' ) : null,
 		'created'  => $created ? $created->getTimestamp() : null,
 		'paid'     => $paid ? $paid->getTimestamp() : null,
 		'status'   => $order->get_status(),
@@ -2071,6 +2325,14 @@ function nowera_capi_add_payment_info( $order ): void {
 		$data['coupon'] = implode( ',', $order->get_coupon_codes() );
 	}
 
+	// The shipping choice is final once the order is placed; GA4 gets it as its own
+	// funnel step just before the payment one.
+	$shipping = $order->get_shipping_methods();
+	if ( $shipping ) {
+		$tiers = array_map( function ( $line ) { return wp_strip_all_tags( $line->get_method_title() ); }, array_values( $shipping ) );
+		nowera_capi_send( 'AddShippingInfo', 'ship-' . $order->get_id(), nowera_capi_user_from_order( $order ),
+			array_merge( $data, array( 'shipping_tier' => implode( ', ', array_unique( $tiers ) ) ) ), wc_get_checkout_url() );
+	}
 	nowera_capi_send( 'AddPaymentInfo', 'pay-' . $order->get_id(), nowera_capi_user_from_order( $order ), $data, wc_get_checkout_url() );
 
 	$order->update_meta_data( '_nowera_capi_payment_info_sent', time() );

@@ -93,6 +93,8 @@ export async function flushStats() {
     await query(
       `UPDATE tenants SET last_event_at = GREATEST(COALESCE(last_event_at, $2), $2),
               first_event_at = COALESCE(first_event_at, $2),
+              plugin_version_since = CASE WHEN $3::text IS NOT NULL AND plugin_version IS DISTINCT FROM $3::text
+                                          THEN COALESCE($4, $2) ELSE plugin_version_since END,
               plugin_version = COALESCE($3, plugin_version),
               plugin_seen_at = COALESCE($4, plugin_seen_at)
         WHERE id = $1`,
@@ -120,6 +122,10 @@ export function startStatsWriter(log, intervalMs = 5000) {
   const retention = setInterval(() => {
     query(`DELETE FROM received WHERE created_at < now() - interval '90 days'`)
       .catch((err) => log.error({ err }, 'received retention failed'));
+    // The completeness view looks two weeks back; a month is plenty to keep.
+    query(`DELETE FROM order_audit WHERE day < now() - interval '35 days'`)
+      .then(() => query(`DELETE FROM audit_snapshots WHERE day < now() - interval '35 days'`))
+      .catch((err) => log.error({ err }, 'order audit retention failed'));
   }, 3600_000);
   return async () => {
     clearInterval(timer);

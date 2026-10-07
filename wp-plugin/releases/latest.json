@@ -1,11 +1,11 @@
 {
-  "version": "1.1.0",
-  "file": "nowera-capi-1.1.0.zip",
-  "sha256": "b86ad31d1e185a23dd89fd5da8d594da561efbcdbf938d999e4528d6416ab338",
-  "signature": "OxZPCrO8XZ8akfVSBoCTFyGSh+QHp4NoPy5b7EALWYPpxAVWJfwGciBKL8vOue8zo7y2EkCuObR341STBwmjCg==",
-  "released_at": "2026-10-07T13:29:54.652Z",
+  "version": "1.2.0",
+  "file": "nowera-capi-1.2.0.zip",
+  "sha256": "c525231c39b06f802aa1781403c4b0ede88ae28d4376729f42f5534050132e2a",
+  "signature": "s/72kCnI7HlJejp4sSS0RB19phEtEM1oXBCyXPA3MnNbVmxdtW/hkbUFDQHWgPfOJi/MRtOhU2aWxxpcdollDw==",
+  "released_at": "2026-10-07T14:21:39.151Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "FAZ Cookie Manager; Google tag až po súhlase; nákup len pri zaplatenej objednávke, zrušenie ako refund v GA4; bohatšie položky a čisté tržby pre GA4; Enhanced Conversions; opakovanie udalostí pri výpadku gatewaya."
+  "notes": "Úplnosť nákupov (zoznam objednávok pre signals), nové udalosti: košík, odobratie z košíka, doprava, klik v zozname, registrácia, leady z formulárov."
 }

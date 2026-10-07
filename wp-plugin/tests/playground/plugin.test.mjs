@@ -523,24 +523,75 @@ test('a cancellation after a partial refund takes back only the rest of the item
   assert.equal(Math.round((refund.value + cancel.value) * 100) / 100, purchase.total);
 });
 
-test('the order list for the completeness check: signed, no contact data, what the plugin did', async () => {
+test('the order list for the completeness check: signed, paged, no contact data, what the plugin did', async () => {
   const { sent, purchase } = await fire('audit');
-  assert.equal(purchase.days, 1);
+  assert.equal(purchase.days, true);
   assert.equal(purchase.scheduled, true, 'repeats every six hours');
-  assert.equal(sent.length, 1);
-  assert.match(sent[0].url, /^https:\/\/collector\.test\/r$/);
-  assert.equal(sent[0].signature_valid, true);
-  const b = sent[0].body;
-  assert.match(b.day, /^\d{4}-\d{2}-\d{2}$/);
-  const line = (id) => b.orders.find((o) => o.id === id);
-  assert.deepEqual(Object.keys(line(purchase.paid)).sort(), ['consent', 'created', 'ctx', 'currency', 'id', 'paid', 'ready', 'sent', 'status', 'thankyou', 'total', 'via'].sort());
+  assert.ok(sent.length >= 1);
+  for (const [i, c] of sent.entries()) {
+    assert.match(c.url, /^https:\/\/collector\.test\/r$/);
+    assert.equal(c.signature_valid, true);
+    assert.equal(c.body.page, i + 1);
+    assert.equal(c.body.pages, sent.length);
+    assert.ok(c.body.orders.length <= 200);
+    assert.ok(c.body.total >= c.body.orders.length);
+  }
+  const orders = sent.flatMap((c) => c.body.orders);
+  const line = (id) => orders.find((o) => o.id === id);
+  assert.deepEqual(Object.keys(line(purchase.paid)).sort(), ['consent', 'created', 'ctx', 'currency', 'day', 'id', 'paid', 'ready', 'sent', 'status', 'thankyou', 'total', 'via'].sort());
+  assert.match(line(purchase.paid).day, /^\d{4}-\d{2}-\d{2}$/);
   assert.equal(line(purchase.paid).ready, true);
   assert.equal(line(purchase.paid).sent, true);
   assert.equal(line(purchase.paid).consent, 'marketing');
   assert.equal(line(purchase.paid).thankyou, true);
   assert.equal(line(purchase.failed).ready, false);
   assert.equal(line(purchase.admin).via, 'admin');
-  assert.doesNotMatch(JSON.stringify(sent[0].body), /example\.com|Novák|903/i, 'no contact data');
+  assert.doesNotMatch(JSON.stringify(orders), /example\.com|Novák|903/i, 'no contact data');
+});
+
+test('taking things out of the cart reports the removed quantity', async () => {
+  const { sent } = await fire('remove_from_cart');
+  assert.deepEqual(sent.map((c) => [c.body.event_name, c.body.custom_data.contents[0].quantity]), [['RemoveFromCart', 1], ['RemoveFromCart', 2]]);
+  assert.equal(sent[1].body.custom_data.value, 49.8);
+});
+
+test('the shipping choice goes as AddShippingInfo, before AddPaymentInfo', async () => {
+  const { sent } = await fire('shipping_info');
+  assert.deepEqual(sent.map((c) => c.body.event_name), ['AddShippingInfo', 'AddPaymentInfo']);
+  assert.equal(sent[0].body.custom_data.shipping_tier, 'Kuriér');
+  assert.equal(sent[0].body.custom_data.contents.length, 2);
+});
+
+test('a new customer account is reported once, as CompleteRegistration with its account', async () => {
+  const { sent, purchase } = await fire('register');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.event_name, 'CompleteRegistration');
+  assert.equal(sent[0].body.event_id, `reg-${purchase.user}`);
+  assert.equal(sent[0].body.user_data.em, sha(purchase.email.toLowerCase()));
+  assert.equal(sent[0].body.account_id, sha(`nwr-account|${BASE}/|${purchase.user}`));
+});
+
+test('a form counts only as the settings say, as Lead with its kind and contact data', async () => {
+  const none = await fire('form', '', '&role=none');
+  assert.equal(none.sent.length, 0, 'unclassified forms are no conversion');
+  assert.equal(none.purchase.seen['cf7:42'].name, 'Kontakt', 'but listed in the settings to choose from');
+  const lead = await fire('form', '', '&role=lead');
+  assert.equal(lead.sent.length, 1);
+  const b = lead.sent[0].body;
+  assert.equal(b.event_name, 'Lead');
+  assert.equal(b.custom_data.content_category, 'enquiry');
+  assert.equal(b.user_data.em, sha('dopyt@example.com'));
+  assert.equal(b.user_data.ph, sha('421903123456'));
+  assert.doesNotMatch(JSON.stringify(b), /Dobrý deň/, 'the message itself stays on the site');
+  const news = await fire('form', '', '&role=newsletter');
+  assert.equal(news.sent[0].body.custom_data.content_category, 'newsletter');
+});
+
+test('the cart page describes this visitor\'s cart for ViewCart', async () => {
+  const { purchase } = await fire('cart_page');
+  assert.equal(purchase.page.type, 'cart');
+  assert.equal(purchase.page.data.value, 49.8);
+  assert.equal(purchase.page.data.contents[0].quantity, 2);
 });
 
 // ------------------------------------------------------------ cookie keeper

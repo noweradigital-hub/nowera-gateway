@@ -754,8 +754,34 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   track('PageView');
 
   if (PAGE && PAGE.type) {
-    var pageEvents = { product: 'ViewContent', category: 'ViewCategory', search: 'Search' };
+    var pageEvents = { product: 'ViewContent', category: 'ViewCategory', search: 'Search', cart: 'ViewCart' };
     if (pageEvents[PAGE.type]) track(pageEvents[PAGE.type], PAGE.data || {});
+  }
+
+  // A click on a product in a list (category, search): which one, at which
+  // position. GA4 only (see event-policy.js). The page lists its products with
+  // their addresses; the request goes with keepalive, so the click is not held up.
+  if (PAGE && Object.prototype.toString.call(PAGE.links) === '[object Array]' && PAGE.links.length && d.addEventListener) {
+    var bare = function (href) {
+      try { var u = new URL(href, w.location.href); return u.origin + u.pathname.replace(/\\/+$/, ''); } catch (e) { return null; }
+    };
+    var byUrl = {};
+    PAGE.links.forEach(function (item) { var k = item && item.url && bare(item.url); if (k && !byUrl[k]) byUrl[k] = item; });
+    var selected = {};
+    d.addEventListener('click', function (e) {
+      var el = e.target;
+      while (el && el.tagName !== 'A') el = el.parentNode;
+      if (!el || !el.getAttribute) return;
+      var item = byUrl[bare(el.getAttribute('href') || '')];
+      if (!item || selected[item.id]) return;
+      selected[item.id] = 1; // image and title link to the same product: once
+      var copy = {};
+      Object.keys(item).forEach(function (k) { if (k !== 'url') copy[k] = item[k]; });
+      track('SelectItem', {
+        item_list_name: item.item_list_name, currency: (PAGE.data && PAGE.data.currency) || undefined,
+        content_ids: [item.id], contents: [copy]
+      });
+    }, true);
   }
 
   queued.forEach(function (args) { w.nwr.apply(null, args); });

@@ -181,7 +181,7 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
     const audit = await auditRows(t.id, 2).catch(() => []);
     if (audit.length) {
       const { missing } = summarise(audit, dests.filter((x) => x.tenant_id === t.id && x.active)
-        .map((x) => ({ kind: x.kind, scope: x.settings?.scope || 'all' })), now);
+        .map((x) => ({ id: x.id, kind: x.kind, scope: x.settings?.scope || 'all' })), now);
       if (missing.length) {
         const list = missing.slice(0, 5).map((m) => `#${m.order_id} (${m.reason})`).join(', ');
         out.push({ tenant_id: t.id, rule: 'missing_purchase', subject: '',

@@ -395,6 +395,44 @@ switch ( $event ) {
 		$purchase = array( 'days' => $days, 'paid' => $paid->get_id(), 'failed' => $failed->get_id(), 'admin' => $admin->get_id(),
 			'scheduled' => (bool) as_has_scheduled_action( 'nowera_capi_audit', array(), 'nowera-capi' ) );
 		break;
+	case 'remove_from_cart':
+		WC()->cart->empty_cart();
+		$key = WC()->cart->add_to_cart( $ids['simple'], 3 );
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		WC()->cart->set_quantity( $key, 2 );   // one fewer
+		WC()->cart->remove_cart_item( $key );  // the rest
+		break;
+	case 'shipping_info':
+		$order = nwr_order( $ids );
+		$ship  = new WC_Order_Item_Shipping();
+		$ship->set_method_title( 'Kuriér' );
+		$ship->set_total( '3.90' );
+		$order->add_item( $ship );
+		$order->calculate_totals();
+		$order->save();
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		break;
+	case 'register':
+		$email = 'novy.' . wp_generate_password( 6, false ) . '@example.com';
+		$id    = wc_create_new_customer( $email, '', wp_generate_password() );
+		do_action( 'woocommerce_created_customer', $id, array( 'user_email' => $email ) ); // a second plugin firing it again
+		$purchase = array( 'user' => $id, 'email' => $email );
+		break;
+	case 'form':
+		// &role=lead|newsletter|none: how the settings classify this form.
+		$role = sanitize_key( $_GET['role'] ?? 'none' );
+		nwr_settings( array( 'forms' => 'none' === $role ? array() : array( 'cf7:42' => $role ) ) );
+		delete_option( 'nowera_capi_forms_seen' );
+		nowera_capi_form_sent( 'cf7', '42', 'Kontakt', array( 'your-name' => 'Ján', 'your-email' => 'Dopyt@Example.com', 'your-phone' => '0903 123 456', 'msg' => 'Dobrý deň' ) );
+		$purchase = array( 'seen' => get_option( 'nowera_capi_forms_seen' ) );
+		break;
+	case 'cart_page':
+		WC()->cart->empty_cart();
+		WC()->cart->add_to_cart( $ids['simple'], 2 );
+		define( 'WOOCOMMERCE_CART', true );
+		$purchase = array( 'page' => nowera_capi_page_context() );
+		break;
 	default:
 		http_response_code( 400 );
 		nwr_out( array( 'error' => 'unknown event' ) );

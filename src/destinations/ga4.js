@@ -88,6 +88,7 @@ export function buildPayload(event, settings) {
   if (props.shipping_tier) params.shipping_tier = String(props.shipping_tier);
   if (props.item_list_id) params.item_list_id = String(props.item_list_id);
   if (props.method) params.method = String(props.method);
+  if (event.event_name === 'Lead' && props.content_category) params.lead_type = String(props.content_category);
   if (event.event_source_url) params.page_location = event.event_source_url;
   if (event.referrer_url) params.page_referrer = event.referrer_url;
 

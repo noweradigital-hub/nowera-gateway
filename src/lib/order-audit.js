@@ -23,8 +23,10 @@ function cleanOrder(o) {
   if (!o || typeof o !== 'object' || !ID.test(String(o.id ?? ''))) return null;
   const status = String(o.status ?? '');
   const total = Number(o.total);
+  const day = String(o.day ?? '');
   return {
     order_id: String(o.id),
+    day: /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : null,
     created: int(o.created),
     paid: int(o.paid),
     status: STATUS.test(status) ? status : 'unknown',
@@ -49,33 +51,42 @@ export function parseSnapshot(body) {
   const page = int(body.page) || 1;
   const pages = int(body.pages) || 1;
   if (page > pages) throw new Error('page beyond pages');
-  return { day, page, pages, orders: body.orders.map(cleanOrder).filter(Boolean) };
+  const orders = body.orders.map(cleanOrder).filter(Boolean);
+  // The plugin says how many orders the whole run has; older ones did not.
+  const total = Number.isInteger(Number(body.total)) && Number(body.total) >= 0 ? Number(body.total) : null;
+  return { day, page, pages, total, orders };
 }
 
 const toTime = (s) => (s ? new Date(s * 1000) : null);
 
+const COLUMNS = ['tenant_id', 'order_id', 'day', 'created_at', 'paid_at', 'status', 'total', 'currency',
+  'ready', 'consent', 'has_ctx', 'purchase_sent', 'thankyou', 'via'];
+
+/** Stores one page of the list in a single statement; a day counts once its last page arrived. */
 export async function saveSnapshot(tenantId, snap) {
-  for (const o of snap.orders) {
+  if (snap.orders.length) {
+    const params = [];
+    const values = snap.orders.map((o, i) => {
+      params.push(tenantId, o.order_id, o.day || snap.day, toTime(o.created), toTime(o.paid), o.status, o.total, o.currency,
+        o.ready, o.consent, o.has_ctx, o.purchase_sent, o.thankyou, o.via);
+      return `(${COLUMNS.map((_, j) => `$${i * COLUMNS.length + j + 1}`).join(', ')}, now())`;
+    });
     await query(
-      `INSERT INTO order_audit (tenant_id, order_id, day, created_at, paid_at, status, total, currency,
-                                ready, consent, has_ctx, purchase_sent, thankyou, via, reported_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+      `INSERT INTO order_audit (${COLUMNS.join(', ')}, reported_at) VALUES ${values.join(', ')}
        ON CONFLICT (tenant_id, order_id) DO UPDATE SET
          day = EXCLUDED.day, created_at = EXCLUDED.created_at, paid_at = EXCLUDED.paid_at,
          status = EXCLUDED.status, total = EXCLUDED.total, currency = EXCLUDED.currency,
          ready = EXCLUDED.ready, consent = EXCLUDED.consent, has_ctx = EXCLUDED.has_ctx,
          purchase_sent = EXCLUDED.purchase_sent, thankyou = EXCLUDED.thankyou, via = EXCLUDED.via,
          reported_at = now()`,
-      [tenantId, o.order_id, snap.day, toTime(o.created), toTime(o.paid), o.status, o.total, o.currency,
-       o.ready, o.consent, o.has_ctx, o.purchase_sent, o.thankyou, o.via],
+      params,
     );
   }
-  // A day counts as reported once its last page arrived.
   if (snap.page === snap.pages) {
     await query(
       `INSERT INTO audit_snapshots (tenant_id, day, orders, completed_at) VALUES ($1, $2, $3, now())
        ON CONFLICT (tenant_id, day) DO UPDATE SET orders = EXCLUDED.orders, completed_at = now()`,
-      [tenantId, snap.day, snap.orders.length + (snap.pages - 1) * MAX_ORDERS],
+      [tenantId, snap.day, snap.total ?? snap.orders.length],
     );
   }
 }
@@ -85,9 +96,9 @@ export async function saveSnapshot(tenantId, snap) {
 const GRACE_MS = 2 * 3600_000;
 
 /**
- * Where one order stands. `deliveries` are its Purchase rows per destination
- * kind ({ meta: 'sent' | 'dead' | 'pending' | 'sending' }), `destinations` the
- * tenant's active ones with their GA4 scope.
+ * Where one order stands. `deliveries` hold its Purchase state per destination
+ * id ({ 12: 'sent' | 'dead' | 'pending' }), `destinations` the tenant's active
+ * ones ({ id, kind, scope }).
  */
 export function classifyOrder(o, { received, deliveries = {}, destinations = [], now = Date.now() }) {
   const at = new Date(o.paid_at || o.created_at || now).getTime();
@@ -111,7 +122,7 @@ export function classifyOrder(o, { received, deliveries = {}, destinations = [],
     if (!needs) { per[d.kind] = 'skip'; continue; }
     // A GA4 fed by GTM takes only purchases no page reported.
     if (d.kind === 'ga4' && d.scope === 'browserless' && o.thankyou) { per[d.kind] = 'gtm'; continue; }
-    const status = deliveries[d.kind];
+    const status = deliveries[String(d.id)] ?? deliveries[d.kind];
     per[d.kind] = status || 'none';
     if (status === 'sent') continue;
     if (status === 'pending' || status === 'sending') pending = true;
@@ -128,8 +139,16 @@ export async function auditRows(tenantId, days = 14) {
     `SELECT a.*, to_char(a.day, 'YYYY-MM-DD') AS day,
             EXISTS (SELECT 1 FROM received r
                      WHERE r.tenant_id = a.tenant_id AND r.event_name = 'Purchase' AND r.event_id = 'ord-' || a.order_id) AS received,
-            (SELECT json_object_agg(d.kind, e.status) FROM events e JOIN destinations d ON d.id = e.destination_id
-              WHERE e.tenant_id = a.tenant_id AND e.event_name = 'Purchase' AND e.event_id = 'ord-' || a.order_id) AS deliveries
+            -- Per destination: Meta may hold two rows (browser and server leg) for one
+            -- purchase; one delivered is enough, otherwise one still on its way.
+            (SELECT json_object_agg(x.destination_id, x.status) FROM (
+               SELECT e.destination_id,
+                      CASE WHEN bool_or(e.status = 'sent') THEN 'sent'
+                           WHEN bool_or(e.status IN ('pending', 'sending')) THEN 'pending'
+                           ELSE 'dead' END AS status
+                 FROM events e
+                WHERE e.tenant_id = a.tenant_id AND e.event_name = 'Purchase' AND e.event_id = 'ord-' || a.order_id
+                GROUP BY e.destination_id) x) AS deliveries
        FROM order_audit a
       WHERE a.tenant_id = $1 AND a.day >= (now() AT TIME ZONE 'Europe/Bratislava')::date - $2::int
       ORDER BY a.created_at DESC NULLS LAST`,
@@ -164,6 +183,8 @@ export async function overdueSnapshots(hours = 36) {
        FROM tenants t LEFT JOIN audit_snapshots s ON s.tenant_id = t.id
       WHERE t.active AND t.plugin_version ~ '^[0-9]+\.[0-9]+'
         AND (split_part(t.plugin_version, '.', 1)::int, split_part(t.plugin_version, '.', 2)::int) >= (1, 2)
+        -- A site that only just updated gets the same time to send its first list.
+        AND COALESCE(t.plugin_version_since, t.plugin_seen_at) < now() - ($1 || ' hours')::interval
       GROUP BY t.id
      HAVING max(s.completed_at) IS NULL OR max(s.completed_at) < now() - ($1 || ' hours')::interval`,
     [String(hours)],
