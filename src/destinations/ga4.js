@@ -19,16 +19,45 @@ const EVENT_NAMES = {
   Subscribe: 'subscribe',
 };
 
+// GA4 item fields the site may send alongside Meta's id/quantity/item_price.
+const ITEM_FIELDS = [
+  'item_name', 'item_brand', 'item_variant', 'item_category', 'item_category2', 'item_category3',
+  'item_category4', 'item_category5', 'item_list_name', 'item_list_id', 'index', 'discount', 'coupon', 'affiliation',
+];
+
 /** Meta-shaped `contents` -> GA4 `items`. */
 function buildItems(props = {}) {
   if (Array.isArray(props.items)) return props.items;
   if (!Array.isArray(props.contents)) return null;
-  return props.contents.map((c) => ({
-    item_id: c.id ?? c.item_id,
-    item_name: c.item_name ?? c.name,
-    quantity: c.quantity ?? 1,
-    price: c.item_price ?? c.price,
-  }));
+  return props.contents.map((c) => {
+    const item = {
+      item_id: c.id ?? c.item_id,
+      item_name: c.item_name ?? c.name,
+      quantity: c.quantity ?? 1,
+      // Revenue without VAT, as GA4 defines it, when the site sends it.
+      price: c.price_net ?? c.item_price ?? c.price,
+    };
+    for (const key of ITEM_FIELDS) {
+      if (item[key] === undefined && c[key] !== undefined && c[key] !== null && c[key] !== '') item[key] = c[key];
+    }
+    return item;
+  });
+}
+
+// GA4 drops events timestamped more than 72 hours back without saying so.
+export const GA4_MAX_AGE_SECONDS = 72 * 3600;
+
+/**
+ * A client_id for a visitor without the Google tag's _ga cookie (blocked tag,
+ * server-only purchase). Derived from the site's own visitor id, so all of this
+ * visitor's events at least form one GA4 user rather than one user each.
+ */
+function fallbackClientId(event) {
+  const seed = event.user?.external_id;
+  if (typeof seed === 'string' && /^[a-f0-9]{16,}$/i.test(seed)) {
+    return `${parseInt(seed.slice(0, 8), 16)}.${parseInt(seed.slice(8, 16), 16)}`;
+  }
+  return `${Date.now()}.${event.event_id}`;
 }
 
 export function buildPayload(event, settings) {
@@ -37,17 +66,26 @@ export function buildPayload(event, settings) {
     // GA4 requires micros-since-epoch and rejects events older than 72 hours.
     engagement_time_msec: 1,
   };
-  if (props.value !== undefined) params.value = Number(props.value);
+  // GA4's value is the items without tax and shipping; the site sends that as
+  // value_net next to the full total (which Meta gets).
+  const value = props.value_net ?? props.value;
+  if (value !== undefined && value !== null) params.value = Number(value);
   if (props.currency) params.currency = props.currency;
   if (props.order_id) params.transaction_id = String(props.order_id);
   if (props.search_string) params.search_term = props.search_string;
+  if (props.tax !== undefined && props.tax !== null) params.tax = Number(props.tax);
+  if (props.shipping !== undefined && props.shipping !== null) params.shipping = Number(props.shipping);
+  if (props.coupon) params.coupon = String(props.coupon);
+  if (props.item_list_name) params.item_list_name = String(props.item_list_name);
+  if (props.payment_type) params.payment_type = String(props.payment_type);
   if (event.event_source_url) params.page_location = event.event_source_url;
+  if (event.referrer_url) params.page_referrer = event.referrer_url;
 
   const items = buildItems(props);
   if (items?.length) params.items = items;
 
   const body = {
-    client_id: event.context?.gaClientId || event.context?.fbp || `${Date.now()}.${event.event_id}`,
+    client_id: event.context?.gaClientId || fallbackClientId(event),
     timestamp_micros: event.event_time * 1_000_000,
     non_personalized_ads: false,
     events: [{
@@ -56,13 +94,18 @@ export function buildPayload(event, settings) {
     }],
   };
   if (event.context?.gaSessionId) body.events[0].params.session_id = event.context.gaSessionId;
-  if (event.user?.external_id) body.user_id = String(event.user.external_id);
+  // user_id is for a customer account the site knows, the same person on every
+  // device. An anonymous visitor id is not one.
+  if (event.account_id) body.user_id = event.account_id;
   // Tells Google whether this hit may be used for ads. Without it Google falls
   // back to whatever the browser tag last said, and there is no browser tag here.
   if (typeof event.consent?.marketing === 'boolean') {
     const state = event.consent.marketing ? 'GRANTED' : 'DENIED';
     body.consent = { ad_user_data: state, ad_personalization: state };
   }
+  // Hashed contact data (user-provided data / enhanced conversions) is for ads,
+  // so only with marketing consent, or on a site that does not ask.
+  if (event.google_user && event.consent?.marketing !== false) body.user_data = event.google_user;
   if (settings.debug || event.test) body.debug = true;
   return body;
 }
@@ -73,6 +116,10 @@ export async function send(event, settings) {
   const { measurement_id: measurementId, api_secret: apiSecret } = settings;
   if (!measurementId || !apiSecret) {
     return { ok: false, retryable: false, error: 'ga4: measurement_id or api_secret missing' };
+  }
+  // Google would answer 204 and silently drop it; say so instead.
+  if (event.event_time < Math.floor(Date.now() / 1000) - GA4_MAX_AGE_SECONDS) {
+    return { ok: false, retryable: false, error: 'ga4: udalosť je staršia ako 72 h, GA4 by ju zahodil' };
   }
 
   // The debug endpoint validates and reports problems; the live one answers 204 to everything.

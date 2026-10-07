@@ -1,11 +1,11 @@
 {
   "version": "1.1.0",
   "file": "nowera-capi-1.1.0.zip",
-  "sha256": "fd611ea31db474a8cdf2ceca32c5a80b51274ce1185d84fe052bfc537ec58956",
-  "signature": "lGotkbIANN3iZDXhTFnU+5nSJwnM19FxOXbbe+zhXc1Jpv2NiuAgqFKHW86qAKy2PEp9KXUDE7zmoKervJ5LAQ==",
-  "released_at": "2026-10-07T09:17:21.764Z",
+  "sha256": "b86ad31d1e185a23dd89fd5da8d594da561efbcdbf938d999e4528d6416ab338",
+  "signature": "OxZPCrO8XZ8akfVSBoCTFyGSh+QHp4NoPy5b7EALWYPpxAVWJfwGciBKL8vOue8zo7y2EkCuObR341STBwmjCg==",
+  "released_at": "2026-10-07T13:29:54.652Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "FAZ Cookie Manager ako nástroj na súhlasy; voliteľný Google tag (GA4 config) s Consent Mode; udalosti pre GA4 počkajú na cookies _ga."
+  "notes": "FAZ Cookie Manager; Google tag až po súhlase; nákup len pri zaplatenej objednávke, zrušenie ako refund v GA4; bohatšie položky a čisté tržby pre GA4; Enhanced Conversions; opakovanie udalostí pri výpadku gatewaya."
 }

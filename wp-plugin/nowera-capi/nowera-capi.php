@@ -242,11 +242,9 @@ function nowera_capi_render_settings(): void {
 						<p class="description">
 							Vloží do hlavičky len <code>gtag('config')</code>: page_view, relácie, cookies <code>_ga</code> a gclid pre Google Ads.
 							E-commerce udalosti posiela signals (GA4 destinácia „Všetky okrem page_view“). Iný GA4 kód (GTM, Site Kit, ručný v hlavičke) odstráňte.
-							Súhlas rieši nástroj na súhlasy cez Google Consent Mode — vo FAZ ho zapnite.
+							Pri nástroji na súhlasy ho načíta <code>px.js</code> až po súhlase so štatistikou — pred súhlasom nejde do Google nič.
+							Bez loadera <code>px.js</code> sa vloží len na webe bez nástroja na súhlasy.
 						</p>
-						<?php if ( $s['ga4_tag'] && 'faz' === $s['consent_mode'] && ! nowera_capi_faz_gcm_enabled() ) : ?>
-							<p class="description" style="color:#b32d2e"><strong>Google Consent Mode vo FAZ je vypnutý, preto sa Google tag nevkladá.</strong> Zapnite ho vo FAZ (Google Consent Mode).</p>
-						<?php endif; ?>
 					</td>
 				</tr>
 			</table>
@@ -273,6 +271,9 @@ add_action( 'wp_head', function () {
 			'prefix' => $s['consent_prefix'],
 		) ) . ';';
 	}
+	if ( $s['ga4_tag'] ) {
+		$config[] = nowera_capi_gtag_stub( $s );
+	}
 
 	// What this page is. Identical for every visitor, so it is safe in cached HTML.
 	$page = nowera_capi_page_context();
@@ -291,6 +292,7 @@ add_action( 'wp_head', function () {
 	if ( is_user_logged_in() ) {
 		$identity = array();
 		$current  = nowera_capi_current_user();
+		unset( $current['account'] ); // the server events carry the account
 		foreach ( $current as $key => $value ) {
 			$digest = nowera_capi_hash( $key, $value, $current['country'] ?? null );
 			if ( $digest !== null ) {
@@ -317,32 +319,35 @@ add_action( 'wp_head', function () {
  * page views, sessions, the _ga cookies and gclid, which the server events then
  * join. Ecommerce events come from the gateway, so none are sent from here.
  *
- * Printed after the head scripts so the consent tool's Google Consent Mode
- * default is already queued; the same for every visitor, so cache-safe.
+ * With px.js on the page, the page only names the tag (window.nwrGtag, printed
+ * before px.js so it is there whenever px.js runs) under a denied consent
+ * default; px.js loads it once the visitor allows statistics, so nothing goes to
+ * Google before that ("basic" consent mode). Cache-safe: the same for everyone.
+ */
+function nowera_capi_gtag_stub( array $s ): string {
+	$js = 'window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}';
+	if ( 'none' !== $s['consent_mode'] ) {
+		// Google wants a consent default first; a consent tool's own one wins.
+		$js .= 'if(!dataLayer.some(function(a){return a&&a[0]===\'consent\'&&a[1]===\'default\';}))'
+			. 'gtag(\'consent\',\'default\',{ad_storage:\'denied\',ad_user_data:\'denied\',ad_personalization:\'denied\',analytics_storage:\'denied\'});';
+	}
+	return $js . 'window.nwrGtag=' . wp_json_encode( $s['ga4_tag'] ) . ';';
+}
+
+/**
+ * Without px.js the tag can only run straight from the page — and only on a
+ * site that does not ask for consent, since nothing here could wait for it.
  */
 add_action( 'wp_head', function () {
-	$s  = nowera_capi_settings();
-	$id = $s['ga4_tag'];
-	if ( ! $id ) {
+	$s = nowera_capi_settings();
+	if ( ! $s['ga4_tag'] || ( ! empty( $s['load_script'] ) && ! empty( $s['collector_host'] ) ) || 'none' !== $s['consent_mode'] ) {
 		return;
 	}
-	// With FAZ the consent defaults come from its Google Consent Mode; without
-	// it nothing would ever grant or deny, so the tag is not printed at all.
-	if ( 'faz' === $s['consent_mode'] && ! nowera_capi_faz_gcm_enabled() ) {
-		return;
-	}
-	$js = 'window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}';
-	// Google requires a consent default before config. The consent tool sets one;
-	// should it not have (yet), everything starts denied until it updates.
-	if ( 'none' !== $s['consent_mode'] ) {
-		$js .= 'if(!dataLayer.some(function(a){return a&&a[0]===\'consent\'&&a[1]===\'default\';}))'
-			. 'gtag(\'consent\',\'default\',{ad_storage:\'denied\',ad_user_data:\'denied\',ad_personalization:\'denied\',analytics_storage:\'denied\',wait_for_update:500});';
-	}
-	$js .= 'gtag(\'js\',new Date());gtag(\'config\',' . wp_json_encode( $id ) . ');';
 	printf(
-		'<script async src="https://www.googletagmanager.com/gtag/js?id=%1$s"></script>' . "\n" . '<script>%2$s</script>' . "\n",
-		esc_attr( $id ),
-		$js
+		'<script async src="https://www.googletagmanager.com/gtag/js?id=%1$s"></script>' . "\n" .
+		'<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments);}gtag(\'js\',new Date());gtag(\'config\',%2$s);</script>' . "\n",
+		esc_attr( $s['ga4_tag'] ),
+		wp_json_encode( $s['ga4_tag'] )
 	);
 }, 20 );
 
@@ -393,19 +398,6 @@ function nowera_capi_faz_consent(): array {
 	return '' === $raw ? array() : faz_parse_consent_cookie( $raw );
 }
 
-/** Whether FAZ emits Google Consent Mode, without which a Google tag would run unchecked. */
-function nowera_capi_faz_gcm_enabled(): bool {
-	if ( ! class_exists( 'FazCookie\\Admin\\Modules\\Gcm\\Includes\\Gcm_Settings' ) ) {
-		return false;
-	}
-	try {
-		$gcm = new \FazCookie\Admin\Modules\Gcm\Includes\Gcm_Settings();
-		return true === $gcm->is_gcm_enabled();
-	} catch ( \Throwable $e ) {
-		return false;
-	}
-}
-
 /**
  * Categories the visitor accepted in CookieScript. Its cookie is JSON whose
  * "categories" field is itself a JSON string, e.g.
@@ -440,9 +432,142 @@ function nowera_capi_content_id( \WC_Product $product ): string {
 }
 
 function nowera_capi_product_price( \WC_Product $product ): float {
-	return $product->is_type( 'variable' )
-		? (float) $product->get_variation_price( 'min' )
-		: (float) $product->get_price();
+	return nowera_capi_product_prices( $product )[0];
+}
+
+/**
+ * The product's price as the shop shows it (what Meta gets, comparable with an
+ * order total that includes VAT) and without VAT (what GA4 counts as revenue).
+ */
+function nowera_capi_product_prices( \WC_Product $product ): array {
+	$raw  = $product->is_type( 'variable' ) ? (float) $product->get_variation_price( 'min' ) : (float) $product->get_price();
+	$args = array( 'qty' => 1, 'price' => $raw );
+	return array( (float) wc_get_price_including_tax( $product, $args ), (float) wc_get_price_excluding_tax( $product, $args ) );
+}
+
+/**
+ * One product as GA4 and Meta describe it: catalog id, the name without the
+ * variation, category path, brand and variant. Meta gets the name, brand and
+ * category under its own keys (the gateway maps them).
+ */
+function nowera_capi_item( \WC_Product $product, $quantity = 1, ?float $price = null, ?float $price_net = null ): array {
+	$parent = $product->get_parent_id() ? wc_get_product( $product->get_parent_id() ) : null;
+	$base   = $parent ?: $product;
+	if ( null === $price ) {
+		list( $price, $price_net ) = nowera_capi_product_prices( $product );
+	}
+	$decimals = wc_get_price_decimals();
+	$item     = array(
+		'id'         => nowera_capi_content_id( $product ),
+		'item_name'  => wp_strip_all_tags( $base->get_name() ),
+		'quantity'   => (int) $quantity,
+		'item_price' => round( $price, $decimals ),
+		// GA4 counts revenue without VAT; Meta never sees this field.
+		'price_net'  => round( null === $price_net ? $price : $price_net, $decimals ),
+	);
+	foreach ( nowera_capi_category_path( $base->get_id() ) as $i => $name ) {
+		$item[ 0 === $i ? 'item_category' : 'item_category' . ( $i + 1 ) ] = $name;
+	}
+	$brand = nowera_capi_brand( $base );
+	if ( '' !== $brand ) {
+		$item['item_brand'] = $brand;
+	}
+	if ( $product->is_type( 'variation' ) ) {
+		$variant = wp_strip_all_tags( (string) wc_get_formatted_variation( $product, true, false, false ) );
+		if ( '' !== $variant ) {
+			$item['item_variant'] = $variant;
+		}
+	}
+	return $item;
+}
+
+/** Category names from the top down to the product's deepest category, at most five. */
+function nowera_capi_category_path( int $product_id ): array {
+	static $cache = array();
+	if ( isset( $cache[ $product_id ] ) ) {
+		return $cache[ $product_id ];
+	}
+	$path  = array();
+	$terms = get_the_terms( $product_id, 'product_cat' );
+	if ( is_array( $terms ) && $terms ) {
+		$best  = null;
+		$depth = -1;
+		foreach ( $terms as $term ) {
+			$d = count( get_ancestors( $term->term_id, 'product_cat', 'taxonomy' ) );
+			if ( $d > $depth ) {
+				$best  = $term;
+				$depth = $d;
+			}
+		}
+		if ( $best && (int) $best->term_id !== (int) get_option( 'default_product_cat' ) ) {
+			foreach ( array_reverse( get_ancestors( $best->term_id, 'product_cat', 'taxonomy' ) ) as $ancestor ) {
+				$term = get_term( $ancestor, 'product_cat' );
+				if ( $term && ! is_wp_error( $term ) ) {
+					$path[] = wp_strip_all_tags( $term->name );
+				}
+			}
+			$path[] = wp_strip_all_tags( $best->name );
+		}
+	}
+	$path = (array) apply_filters( 'nowera_capi_item_categories', array_slice( $path, 0, 5 ), $product_id );
+	return $cache[ $product_id ] = array_values( array_slice( $path, 0, 5 ) );
+}
+
+/** The product's brand from the common brand taxonomies or a brand attribute; filterable. */
+function nowera_capi_brand( \WC_Product $product ): string {
+	$brand = '';
+	foreach ( array( 'product_brand', 'pwb-brand', 'yith_product_brand', 'berocket_brand', 'pa_brand', 'pa_znacka' ) as $taxonomy ) {
+		if ( ! taxonomy_exists( $taxonomy ) ) {
+			continue;
+		}
+		$terms = get_the_terms( $product->get_id(), $taxonomy );
+		if ( is_array( $terms ) && $terms ) {
+			$brand = $terms[0]->name;
+			break;
+		}
+	}
+	return (string) apply_filters( 'nowera_capi_item_brand', wp_strip_all_tags( $brand ), $product );
+}
+
+/** An order (or refund) line as an item; `$priced_by` is the refund for a refund line. */
+function nowera_capi_order_item( \WC_Order_Item_Product $line, \WC_Abstract_Order $priced_by ): array {
+	$product  = $line->get_product();
+	$quantity = abs( (int) $line->get_quantity() );
+	$price    = abs( (float) $priced_by->get_item_total( $line, true, true ) );
+	$net      = abs( (float) $priced_by->get_item_total( $line, false, true ) );
+	$item     = $product
+		? nowera_capi_item( $product, $quantity, $price, $net )
+		: array(
+			'id'         => (string) ( $line->get_variation_id() ?: $line->get_product_id() ),
+			'item_name'  => $line->get_name(),
+			'quantity'   => $quantity,
+			'item_price' => $price,
+			'price_net'  => $net,
+		);
+	// A coupon's share per unit, without VAT like GA4's price, next to the discounted price.
+	if ( $quantity && ! $priced_by instanceof \WC_Order_Refund ) {
+		$discount = ( (float) $line->get_subtotal() - (float) $line->get_total() ) / $quantity;
+		if ( $discount > 0.004 ) {
+			$item['discount'] = round( $discount, wc_get_price_decimals() );
+		}
+	}
+	return $item;
+}
+
+/** What is in the cart, as items. */
+function nowera_capi_cart_items(): array {
+	$items = array();
+	if ( ! function_exists( 'WC' ) || ! WC()->cart ) {
+		return $items;
+	}
+	foreach ( WC()->cart->get_cart() as $line ) {
+		if ( empty( $line['data'] ) || ! $line['data'] instanceof \WC_Product ) {
+			continue;
+		}
+		$quantity = max( 1, (int) $line['quantity'] );
+		$items[]  = nowera_capi_item( $line['data'], $quantity, ( (float) $line['line_total'] + (float) $line['line_tax'] ) / $quantity, (float) $line['line_total'] / $quantity );
+	}
+	return $items;
 }
 
 /**
@@ -462,7 +587,8 @@ function nowera_capi_page_context(): ?array {
 			return null;
 		}
 		$id    = nowera_capi_content_id( $product );
-		$price = nowera_capi_product_price( $product );
+		$item  = nowera_capi_item( $product );
+		$price = $item['item_price'];
 		$cats  = wp_get_post_terms( $product->get_id(), 'product_cat', array( 'fields' => 'names' ) );
 		return array(
 			'type' => 'product',
@@ -470,40 +596,44 @@ function nowera_capi_page_context(): ?array {
 				'content_name'     => wp_strip_all_tags( $product->get_name() ),
 				'content_ids'      => array( $id ),
 				'content_type'     => $product->is_type( array( 'variable', 'grouped' ) ) ? 'product_group' : 'product',
-				'contents'         => array( array( 'id' => $id, 'quantity' => 1, 'item_price' => $price ) ),
+				'contents'         => array( $item ),
 				'content_category' => is_array( $cats ) ? implode( ', ', $cats ) : '',
 				'value'            => $price,
+				'value_net'        => $item['price_net'],
 				'currency'         => $currency,
 			),
 		);
 	}
 
 	global $wp_query;
-	$listed = function () use ( $wp_query ) {
+	$listed = function ( string $list ) use ( $wp_query ) {
 		$ids      = array();
 		$contents = array();
 		$group    = false;
-		foreach ( array_slice( (array) $wp_query->posts, 0, 10 ) as $post ) {
+		foreach ( array_slice( (array) $wp_query->posts, 0, 10 ) as $index => $post ) {
 			$product = wc_get_product( $post );
 			if ( ! $product ) {
 				continue;
 			}
-			$id         = nowera_capi_content_id( $product );
-			$ids[]      = $id;
-			$contents[] = array( 'id' => $id, 'quantity' => 1 );
-			$group      = $group || $product->is_type( 'variable' );
+			$item                   = nowera_capi_item( $product );
+			$item['index']          = $index;
+			$item['item_list_name'] = $list;
+			$ids[]                  = $item['id'];
+			$contents[]             = $item;
+			$group                  = $group || $product->is_type( 'variable' );
 		}
 		return array( $ids, $contents, $group ? 'product_group' : 'product' );
 	};
 
 	if ( is_product_category() ) {
 		$term = get_queried_object();
-		list( $ids, $contents, $type ) = $listed();
+		list( $ids, $contents, $type ) = $listed( wp_strip_all_tags( $term->name ) );
 		return array(
 			'type' => 'category',
 			'data' => array(
 				'content_name'     => $term->name,
 				'content_category' => $term->name,
+				'item_list_name'   => wp_strip_all_tags( $term->name ),
 				'content_ids'      => $ids,
 				'content_type'     => $type,
 				'contents'         => $contents,
@@ -513,11 +643,12 @@ function nowera_capi_page_context(): ?array {
 	}
 
 	if ( is_search() && '' !== get_search_query() && 'product' === get_query_var( 'post_type' ) ) {
-		list( $ids, $contents, $type ) = $listed();
+		list( $ids, $contents, $type ) = $listed( 'search' );
 		return array(
 			'type' => 'search',
 			'data' => array(
 				'search_string' => get_search_query(),
+				'item_list_name' => 'search',
 				'content_ids'   => $ids,
 				'content_type'  => $type,
 				'contents'      => $contents,
@@ -532,6 +663,32 @@ function nowera_capi_page_context(): ?array {
 /* -------------------------------------------------------------------------
  * Transport
  * ---------------------------------------------------------------------- */
+
+/**
+ * E-mail and phone hashed the way Google matches them, which is not Meta's way:
+ * Gmail addresses without dots in the name, the phone in E.164 with its "+".
+ * Values that arrive hashed already (a returning visitor's cookie) are Meta's
+ * hashes and cannot be converted, so they are left out.
+ */
+function nowera_capi_google_user( array $user ): array {
+	$out   = array();
+	$email = strtolower( trim( (string) ( $user['em'] ?? '' ) ) );
+	if ( '' !== $email && ! preg_match( '/^[a-f0-9]{64}$/', $email ) && is_email( $email ) ) {
+		list( $name, $domain ) = explode( '@', $email, 2 );
+		if ( in_array( $domain, array( 'gmail.com', 'googlemail.com' ), true ) ) {
+			$name = str_replace( '.', '', $name );
+		}
+		$out['sha256_email_address'] = array( hash( 'sha256', $name . '@' . $domain ) );
+	}
+	$phone = (string) ( $user['ph'] ?? '' );
+	if ( '' !== $phone && ! preg_match( '/^[a-f0-9]{64}$/i', $phone ) ) {
+		$digits = nowera_capi_phone_digits( $phone, $user['country'] ?? null );
+		if ( strlen( $digits ) >= 8 ) {
+			$out['sha256_phone_number'] = array( hash( 'sha256', '+' . $digits ) );
+		}
+	}
+	return $out;
+}
 
 /**
  * Meta's normalization rules, mirrored from the gateway's hash.js so a value
@@ -988,6 +1145,13 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 	if ( ! $marketing && ! $statistics ) {
 		return 'none'; // nobody may receive this event
 	}
+	// A customer account: GA4's user_id, the same person on every device. Hashed
+	// with the site's address, so it is no WordPress user number in the clear.
+	$account = ! empty( $user['account'] ) ? hash( 'sha256', 'nwr-account|' . home_url( '/' ) . '|' . $user['account'] ) : null;
+	unset( $user['account'] );
+	// Contact data under Google's normalisation, for GA4 user-provided data and
+	// Google Ads enhanced conversions. Advertising use: marketing consent only.
+	$google_user = $marketing ? nowera_capi_google_user( $user ) : array();
 	if ( ! $marketing ) {
 		// Contact details and the visitor id are only for advertising use.
 		$user = array_intersect_key( $user, array( 'country' => true ) );
@@ -1013,6 +1177,8 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 		'referrer_url'      => array_key_exists( 'referrer_url', $ctx ) ? $ctx['referrer_url'] : nowera_capi_page_referrer( $source_url ),
 		'action_source'     => 'website',
 		'user_data'         => $hashed,
+		'account_id'        => $account,
+		'google_user'       => $google_user ?: null,
 		'custom_data'       => $props,
 		'fbp'               => $marketing ? ( $ctx['fbp'] ?? null ) : null,
 		'fbc'               => $marketing ? ( $ctx['fbc'] ?? null ) : null,
@@ -1084,11 +1250,56 @@ function nowera_capi_flush_outbox( bool $finish = true ): void {
 	}
 	foreach ( $queue as $item ) {
 		$error = nowera_capi_deliver( $item['body'] );
-		if ( null !== $error && ! empty( $item['order_id'] ) ) {
+		if ( null === $error ) {
+			continue;
+		}
+		if ( ! empty( $item['order_id'] ) ) {
 			nowera_capi_purchase_failed( (int) $item['order_id'], $error );
+		} elseif ( nowera_capi_gateway_paused() ) {
+			// An outage, not this site's mistake: keep the event and try again.
+			nowera_capi_retry_later( $item['body'], 1 );
 		}
 	}
 }
+
+/**
+ * An event that met a gateway outage waits and goes again with its original
+ * time. The event itself is kept in an option (a rich cart outgrows Action
+ * Scheduler's argument limit); the scheduled action only carries its key.
+ * Should the first try have arrived after all, the gateway keeps one GA4 copy
+ * per event id and Meta collapses its two by the same id.
+ */
+function nowera_capi_retry_later( string $body, int $attempt, ?string $key = null ): void {
+	$delays = array( 2, 10, 30, 120, 360 ); // minutes
+	$key    = $key ?: 'nowera_capi_retry_' . wp_generate_uuid4();
+	if ( $attempt > count( $delays ) || ! function_exists( 'as_schedule_single_action' ) ) {
+		delete_option( $key );
+		error_log( '[nowera-capi] event dropped after ' . ( $attempt - 1 ) . ' retries' );
+		return;
+	}
+	update_option( $key, $body, false );
+	as_schedule_single_action( time() + $delays[ $attempt - 1 ] * MINUTE_IN_SECONDS, 'nowera_capi_retry_event', array( $key, $attempt ), 'nowera-capi' );
+}
+
+add_action( 'nowera_capi_retry_event', function ( $key, $attempt = 1 ) {
+	$key = (string) $key;
+	if ( 0 !== strpos( $key, 'nowera_capi_retry_' ) ) {
+		return;
+	}
+	$body = get_option( $key );
+	$data = is_string( $body ) ? json_decode( $body, true ) : null;
+	// GA4 takes events up to 72 hours back; past two days a retry is not worth it.
+	if ( ! is_array( $data ) || (int) ( $data['event_time'] ?? 0 ) < time() - 2 * DAY_IN_SECONDS ) {
+		delete_option( $key );
+		return;
+	}
+	$error = nowera_capi_deliver( $body );
+	if ( null !== $error && nowera_capi_gateway_paused() ) {
+		nowera_capi_retry_later( $body, (int) $attempt + 1, $key );
+		return;
+	}
+	delete_option( $key );
+}, 10, 2 );
 
 /** Whether a recent failure paused sending. */
 function nowera_capi_gateway_paused(): bool {
@@ -1226,30 +1437,49 @@ function nowera_capi_remember_checkout_context( \WC_Order $order ): void {
 }
 
 /** Purchase custom_data, shared by the thank-you page and the after-payment path. */
-function nowera_capi_purchase_data( \WC_Order $order ): array {
-	$contents    = array();
-	$content_ids = array();
-	foreach ( $order->get_items() as $item ) {
-		$product = $item->get_product();
-		$id      = $product ? nowera_capi_content_id( $product ) : (string) ( $item->get_variation_id() ?: $item->get_product_id() );
-		$content_ids[] = $id;
-		$contents[]    = array(
-			'id'         => $id,
-			'item_name'  => $item->get_name(),
-			'quantity'   => $item->get_quantity(),
-			'item_price' => $order->get_item_total( $item, false, true ),
-		);
-	}
+/** The items' worth without VAT and shipping, after discounts: GA4's purchase value. */
+function nowera_capi_order_net( \WC_Order $order ): float {
+	return round( (float) $order->get_subtotal() - (float) $order->get_discount_total(), wc_get_price_decimals() );
+}
 
+/** The share of an amount paid on this order that GA4 counts (its items, no VAT, no shipping). */
+function nowera_capi_net_share( \WC_Order $order, float $amount ): float {
+	$total = (float) $order->get_total();
+	return $total > 0 ? round( $amount * nowera_capi_order_net( $order ) / $total, wc_get_price_decimals() ) : $amount;
+}
+
+/** The order's lines as items. */
+function nowera_capi_order_items( \WC_Order $order ): array {
+	$items = array();
+	foreach ( $order->get_items() as $line ) {
+		if ( $line instanceof \WC_Order_Item_Product ) {
+			$items[] = nowera_capi_order_item( $line, $order );
+		}
+	}
+	return $items;
+}
+
+function nowera_capi_purchase_data( \WC_Order $order ): array {
+	$contents = nowera_capi_order_items( $order );
+
+	// value is what the customer paid, VAT and shipping included (Meta, and the
+	// shop's own reports); GA4 counts value_net — the items without VAT and
+	// shipping, as Google defines it — with tax and shipping on their own.
 	$custom_data = array(
 		'value'        => (float) $order->get_total(),
+		'value_net'    => nowera_capi_order_net( $order ),
 		'currency'     => $order->get_currency(),
 		'order_id'     => $order->get_id(),
-		'content_ids'  => $content_ids,
+		'content_ids'  => array_column( $contents, 'id' ),
 		'contents'     => $contents,
 		'content_type' => 'product',
 		'num_items'    => $order->get_item_count(),
+		'tax'          => round( (float) $order->get_total_tax(), wc_get_price_decimals() ),
+		'shipping'     => round( (float) $order->get_shipping_total(), wc_get_price_decimals() ),
 	);
+	if ( $order->get_coupon_codes() ) {
+		$custom_data['coupon'] = implode( ',', $order->get_coupon_codes() );
+	}
 	// New or returning buyer, for campaigns that optimise for new customers.
 	$segment = nowera_capi_customer_segment( $order );
 	if ( $segment ) {
@@ -1288,6 +1518,7 @@ function nowera_capi_user_from_order( \WC_Order $order ): array {
 		'external_id' => $order->get_customer_id()
 			? (string) $order->get_customer_id()
 			: (string) nowera_capi_visitor_id(),
+		'account'     => $order->get_customer_id() ? (string) $order->get_customer_id() : '',
 	) );
 }
 
@@ -1300,8 +1531,18 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 	if ( ! $order ) {
 		return;
 	}
-	// The page loaded, so the site's own tags (GTM, gtag) had their chance to
-	// report the purchase; a later retry from the server is no longer the only copy.
+	// WooCommerce shows this page for a failed or still unpaid order too. Such an
+	// order is reported once its payment is confirmed (see the fallback below);
+	// no tag on this page reported it, so that report is the only copy.
+	if ( ! nowera_capi_purchase_ready( $order ) ) {
+		if ( ! $order->get_meta( '_nowera_capi_thankyou_unpaid' ) ) {
+			$order->update_meta_data( '_nowera_capi_thankyou_unpaid', time() );
+			$order->save_meta_data();
+		}
+		return;
+	}
+	// The page loaded for a real purchase, so the site's own tags (GTM, gtag) had
+	// their chance to report it; a later retry is no longer the only copy.
 	if ( ! $order->get_meta( '_nowera_capi_thankyou' ) ) {
 		$order->update_meta_data( '_nowera_capi_thankyou', time() );
 		$order->save_meta_data();
@@ -1319,7 +1560,7 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		$event_id,
 		nowera_capi_user_from_order( $order ),
 		$custom_data,
-		$order->get_checkout_order_received_url(),
+		nowera_capi_order_url( $order ),
 		null,
 		$order->get_id()
 	);
@@ -1330,11 +1571,34 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 	// (or the browser leg waiting in the loader) still reports the purchase.
 	if ( 'marketing' === $outcome || 'statistics' === $outcome ) {
 		$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
+		// Reported from the page: the payment confirmation has nothing left to do.
+		if ( function_exists( 'as_unschedule_action' ) ) {
+			as_unschedule_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		}
 	}
 	$order->save();
 
 	nowera_capi_browser_leg( 'Purchase', $event_id, $custom_data );
 }, 10, 1 );
+
+/**
+ * The thank-you page's address without its query string: the order key in it
+ * opens the order, and must not travel to Meta or Google.
+ */
+function nowera_capi_order_url( \WC_Order $order ): string {
+	return strtok( $order->get_checkout_order_received_url(), '?' );
+}
+
+/**
+ * Whether an order counts as a purchase yet. Paid orders do, and so do orders
+ * paid on delivery or by bank transfer (processing or on-hold) — those are
+ * counted when placed and taken back with a refund if cancelled. Failed,
+ * cancelled and still unpaid orders do not.
+ */
+function nowera_capi_purchase_ready( \WC_Order $order ): bool {
+	$ready = ! $order->has_status( array( 'failed', 'cancelled', 'pending', 'checkout-draft', 'refunded', 'trash' ) );
+	return (bool) apply_filters( 'nowera_capi_purchase_ready', $ready, $order );
+}
 
 /**
  * A paid order whose buyer never came back to the thank-you page (common with
@@ -1350,11 +1614,15 @@ function nowera_capi_schedule_purchase_fallback( $order_id ): void {
 		return; // already reported, already decided, or never went through our checkout
 	}
 	$args = array( (int) $order->get_id() );
+	// The thank-you page already came and went (the order was not paid yet then):
+	// nothing to wait for any more.
+	$delay = $order->get_meta( '_nowera_capi_thankyou_unpaid' ) ? MINUTE_IN_SECONDS : 30 * MINUTE_IN_SECONDS;
 	if ( ! as_next_scheduled_action( 'nowera_capi_purchase_fallback', $args, 'nowera-capi' ) ) {
-		as_schedule_single_action( time() + 30 * MINUTE_IN_SECONDS, 'nowera_capi_purchase_fallback', $args, 'nowera-capi' );
+		as_schedule_single_action( time() + $delay, 'nowera_capi_purchase_fallback', $args, 'nowera-capi' );
 	}
 }
 add_action( 'woocommerce_payment_complete', 'nowera_capi_schedule_purchase_fallback' );
+add_action( 'woocommerce_order_status_on-hold', 'nowera_capi_schedule_purchase_fallback' );
 add_action( 'woocommerce_order_status_processing', 'nowera_capi_schedule_purchase_fallback' );
 add_action( 'woocommerce_order_status_completed', 'nowera_capi_schedule_purchase_fallback' );
 
@@ -1362,6 +1630,9 @@ add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
 	$order = wc_get_order( $order_id );
 	if ( ! $order || $order->get_meta( '_nowera_capi_purchase_sent' ) ) {
 		return; // reported already
+	}
+	if ( ! nowera_capi_purchase_ready( $order ) ) {
+		return; // a later payment confirmation schedules this again
 	}
 	// The thank-you page decided (e.g. no consent) — unless its delivery failed and this is the retry.
 	$retry = (int) $order->get_meta( '_nowera_capi_purchase_retry' ) > 0;
@@ -1395,7 +1666,7 @@ add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
 		$user['external_id'] = (string) $stored['visitor']; // no visitor cookie in this request
 	}
 
-	$outcome = nowera_capi_send( 'Purchase', 'ord-' . $order->get_id(), $user, nowera_capi_purchase_data( $order ), $order->get_checkout_order_received_url(), $ctx, $order->get_id() );
+	$outcome = nowera_capi_send( 'Purchase', 'ord-' . $order->get_id(), $user, nowera_capi_purchase_data( $order ), nowera_capi_order_url( $order ), $ctx, $order->get_id() );
 	if ( ! $retry ) {
 		nowera_capi_record_outcome( $order, $outcome, true );
 	}
@@ -1419,13 +1690,14 @@ add_action( 'woocommerce_add_to_cart', function ( $cart_item_key, $product_id, $
 	if ( ! $product ) {
 		return;
 	}
-	$id          = nowera_capi_content_id( $product );
+	$item        = nowera_capi_item( $product, (int) $quantity );
 	$event_id    = wp_generate_uuid4();
 	$custom_data = array(
-		'value'        => round( (float) $product->get_price() * (int) $quantity, wc_get_price_decimals() ),
+		'value'        => round( $item['item_price'] * (int) $quantity, wc_get_price_decimals() ),
+		'value_net'    => round( $item['price_net'] * (int) $quantity, wc_get_price_decimals() ),
 		'currency'     => get_woocommerce_currency(),
-		'content_ids'  => array( $id ),
-		'contents'     => array( array( 'id' => $id, 'quantity' => (int) $quantity, 'item_price' => (float) $product->get_price() ) ),
+		'content_ids'  => array( $item['id'] ),
+		'contents'     => array( $item ),
 		'content_name' => $product->get_name(),
 		'content_type' => 'product',
 	);
@@ -1494,20 +1766,21 @@ function nowera_capi_maybe_initiate_checkout(): void {
 	if ( is_array( $seen ) && ( $seen['hash'] ?? '' ) === $hash && (int) ( $seen['at'] ?? 0 ) > time() - HOUR_IN_SECONDS ) {
 		return;
 	}
-	$ids = array();
-	foreach ( WC()->cart->get_cart() as $line ) {
-		if ( ! empty( $line['data'] ) && $line['data'] instanceof \WC_Product ) {
-			$ids[] = nowera_capi_content_id( $line['data'] );
-		}
-	}
+	$items       = nowera_capi_cart_items();
 	$event_id    = wp_generate_uuid4();
 	$custom_data = array(
 		'value'        => (float) WC()->cart->get_total( 'edit' ),
+		'value_net'    => round( (float) WC()->cart->get_subtotal() - (float) WC()->cart->get_discount_total(), wc_get_price_decimals() ),
 		'currency'     => get_woocommerce_currency(),
 		'num_items'    => WC()->cart->get_cart_contents_count(),
-		'content_ids'  => array_values( array_unique( $ids ) ),
+		'content_ids'  => array_values( array_unique( array_column( $items, 'id' ) ) ),
+		'contents'     => $items,
 		'content_type' => 'product',
 	);
+	$coupons = WC()->cart->get_applied_coupons();
+	if ( $coupons ) {
+		$custom_data['coupon'] = implode( ',', $coupons );
+	}
 
 	nowera_capi_send( 'InitiateCheckout', $event_id, nowera_capi_current_user(), $custom_data, wc_get_checkout_url() );
 	// The checkout page is never cached, so the browser leg can share this id.
@@ -1532,35 +1805,48 @@ function nowera_capi_refund( $order_id, $refund_id ): void {
 		return;
 	}
 	$stored = $order->get_meta( '_nowera_capi_ctx' );
-	if ( ! is_array( $stored ) || empty( $stored['statistics'] ) ) {
+	$stored = is_array( $stored ) ? $stored : array();
+	// Only what GA4 counted can be taken back: a Purchase reported (with consent,
+	// at checkout or later on the thank-you page) or consent stored at checkout.
+	if ( ! $order->get_meta( '_nowera_capi_purchase_sent' ) && empty( $stored['statistics'] ) ) {
+		return;
+	}
+	// A cancellation already took back everything that was left.
+	if ( $order->get_meta( '_nowera_capi_cancel_sent' ) ) {
 		return;
 	}
 
 	$contents = array();
 	foreach ( $refund->get_items() as $item ) {
-		$quantity = abs( (int) $item->get_quantity() );
-		if ( ! $quantity ) {
-			continue;
+		if ( $item instanceof \WC_Order_Item_Product && abs( (int) $item->get_quantity() ) ) {
+			$contents[] = nowera_capi_order_item( $item, $refund );
 		}
-		$product    = $item->get_product();
-		$contents[] = array(
-			'id'         => $product ? nowera_capi_content_id( $product ) : (string) ( $item->get_variation_id() ?: $item->get_product_id() ),
-			'item_name'  => $item->get_name(),
-			'quantity'   => $quantity,
-			'item_price' => abs( (float) $refund->get_item_total( $item, false, true ) ),
-		);
 	}
-	$props = array(
-		'order_id' => $order->get_id(),
-		'value'    => abs( (float) $refund->get_amount() ),
-		'currency' => $order->get_currency(),
+	$amount = abs( (float) $refund->get_amount() );
+	if ( $contents ) {
+		$net = array_sum( array_map( function ( $i ) { return $i['price_net'] * $i['quantity']; }, $contents ) );
+	} elseif ( $refund->get_items( array( 'shipping', 'fee', 'tax' ) ) ) {
+		// No products, only shipping, fees or tax given back: no item revenue.
+		$net = max( 0, $amount - abs( (float) $refund->get_total_tax() ) - abs( (float) $refund->get_shipping_total() ) );
+	} else {
+		$net = nowera_capi_net_share( $order, $amount ); // an amount without lines
+	}
+	$net = round( $net, wc_get_price_decimals() );
+	$props  = array(
+		'order_id'  => $order->get_id(),
+		'value'     => $amount,
+		'value_net' => $net,
+		'currency'  => $order->get_currency(),
 	);
+	// What GA4 has been told back so far, so a later cancellation takes only the rest.
+	$order->update_meta_data( '_nowera_capi_refunded_net', round( (float) $order->get_meta( '_nowera_capi_refunded_net' ) + $net, wc_get_price_decimals() ) );
+	$order->save_meta_data();
 	// Without items GA4 takes it as a refund of the whole order.
 	if ( $contents ) {
 		$props['contents'] = $contents;
 	}
 
-	nowera_capi_send( 'Refund', 'refund-' . $refund->get_id(), array(), $props, $order->get_checkout_order_received_url(), array(
+	nowera_capi_send( 'Refund', 'refund-' . $refund->get_id(), array(), $props, nowera_capi_order_url( $order ), array(
 		'marketing'     => ! empty( $stored['marketing'] ),
 		'statistics'    => true,
 		'fbp'           => null,
@@ -1576,6 +1862,50 @@ function nowera_capi_refund( $order_id, $refund_id ): void {
 	) );
 }
 add_action( 'woocommerce_order_refunded', 'nowera_capi_refund', 10, 2 );
+
+/**
+ * An order counted as a purchase and then cancelled without a refund (a bank
+ * transfer never paid, a parcel on delivery refused): GA4 takes the rest of its
+ * value back, as a refund of the whole order.
+ */
+function nowera_capi_cancelled( $order_id ): void {
+	$order = wc_get_order( $order_id );
+	if ( ! $order || ! $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_cancel_sent' ) ) {
+		return;
+	}
+	$stored = $order->get_meta( '_nowera_capi_ctx' );
+	$stored = is_array( $stored ) ? $stored : array();
+	$left = round( (float) $order->get_total() - (float) $order->get_total_refunded(), wc_get_price_decimals() );
+	if ( $left <= 0 ) {
+		return;
+	}
+	$outcome = nowera_capi_send( 'Refund', 'cancel-' . $order->get_id(), array(), array(
+		'order_id'  => $order->get_id(),
+		'value'     => $left,
+		'value_net' => max( 0, round( nowera_capi_order_net( $order ) - (float) $order->get_meta( '_nowera_capi_refunded_net' ), wc_get_price_decimals() ) ),
+		'currency'  => $order->get_currency(),
+	), nowera_capi_order_url( $order ), array(
+		'marketing'     => ! empty( $stored['marketing'] ),
+		'statistics'    => true,
+		'fbp'           => null,
+		'fbc'           => null,
+		'fbclid'        => null,
+		'ga_client_id'  => $stored['ga_client_id'] ?? null,
+		'ga_session_id' => null,
+		'ip'            => (string) $order->get_customer_ip_address(),
+		'ua'            => (string) $order->get_customer_user_agent(),
+		'event_time'    => time(),
+		'referrer_url'  => null,
+		'browserless'   => true,
+	) );
+	if ( 'none' !== $outcome && 'not_configured' !== $outcome ) {
+		$order->update_meta_data( '_nowera_capi_cancel_sent', time() );
+		$order->add_order_note( 'Nowera CAPI: objednávka zrušená, GA4 dostal refund celej sumy.' );
+		$order->save();
+	}
+}
+add_action( 'woocommerce_order_status_cancelled', 'nowera_capi_cancelled' );
+add_action( 'woocommerce_order_status_failed', 'nowera_capi_cancelled' );
 
 /**
  * Best identity available before an order exists. Most checkouts are guests, so
@@ -1607,6 +1937,7 @@ function nowera_capi_current_user(): array {
 			'fn'          => $user->first_name,
 			'ln'          => $user->last_name,
 			'external_id' => (string) $user->ID,
+			'account'     => (string) $user->ID,
 		) ) );
 	}
 
@@ -1641,26 +1972,21 @@ function nowera_capi_add_payment_info( $order ): void {
 		return;
 	}
 
-	$ids = array();
-	foreach ( $order->get_items() as $item ) {
-		$product = $item->get_product();
-		if ( $product ) {
-			$ids[] = nowera_capi_content_id( $product );
-		}
+	$items = nowera_capi_order_items( $order );
+	$data  = array(
+		'value'        => (float) $order->get_total(),
+		'value_net'    => nowera_capi_order_net( $order ),
+		'currency'     => $order->get_currency(),
+		'content_ids'  => array_values( array_unique( array_column( $items, 'id' ) ) ),
+		'contents'     => $items,
+		'content_type' => 'product',
+		'payment_type' => wp_strip_all_tags( $order->get_payment_method_title() ),
+	);
+	if ( $order->get_coupon_codes() ) {
+		$data['coupon'] = implode( ',', $order->get_coupon_codes() );
 	}
 
-	nowera_capi_send(
-		'AddPaymentInfo',
-		'pay-' . $order->get_id(),
-		nowera_capi_user_from_order( $order ),
-		array(
-			'value'        => (float) $order->get_total(),
-			'currency'     => $order->get_currency(),
-			'content_ids'  => array_values( array_unique( $ids ) ),
-			'content_type' => 'product',
-		),
-		wc_get_checkout_url()
-	);
+	nowera_capi_send( 'AddPaymentInfo', 'pay-' . $order->get_id(), nowera_capi_user_from_order( $order ), $data, wc_get_checkout_url() );
 
 	$order->update_meta_data( '_nowera_capi_payment_info_sent', time() );
 	$order->save_meta_data();

@@ -252,6 +252,59 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     if (cookie('_nwr_id') !== null) dropCookie('_nwr_id');
   }
 
+  // ---- Google tag ----------------------------------------------------------
+
+  // The site's Google tag (gtag config; the plugin publishes its id as
+  // window.nwrGtag) loads only after statistics consent, so before that not a
+  // single request goes to Google ("basic" consent mode). Its page_view starts
+  // the session and writes _ga, which our GA4 events then join.
+  var gtagStarted = false;
+  var gtagConsentSent = null;
+
+  function gtagCall() {
+    if (typeof w.gtag === 'function') return w.gtag.apply(null, arguments);
+    (w.dataLayer = w.dataLayer || []).push(arguments);
+  }
+
+  function googleConsent(c) {
+    var ads = c.marketing ? 'granted' : 'denied';
+    return {
+      analytics_storage: c.statistics ? 'granted' : 'denied',
+      ad_storage: ads, ad_user_data: ads, ad_personalization: ads
+    };
+  }
+
+  // Consent tools announce one decision with several events; tell Google once.
+  function tellGoogleConsent(c) {
+    if (!consentActive()) return;
+    var state = googleConsent(c);
+    var key = JSON.stringify(state);
+    if (key === gtagConsentSent) return;
+    gtagConsentSent = key;
+    gtagCall('consent', 'update', state);
+  }
+
+  function startGoogleTag() {
+    var id = w.nwrGtag;
+    if (typeof id !== 'string' || !/^G-[A-Z0-9]{4,20}$/.test(id)) return;
+    var c = consentSnapshot();
+    if (gtagStarted) {
+      // A later change of mind reaches the running tag too.
+      tellGoogleConsent(c);
+      return;
+    }
+    if (!c.statistics) return;
+    gtagStarted = true;
+    tellGoogleConsent(c);
+    gtagCall('js', new Date());
+    gtagCall('config', id);
+    if (!d.createElement) return;
+    var tag = d.createElement('script');
+    tag.async = true;
+    tag.src = 'https://www.googletagmanager.com/gtag/js?id=' + id;
+    (d.head || d.getElementsByTagName('head')[0]).appendChild(tag);
+  }
+
   // ---- identity ----------------------------------------------------------
 
   // GA4 attributes a Measurement Protocol hit to a Google Ads click only when it
@@ -397,6 +450,29 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   // sent and nothing is stored until they do.
   var pending = [];
 
+  // What the pixel gets: Meta's own fields, the way the gateway's Meta
+  // destination sends them. GA4-only values (net revenue, tax, list names)
+  // stay out of Meta.
+  var GA_ONLY = { value_net: 1, tax: 1, shipping: 1, coupon: 1, payment_type: 1, item_list_name: 1 };
+  function pixelProps(props) {
+    if (!props || typeof props !== 'object') return props;
+    var out = {};
+    Object.keys(props).forEach(function (k) {
+      if (!GA_ONLY[k]) out[k] = props[k];
+    });
+    if (Object.prototype.toString.call(out.contents) === '[object Array]') {
+      out.contents = out.contents.map(function (c) {
+        var m = { id: c.id, quantity: c.quantity === undefined ? 1 : c.quantity };
+        if (c.item_price !== undefined) m.item_price = c.item_price;
+        if (c.item_name) m.title = c.item_name;
+        if (c.item_brand) m.brand = c.item_brand;
+        if (c.item_category) m.category = c.item_category;
+        return m;
+      });
+    }
+    return out;
+  }
+
   function send(ev) {
     var c = consentSnapshot();
     if (!c.marketing && !c.statistics) {
@@ -407,7 +483,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     if (c.marketing && PIXEL_ID) {
       ensurePixel();
       try {
-        w.fbq(META_STANDARD[ev.name] ? 'track' : 'trackCustom', ev.name, ev.props, { eventID: ev.id });
+        w.fbq(META_STANDARD[ev.name] ? 'track' : 'trackCustom', ev.name, pixelProps(ev.props), { eventID: ev.id });
       } catch (e) {}
     }
 
@@ -500,6 +576,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
 
   function onConsentChange() {
     forgetIfRefused();
+    startGoogleTag();
     flush();
   }
 
@@ -668,6 +745,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   w.nwr.loaded = true;
 
   forgetIfRefused();
+  startGoogleTag();
   track('PageView');
 
   if (PAGE && PAGE.type) {

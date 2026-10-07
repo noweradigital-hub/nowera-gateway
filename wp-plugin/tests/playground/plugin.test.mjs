@@ -54,7 +54,8 @@ test('a simple product page publishes cache-safe product data for ViewContent', 
   assert.equal(p.data.value, 24.9);
   assert.equal(p.data.currency, 'EUR');
   assert.equal(p.data.content_category, 'Osušky');
-  assert.deepEqual(p.data.contents, [{ id: String(ids.simple), quantity: 1, item_price: 24.9 }]);
+  assert.deepEqual(p.data.contents, [{ id: String(ids.simple), item_name: 'Detská osuška', quantity: 1, item_price: 24.9, price_net: 24.9, item_category: 'Osušky' }]);
+  assert.equal(p.data.value_net, 24.9);
 });
 
 test('a variable product is a product group priced from its cheapest variation', async () => {
@@ -225,6 +226,54 @@ test('Purchase is sent once, with catalog ids, even when the thank-you page is r
   assert.deepEqual(JSON.parse(legs[0][1]), b.custom_data);
 });
 
+test('Purchase items carry name, category and variant; the order its tax and shipping', async () => {
+  const { sent } = await fire('purchase');
+  const d = sent[0].body.custom_data;
+  assert.deepEqual(d.contents[0], { id: String(ids.simple), item_name: 'Detská osuška', quantity: 2, item_price: 24.9, price_net: 24.9, item_category: 'Osušky' });
+  assert.equal(d.contents[1].id, String(ids.variations[1]));
+  assert.equal(d.contents[1].item_name, 'Deka', 'the product, not "Deka - M"');
+  assert.equal(d.contents[1].item_variant, 'M');
+  assert.equal(d.contents[1].item_price, 38);
+  assert.equal(d.value, 87.8);
+  assert.equal(d.value_net, 87.8, 'no VAT set up in this shop');
+  assert.equal(d.tax, 0);
+  assert.equal(d.shipping, 0);
+});
+
+test('Google gets e-mail and phone hashed its own way, only with marketing consent', async () => {
+  const { sent } = await fire('purchase');
+  assert.deepEqual(sent[0].body.google_user, {
+    sha256_email_address: [sha('jan.novak@example.com')],
+    sha256_phone_number: [sha('+421903123456')],
+  });
+  const gmail = await fire('purchase', '', '&email=Jan.Novak@Gmail.com');
+  assert.deepEqual(gmail.sent[0].body.google_user.sha256_email_address, [sha('jannovak@gmail.com')], 'Gmail ignores dots');
+  await setConsent('cookiescript');
+  try {
+    const statsOnly = await fireCs('purchase', 'performance');
+    assert.equal(statsOnly.sent[0].body.google_user, null);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('GA4 user_id: the customer account, never a guest', async () => {
+  const guest = await fire('purchase');
+  assert.equal(guest.sent[0].body.account_id, null);
+  const customer = await fire('purchase', '', '&as_user=1');
+  assert.equal(customer.sent[0].body.account_id, sha(`nwr-account|${BASE}/|${ids.user}`));
+  assert.notEqual(customer.sent[0].body.user_data.external_id, customer.sent[0].body.account_id);
+});
+
+test('checkout and payment carry the cart as items, payment its method', async () => {
+  const checkout = await fire('checkout');
+  const items = checkout.sent[0].body.custom_data.contents;
+  assert.deepEqual(items.map((i) => i.item_name), ['Detská osuška', 'Deka']);
+  const pay = await fire('payment_info');
+  assert.equal(pay.sent[0].body.custom_data.contents.length, 2);
+  assert.ok('payment_type' in pay.sent[0].body.custom_data);
+});
+
 test('Purchase tells Meta whether the buyer is new or returning', async () => {
   const email = `Novy.${Date.now()}@Example.com`;
   const segment = async (extra) => (await fire('purchase', '', extra)).sent[0].body.custom_data.customer_segmentation;
@@ -304,6 +353,46 @@ test('when the thank-you page did load, the payment confirmation adds nothing', 
   assert.equal(purchase.consent, 'marketing');
 });
 
+test('back on the thank-you page before the payment was confirmed: reported a minute after it is', async () => {
+  const { sent, purchase } = await fire('unpaid_return_then_paid', '_fbp:fb.1.1700000000000.1234567890');
+  assert.equal(purchase.scheduled, true);
+  assert.ok(purchase.delay <= 60 && purchase.delay > 0, `not half an hour (${purchase.delay} s)`);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.event_name, 'Purchase');
+  assert.equal(sent[0].body.browserless, true, 'the page loaded unpaid and reported nothing');
+});
+
+test('a failed or unpaid order is not a purchase, however often its thank-you page loads', async () => {
+  for (const status of ['failed', 'pending', 'cancelled']) {
+    const { sent, purchase } = await fire('purchase', '', `&status=${status}`);
+    assert.equal(sent.length, 0, status);
+    assert.equal(purchase.sent, false, status);
+    assert.equal(purchase.consent, '', `${status}: nothing decided, a later payment still counts`);
+  }
+});
+
+test('cash on delivery and bank transfer count when placed', async () => {
+  const { sent } = await fire('purchase', '', '&status=on-hold');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.event_name, 'Purchase');
+});
+
+test('a counted order cancelled later is taken back in GA4, once', async () => {
+  const { sent, purchase } = await fire('cancel_after_purchase');
+  assert.equal(sent.length, 1);
+  const b = sent[0].body;
+  assert.equal(b.event_name, 'Refund');
+  assert.equal(b.event_id, `cancel-${purchase.order}`);
+  assert.equal(b.custom_data.order_id, purchase.order);
+  assert.ok(b.custom_data.value > 0);
+  assert.equal(b.custom_data.contents, undefined, 'the whole order');
+  assert.equal(b.browserless, true);
+  const unpaid = await fire('cancel_unpaid');
+  assert.equal(unpaid.sent.length, 0, 'never counted, nothing to take back');
+  const both = await fire('cancel_after_purchase', '', '&refund_after=1');
+  assert.deepEqual(both.sent.map((c) => c.body.event_id), [`cancel-${both.purchase.order}`], 'a refund after the cancellation takes nothing back twice');
+});
+
 test('a buyer without consent at checkout is not reported after payment either', async () => {
   await setConsent('cookiescript');
   try {
@@ -378,37 +467,60 @@ test('FAZ: without FAZ itself nobody counts as consenting', async () => {
 
 // ------------------------------------------------------------- Google tag
 
-test('the Google tag is only printed when set, configuration only, consent default first', async () => {
-  assert.doesNotMatch(await html('/'), /googletagmanager\.com\/gtag/);
+test('the Google tag: the page only names it, before px.js, under a denied default', async () => {
+  assert.doesNotMatch(await html('/'), /googletagmanager\.com\/gtag|nwrGtag/);
   await json('/nwr-test/set.php?consent=faz&ga4=G-TEST1234');
   try {
     const page = await html('/');
-    assert.match(page, /<script async src="https:\/\/www\.googletagmanager\.com\/gtag\/js\?id=G-TEST1234"><\/script>/);
-    const inlineTag = page.match(/<script>(window\.dataLayer=[^<]*)<\/script>/)[1];
-    assert.ok(inlineTag.indexOf("gtag('consent','default'") < inlineTag.indexOf("gtag('config'"), 'denied default before config');
-    assert.match(inlineTag, /analytics_storage:'denied'/);
-    assert.match(inlineTag, /gtag\('config',"G-TEST1234"\)/);
+    assert.doesNotMatch(page, /googletagmanager\.com\/gtag/, 'nothing loads from Google before consent');
+    const config = page.match(/<script>(window\.nwrConsent=[^<]*)<\/script>/)[1];
+    assert.match(config, /window\.nwrGtag="G-TEST1234"/);
+    assert.match(config, /gtag\('consent','default',\{[^}]*analytics_storage:'denied'/);
+    assert.doesNotMatch(config, /gtag\('config'/, 'config comes from px.js, after consent');
+    assert.ok(page.indexOf('nwrGtag') < page.indexOf('/px.js'), 'there before px.js can run');
     assert.doesNotMatch(page, /gtag\('event'/, 'events come from the gateway');
-    assert.ok(page.indexOf('gtag/js?id=G-TEST1234') > page.indexOf('/px.js'), 'after the head scripts');
 
-    // The safety default only applies when nothing set one: run it against a
-    // dataLayer that already holds the consent tool's default.
-    const run = new Function('window', 'dataLayer', `var w=window; ${inlineTag.replace('window.dataLayer=window.dataLayer||[];', '')} return dataLayer;`);
-    const preset = [['consent', 'default', { analytics_storage: 'denied' }]];
-    const after = run({}, preset);
+    // The safety default only applies when the consent tool has not set one.
+    const stub = config.slice(config.indexOf('window.dataLayer='));
+    const run = new Function('window', 'dataLayer', `${stub.replace('window.dataLayer=window.dataLayer||[];', '')} return dataLayer;`);
+    const after = run({}, [['consent', 'default', { analytics_storage: 'denied' }]]);
     assert.equal(after.filter((a) => a[0] === 'consent').length, 1, 'the tool\'s own default is kept, not duplicated');
   } finally {
     await setConsent('none');
   }
 });
 
-test('with FAZ but its Google Consent Mode off, the Google tag is not printed', async () => {
-  await json('/nwr-test/set.php?consent=faz&ga4=G-TEST1234&gcm=0');
+test('the Google tag without px.js: only on a site that does not ask for consent', async () => {
+  await json('/nwr-test/set.php?consent=faz&ga4=G-TEST1234&loader=0');
   try {
-    assert.doesNotMatch(await html('/'), /googletagmanager\.com\/gtag/);
+    assert.doesNotMatch(await html('/'), /googletagmanager\.com\/gtag/, 'nothing could wait for consent');
   } finally {
     await setConsent('none');
   }
+  await json('/nwr-test/set.php?consent=none&ga4=G-TEST1234&loader=0');
+  try {
+    const page = await html('/');
+    assert.match(page, /<script async src="https:\/\/www\.googletagmanager\.com\/gtag\/js\?id=G-TEST1234"><\/script>/);
+    assert.match(page, /gtag\('config',"G-TEST1234"\)/);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('refunds give GA4 back item revenue only: shipping alone is none', async () => {
+  const { sent } = await fire('refund_shipping');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].body.custom_data.value, 3.9);
+  assert.equal(sent[0].body.custom_data.value_net, 0);
+});
+
+test('a cancellation after a partial refund takes back only the rest of the item revenue', async () => {
+  const { sent, purchase } = await fire('refund_then_cancel');
+  const [refund, cancel] = sent.map((c) => c.body.custom_data);
+  assert.equal(sent.length, 2);
+  assert.equal(refund.value_net, 24.9);
+  assert.equal(cancel.value_net, 87.8 - 24.9, 'together exactly the purchase\'s item revenue');
+  assert.equal(Math.round((refund.value + cancel.value) * 100) / 100, purchase.total);
 });
 
 // ------------------------------------------------------------ cookie keeper
@@ -736,9 +848,10 @@ test('a gateway outage pauses sending, and the purchase is retried from the orde
   assert.equal(purchase.status.failing, true);
   assert.match(purchase.status.error, /timed out/);
   assert.match(purchase.notes.join(' '), /skúsi sa znova o 2 min/);
-  assert.equal(sent.length, 1, 'the retry delivered it');
-  assert.equal(sent[0].body.event_id, `ord-${purchase.order}`);
-  assert.equal(sent[0].signature_valid, true);
+  assert.equal(purchase.queued, 1, 'the AddToCart that met the outage waits in Action Scheduler');
+  assert.deepEqual(sent.map((c) => c.body.event_name).sort(), ['AddToCart', 'Purchase'], 'the retries delivered both');
+  assert.equal(sent.find((c) => c.body.event_name === 'Purchase').body.event_id, `ord-${purchase.order}`);
+  assert.ok(sent.every((c) => c.signature_valid), 'signed afresh, so the gateway takes them');
   assert.equal(purchase.sent_after, true);
 });
 

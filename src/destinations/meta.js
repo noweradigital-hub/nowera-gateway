@@ -17,6 +17,24 @@ const CUSTOMER_SEGMENTS = new Set([
   'customer_in_loyalty_program',
 ]);
 
+/**
+ * One `contents` entry as Meta defines it. The site sends richer, GA4-shaped
+ * items; Meta gets their names under its own keys and nothing it does not know.
+ */
+function metaContent(c = {}) {
+  const out = { id: c.id ?? c.item_id, quantity: c.quantity ?? 1 };
+  const price = c.item_price ?? c.price;
+  if (price !== undefined && price !== null) out.item_price = Number(price);
+  const title = c.title ?? c.item_name;
+  if (title) out.title = String(title);
+  const brand = c.brand ?? c.item_brand;
+  if (brand) out.brand = String(brand);
+  const category = c.category ?? c.item_category;
+  if (category) out.category = String(category);
+  if (c.delivery_category) out.delivery_category = c.delivery_category;
+  return out;
+}
+
 function buildCustomData(props = {}) {
   const out = {};
   const copy = [
@@ -30,6 +48,7 @@ function buildCustomData(props = {}) {
     }
   }
   if (out.value !== undefined) out.value = Number(out.value);
+  if (Array.isArray(out.contents)) out.contents = out.contents.map(metaContent);
   // An unknown value would make Meta reject the whole event.
   if (out.customer_segmentation !== undefined && !CUSTOMER_SEGMENTS.has(out.customer_segmentation)) {
     delete out.customer_segmentation;

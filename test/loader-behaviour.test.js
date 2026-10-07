@@ -814,3 +814,69 @@ test('a page without a Google tag does not wait for _ga', () => {
   f.start();
   assert.equal(b.posts.length, 1);
 });
+
+// ------------------------------------------------------------ the Google tag
+
+const commands = (dl) => dl.map((a) => Array.from(a)).map((a) => (a[0] === 'js' ? ['js'] : a));
+
+test('Google tag: nothing reaches Google before statistics consent', () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  b.window.dataLayer = [];
+  b.window.nwrGtag = 'G-TEST1234';
+  const f = faz(b);
+  b.run();
+  f.start();
+  assert.deepEqual(commands(b.window.dataLayer), [], 'no config, no gtag.js');
+});
+
+test('Google tag: statistics consent starts it, consent first, then config', () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  b.window.dataLayer = [];
+  b.window.nwrGtag = 'G-TEST1234';
+  const appended = [];
+  b.document.createElement = (tag) => ({ tag });
+  b.document.head = { appendChild: (el) => appended.push(el) };
+  const f = faz(b);
+  b.run();
+  f.start();
+  f.choose(['analytics']);
+  assert.deepEqual(commands(b.window.dataLayer), [
+    ['consent', 'update', { analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied' }],
+    ['js'],
+    ['config', 'G-TEST1234'],
+  ]);
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].src, 'https://www.googletagmanager.com/gtag/js?id=G-TEST1234');
+  assert.equal(appended[0].async, true);
+
+  f.choose(['analytics', 'marketing']);
+  assert.equal(appended.length, 1, 'loaded once');
+  assert.deepEqual(commands(b.window.dataLayer).at(-1),
+    ['consent', 'update', { analytics_storage: 'granted', ad_storage: 'granted', ad_user_data: 'granted', ad_personalization: 'granted' }],
+    'a later choice reaches the running tag');
+});
+
+test('Google tag: a site without the plugin field gets no Google tag from px.js', () => {
+  const b = browser({ consent: { mode: 'faz' } });
+  b.window.dataLayer = [];
+  const f = faz(b, { decided: true, accepted: ['analytics', 'marketing'] });
+  b.run();
+  f.start();
+  assert.deepEqual(commands(b.window.dataLayer), []);
+});
+
+test('the pixel gets Meta fields only, the gateway gets everything', () => {
+  const b = browser({});
+  b.run();
+  b.window.nwr('track', 'Purchase', {
+    value: 61.5, value_net: 45.85, tax: 11.75, shipping: 3.9, currency: 'EUR', order_id: 9,
+    contents: [{ id: '501', item_name: 'Kidvak', quantity: 1, item_price: 56.4, price_net: 45.85, item_brand: 'Kidvak', item_category: 'Nábytok', item_variant: 'M' }],
+  }, { eventID: 'ord-9' });
+  const call = tracked(b.fbq).find((c) => c[1] === 'Purchase');
+  assert.deepEqual(call[2], {
+    value: 61.5, currency: 'EUR', order_id: 9,
+    contents: [{ id: '501', quantity: 1, item_price: 56.4, title: 'Kidvak', brand: 'Kidvak', category: 'Nábytok' }],
+  });
+  const post = b.posts.find((p) => p.body.event_name === 'Purchase');
+  assert.equal(post.body.custom_data.value_net, 45.85);
+});

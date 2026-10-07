@@ -379,3 +379,104 @@ test('TOTP matches the RFC 6238 test vector and refuses a replayed code', async 
   assert.equal(verifyTotp(secret, '000000', { now }) === null || totpCode(secret, stepAt(now)) === '000000', true);
   assert.match(otpauthUrl(secret, 'a@b.sk'), /^otpauth:\/\/totp\/Nowera%20Gateway:a%40b\.sk\?secret=GEZD/);
 });
+
+// ------------------------------------------------- the richer ecommerce contract
+
+const richPurchase = () => normalizeEvent({
+  event_name: 'Purchase', event_id: 'ord-77', event_time: Math.floor(Date.now() / 1000) - 60,
+  event_source_url: 'https://shop.sk/pokladna/order-received/77/',
+  referrer_url: 'https://shop.sk/pokladna/',
+  consent: { marketing: true, statistics: true },
+  account_id: 'A'.repeat(64),
+  google_user: { sha256_email_address: ['b'.repeat(64), 'not-a-hash'], sha256_phone_number: 'c'.repeat(64), name: 'Ján' },
+  user_data: { em: 'jan@example.com', external_id: 'visitor-1' },
+  custom_data: {
+    value: 61.5, currency: 'EUR', order_id: 77, tax: 11.5, shipping: 3.9, coupon: 'JESEN10',
+    contents: [{
+      id: '501', item_name: 'Rastúci Kidvak', quantity: 1, item_price: 57.6, discount: 6.4,
+      item_category: 'Nábytok', item_category2: 'Stoličky', item_brand: 'Kidvak', item_variant: 'Kapučínová', index: 0,
+    }],
+  },
+}, {});
+
+test('ga4 purchase carries tax, shipping, coupon, referrer and the full item', () => {
+  const body = ga4Payload(richPurchase(), {});
+  const p = body.events[0].params;
+  assert.equal(p.tax, 11.5);
+  assert.equal(p.shipping, 3.9);
+  assert.equal(p.coupon, 'JESEN10');
+  assert.equal(p.page_referrer, 'https://shop.sk/pokladna/');
+  assert.deepEqual(p.items, [{
+    item_id: '501', item_name: 'Rastúci Kidvak', quantity: 1, price: 57.6, discount: 6.4,
+    item_category: 'Nábytok', item_category2: 'Stoličky', item_brand: 'Kidvak', item_variant: 'Kapučínová', index: 0,
+  }]);
+});
+
+test('ga4 user_id is the customer account only, never the anonymous visitor', () => {
+  assert.equal(ga4Payload(richPurchase(), {}).user_id, 'a'.repeat(64));
+  const guest = normalizeEvent({ event_name: 'Purchase', user_data: { external_id: 'visitor-1' } }, {});
+  assert.equal(ga4Payload(guest, {}).user_id, undefined);
+});
+
+test('ga4 user_data: only Google-hashed values, and only with marketing consent', () => {
+  assert.deepEqual(ga4Payload(richPurchase(), {}).user_data, {
+    sha256_email_address: ['b'.repeat(64)], sha256_phone_number: ['c'.repeat(64)],
+  });
+  const noAds = richPurchase();
+  noAds.consent = { marketing: false, statistics: true };
+  assert.equal(ga4Payload(noAds, {}).user_data, undefined);
+});
+
+test('ga4 without _ga: one stable client id per visitor, not Meta\'s browser id', () => {
+  const make = (id) => normalizeEvent({ event_name: 'PageView', event_id: id, user_data: { external_id: 'visitor-42' } }, { fbp: 'fb.1.1.2' });
+  const a = ga4Payload(make('e1'), {}).client_id;
+  const b = ga4Payload(make('e2'), {}).client_id;
+  assert.equal(a, b);
+  assert.match(a, /^\d+\.\d+$/);
+  assert.notEqual(a, 'fb.1.1.2');
+});
+
+test('ga4: an event older than 72 hours is reported as dropped, not sent', async () => {
+  const { send } = await import('../src/destinations/ga4.js');
+  const old = normalizeEvent({ event_name: 'Purchase', event_time: Math.floor(Date.now() / 1000) - 73 * 3600 }, {});
+  const res = await send(old, { measurement_id: 'G-1', api_secret: 's' });
+  assert.equal(res.ok, false);
+  assert.equal(res.retryable, false);
+  assert.match(res.error, /72 h/);
+});
+
+test('meta gets items under its own keys and nothing it does not know', () => {
+  const body = metaPayload(richPurchase(), { dataset_id: '1', access_token: 't' });
+  assert.deepEqual(body.data[0].custom_data.contents, [
+    { id: '501', quantity: 1, item_price: 57.6, title: 'Rastúci Kidvak', brand: 'Kidvak', category: 'Nábytok' },
+  ]);
+  assert.equal(body.data[0].custom_data.tax, undefined);
+});
+
+test('the order key never leaves with the thank-you page address', () => {
+  const e = normalizeEvent({ event_name: 'Purchase', event_source_url: 'https://shop.sk/pokladna/order-received/77/?key=wc_order_AbC123&utm_source=x' }, {});
+  assert.equal(e.event_source_url, 'https://shop.sk/pokladna/order-received/77/?utm_source=x');
+  const only = normalizeEvent({ event_name: 'Purchase', event_source_url: 'https://shop.sk/order-received/77/?key=wc_order_AbC123' }, {});
+  assert.equal(only.event_source_url, 'https://shop.sk/order-received/77/');
+  const other = normalizeEvent({ event_name: 'PageView', event_source_url: 'https://shop.sk/?key=value' }, {});
+  assert.equal(other.event_source_url, 'https://shop.sk/?key=value', 'other keys are left alone');
+});
+
+test('ga4 counts revenue without VAT when the site sends it; meta keeps the full total', () => {
+  const e = normalizeEvent({
+    event_name: 'Purchase', event_id: 'ord-9',
+    custom_data: {
+      value: 61.5, value_net: 45.85, tax: 11.75, shipping: 3.9, currency: 'EUR', order_id: 9,
+      contents: [{ id: '501', item_name: 'Kidvak', quantity: 1, item_price: 56.4, price_net: 45.85 }],
+    },
+  }, {});
+  const g = ga4Payload(e, {}).events[0].params;
+  assert.equal(g.value, 45.85);
+  assert.equal(g.items[0].price, 45.85);
+  assert.equal(g.items[0].price_net, undefined, 'GA4 gets it as price');
+  const m = metaPayload(e, { dataset_id: '1', access_token: 't' }).data[0].custom_data;
+  assert.equal(m.value, 61.5);
+  assert.equal(m.value_net, undefined);
+  assert.equal(m.contents[0].item_price, 56.4);
+  assert.equal(m.contents[0].price_net, undefined);
+});

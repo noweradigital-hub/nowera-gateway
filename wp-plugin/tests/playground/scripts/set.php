@@ -6,6 +6,7 @@ nwr_settings( array(
 	'consent_mode'   => $mode,
 	'consent_prefix' => 'custom' === $mode ? 'my_' : 'cmplz_',
 	'ga4_tag'        => sanitize_text_field( wp_unslash( $_GET['ga4'] ?? '' ) ),
+	'load_script'    => '0' === ( $_GET['loader'] ?? '1' ) ? 0 : 1,
 ) );
 // FAZ itself is not installed here; a mu-plugin from the blueprint loads a
 // stand-in while this option is on. (Files written at runtime would only

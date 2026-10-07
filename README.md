@@ -39,6 +39,25 @@ and link the Ads account. The Google Ads API is only needed for offline
 conversion uploads (CRM data with a GCLID), which is a different problem with a
 different approval process. Configure the `ga4` destination and import in Ads.
 
+## GA4: what the browser keeps
+
+Measurement Protocol events only join a visitor's session (and the Ads click
+that started it) through the Google tag's own `_ga` and `_ga_<stream>` cookies,
+so a site keeps exactly one Google tag, configuration only:
+
+- Fill **Google tag (GA4)** in the plugin settings and remove every other GA4
+  snippet (header code, GTM GA4 tags, Site Kit). With a consent tool, the page
+  only names the tag and sets a denied default; `px.js` loads it once the visitor
+  allows statistics, so nothing goes to Google before that.
+- The `ga4` destination's scope is **Všetky okrem page_view**: the tag counts page
+  views and sessions, the gateway sends the ecommerce events. Use **Len udalosti
+  bez prehliadača** when another integration (GTM) already sends ecommerce.
+- `px.js` holds GA4-bound events for up to two seconds until the tag has written
+  its cookies, so a new visitor's first events land in their session.
+- Purchases carry hashed e-mail and phone (`user_data`) with marketing consent;
+  GA4 uses them only with *user-provided data collection* switched on in the
+  property. `user_id` is sent for customer accounts only.
+
 ## Layout
 
 | Path | Purpose |
@@ -112,9 +131,12 @@ by label using the existing `mytlschallenge` ACME resolver.
    `docker/compose.yml`), the host is routed as soon as its DNS points here, and a
    direct one gets its certificate. Until then: append `Host(\`t.klient.sk\`)`
    to the `nwrgw-collector` router rule and redeploy.
-4. **Destinations:** add Meta (dataset ID + CAPI token) and optionally GA4.
+4. **Destinations:** add Meta (dataset ID + CAPI token) and optionally GA4
+   (measurement ID + Measurement Protocol API secret).
 5. **Site:** install `wp-plugin/nowera-capi` and paste the pairing code (older
-   plugins: host and key separately). The Inštalácia tab checks the rest.
+   plugins: host and key separately), choose the consent tool (FAZ Cookie Manager
+   is the standard) and, for GA4, the Google tag ID. The Inštalácia tab checks
+   the rest.
 6. Turn on Meta test mode, press **Poslať testovací event**, confirm it in Events
    Manager under Test Events.
 

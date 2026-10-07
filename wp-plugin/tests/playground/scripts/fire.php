@@ -73,6 +73,13 @@ if ( ! did_action( 'woocommerce_load_cart_from_session' ) && function_exists( 'w
 	wc_load_cart();
 }
 
+/** Drops every queued event retry, so a test counts only its own. */
+function nwr_cancel_retries(): void {
+	foreach ( as_get_scheduled_actions( array( 'hook' => 'nowera_capi_retry_event', 'status' => ActionScheduler_Store::STATUS_PENDING, 'per_page' => -1 ), 'ids' ) as $id ) {
+		ActionScheduler::store()->cancel_action( $id );
+	}
+}
+
 function nwr_order( array $ids, string $email = 'Jan.Novak@Example.com' ): WC_Order {
 	$order = wc_create_order();
 	$order->add_product( wc_get_product( $ids['simple'] ), 2 );
@@ -115,15 +122,32 @@ switch ( $event ) {
 		break;
 	case 'refund_partial':
 	case 'refund_full':
+	case 'refund_shipping':
+	case 'refund_then_cancel':
 		// The buyer checks out (consent recorded with the order), pays, then the shop refunds.
 		$order = nwr_order( $ids );
+		$ship  = new WC_Order_Item_Shipping();
+		$ship->set_method_title( 'Kuriér' );
+		$ship->set_total( '3.90' );
+		$order->add_item( $ship );
+		$order->calculate_totals();
+		$order->save();
 		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
 		$order = wc_get_order( $order->get_id() );
 		$order->set_status( 'processing' );
 		$order->save();
 		nwr_flush();
 		delete_option( 'nwr_test_captured' );
-		if ( 'refund_partial' === $event ) {
+		if ( 'refund_shipping' === $event ) {
+			$shipping = $order->get_items( 'shipping' );
+			$sid      = array_key_first( $shipping );
+			wc_create_refund( array(
+				'order_id'   => $order->get_id(),
+				'amount'     => 3.9,
+				'reason'     => 'test',
+				'line_items' => array( $sid => array( 'qty' => 0, 'refund_total' => 3.9 ) ),
+			) );
+		} elseif ( 'refund_partial' === $event || 'refund_then_cancel' === $event ) {
 			$items = $order->get_items();
 			$first = array_key_first( $items );
 			$line  = $items[ $first ];
@@ -134,6 +158,12 @@ switch ( $event ) {
 				'reason'     => 'test',
 				'line_items' => array( $first => array( 'qty' => 1, 'refund_total' => $unit ) ),
 			) );
+			if ( 'refund_then_cancel' === $event ) {
+				$order = wc_get_order( $order->get_id() );
+				$order->update_meta_data( '_nowera_capi_purchase_sent', time() ); // it had been counted
+				$order->save();
+				$order->update_status( 'cancelled' );
+			}
 		} else {
 			$order->update_status( 'refunded' );
 		}
@@ -168,6 +198,10 @@ switch ( $event ) {
 		// The gateway times out while the thank-you page reports the purchase.
 		$order = nwr_order( $ids );
 		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		$order = wc_get_order( $order->get_id() );
+		$order->set_status( 'processing' );
+		$order->save();
+		nwr_cancel_retries();
 		nwr_flush();
 		delete_option( 'nwr_test_captured' );
 		delete_transient( 'nowera_capi_pause' );
@@ -186,11 +220,16 @@ switch ( $event ) {
 			'retry'     => (int) $after_fail->get_meta( '_nowera_capi_purchase_retry' ),
 			'scheduled' => (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' ),
 			'status'    => get_option( 'nowera_capi_status' ),
+			'queued'    => count( as_get_scheduled_actions( array( 'hook' => 'nowera_capi_retry_event', 'status' => ActionScheduler_Store::STATUS_PENDING ), 'ids' ) ),
 		);
-		// The gateway is back; the scheduled retry runs.
+		// The gateway is back; the scheduled retries run.
 		delete_option( 'nwr_test_fail' );
 		delete_transient( 'nowera_capi_pause' );
 		do_action( 'nowera_capi_purchase_fallback', $order->get_id() );
+		foreach ( as_get_scheduled_actions( array( 'hook' => 'nowera_capi_retry_event', 'status' => ActionScheduler_Store::STATUS_PENDING ) ) as $action ) {
+			do_action_ref_array( 'nowera_capi_retry_event', $action->get_args() );
+		}
+		nwr_cancel_retries();
 		nwr_flush();
 		$fresh    = wc_get_order( $order->get_id() );
 		$purchase = array_merge( $state, array(
@@ -235,6 +274,14 @@ switch ( $event ) {
 			$prior->save();
 		}
 		$order = ! empty( $_GET['reuse'] ) ? wc_get_order( absint( $_GET['reuse'] ) ) : nwr_order( $ids, $email );
+		if ( empty( $_GET['reuse'] ) ) {
+			// Paid by default; &status=failed|pending|on-hold for the other cases.
+			$order->set_status( sanitize_key( $_GET['status'] ?? 'processing' ) );
+			if ( ! empty( $_GET['as_user'] ) ) {
+				$order->set_customer_id( $ids['user'] );
+			}
+			$order->save();
+		}
 		remove_all_actions( 'wp_footer' ); // keep only the browser leg the thank-you hook queues
 		ob_start();
 		do_action( 'woocommerce_thankyou', $order->get_id() );
@@ -256,13 +303,22 @@ switch ( $event ) {
 		break;
 	case 'paid_no_return':
 	case 'paid_with_return':
+	case 'unpaid_return_then_paid':
 		$order = nwr_order( $ids );
 		$order->set_customer_ip_address( '203.0.113.9' );
 		$order->set_customer_user_agent( 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) TestSafari' );
 		$order->save();
 		// The buyer submits the checkout: this request still carries their cookies.
 		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		if ( 'unpaid_return_then_paid' === $event ) {
+			// Back on the thank-you page before the payment gateway confirmed.
+			ob_start();
+			do_action( 'woocommerce_thankyou', $order->get_id() );
+			ob_end_clean();
+		}
 		if ( 'paid_with_return' === $event ) {
+			// The usual order: the gateway confirms, then the buyer lands on the thank-you page.
+			wc_get_order( $order->get_id() )->payment_complete( 'TX-TEST' );
 			ob_start();
 			do_action( 'woocommerce_thankyou', $order->get_id() );
 			ob_end_clean();
@@ -272,13 +328,18 @@ switch ( $event ) {
 		nwr_flush();
 		delete_option( 'nwr_test_captured' );
 		$order = wc_get_order( $order->get_id() );
-		$order->payment_complete( 'TX-TEST' );
-		$scheduled = (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		if ( 'paid_with_return' !== $event ) {
+			$order->payment_complete( 'TX-TEST' );
+		}
+		$next      = as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		$scheduled = (bool) $next;
+		$delay     = is_int( $next ) ? $next - time() : null;
 		do_action( 'nowera_capi_purchase_fallback', $order->get_id() ); // now instead of in 30 minutes
 		$fresh    = wc_get_order( $order->get_id() );
 		$purchase = array(
 			'order'     => $fresh->get_id(),
 			'scheduled' => $scheduled,
+			'delay'     => $delay,
 			'consent'   => $fresh->get_meta( '_nowera_capi_purchase_consent' ),
 			'sent'      => (bool) $fresh->get_meta( '_nowera_capi_purchase_sent' ),
 			'notes'     => array_map(
@@ -286,6 +347,30 @@ switch ( $event ) {
 				wc_get_order_notes( array( 'order_id' => $fresh->get_id(), 'limit' => 5 ) )
 			),
 		);
+		break;
+	case 'cancel_after_purchase':
+	case 'cancel_unpaid':
+		$order = nwr_order( $ids );
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		$order = wc_get_order( $order->get_id() );
+		if ( 'cancel_after_purchase' === $event ) {
+			$order->set_status( 'on-hold' ); // a bank transfer, counted when placed
+			$order->save();
+			ob_start();
+			do_action( 'woocommerce_thankyou', $order->get_id() );
+			ob_end_clean();
+		}
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		$order = wc_get_order( $order->get_id() );
+		$order->update_status( 'cancelled' );
+		$order = wc_get_order( $order->get_id() );
+		$order->update_status( 'cancelled' ); // saved again: still one refund
+		if ( ! empty( $_GET['refund_after'] ) ) {
+			// The shop also records a refund in WooCommerce afterwards.
+			wc_create_refund( array( 'order_id' => $order->get_id(), 'amount' => $order->get_total(), 'reason' => 'test' ) );
+		}
+		$purchase = array( 'order' => $order->get_id() );
 		break;
 	default:
 		http_response_code( 400 );

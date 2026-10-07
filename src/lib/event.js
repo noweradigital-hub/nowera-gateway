@@ -48,6 +48,32 @@ function pickConsent(raw) {
   return Object.keys(out).length ? out : null;
 }
 
+const HEX64 = /^[a-f0-9]{64}$/;
+
+/** A signed-in customer's account, as the site hashes it: GA4's user_id. Never contact data. */
+function pickAccount(raw) {
+  return typeof raw === 'string' && HEX64.test(raw.toLowerCase()) ? raw.toLowerCase() : null;
+}
+
+/**
+ * Contact data for Google (GA4 user-provided data, Google Ads enhanced
+ * conversions), already hashed by the site under Google's own normalisation,
+ * which differs from Meta's (E.164 phone with "+", Gmail dots removed).
+ * Only SHA-256 digests are kept.
+ */
+function pickGoogleUser(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  for (const key of ['sha256_email_address', 'sha256_phone_number']) {
+    const list = (Array.isArray(raw[key]) ? raw[key] : [raw[key]])
+      .filter((v) => typeof v === 'string' && HEX64.test(v.toLowerCase()))
+      .map((v) => v.toLowerCase())
+      .slice(0, 3);
+    if (list.length) out[key] = list;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 /**
  * The referrer of the page the event happened on, cut to scheme, host and path:
  * a same-site referrer can carry order keys or search terms in its query string.
@@ -78,6 +104,12 @@ function pickUrl(raw) {
     return null;
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  // WooCommerce's thank-you address carries the order key, which opens the order.
+  if (/^wc_order_/.test(url.searchParams.get('key') || '')) {
+    url.searchParams.delete('key');
+    const clean = url.toString().replace(/\?$/, '');
+    return clean.length <= MAX_URL ? clean : `${url.origin}${url.pathname}`.slice(0, MAX_URL);
+  }
   return value.length <= MAX_URL ? value : `${url.origin}${url.pathname}`.slice(0, MAX_URL);
 }
 
@@ -118,6 +150,8 @@ export function normalizeEvent(input, context) {
     action_source: input.action_source || context.actionSource || 'website',
     user: pickUser(input.user_data || input.user || {}),
     consent: pickConsent(input.consent),
+    account_id: pickAccount(input.account_id),
+    google_user: pickGoogleUser(input.google_user),
     properties: input.custom_data || input.properties || {},
     context: {
       ip: context.ip,
