@@ -145,3 +145,15 @@ test('backups never show the stored storage secret, and the key only after a pas
   assert.match(html, /stiahnut\?key=gw%2F2026-09-28T033000Z\.nwrb/);
   assert.match(recoveryKeyPage('nwrk1_abc'), /value="nwrk1_abc"/);
 });
+
+test('the completeness card lists days and missing orders, escaped', async () => {
+  const { completenessCard } = await import('../src/views/tenant.js');
+  const html = completenessCard({
+    days: [{ day: '2026-10-06', orders: 4, eligible: 3, consented: 2, received: 1, ok: 1, pending: 0, missing: 1, excluded: 2 }],
+    missing: [{ order_id: '12<b>', day: '2026-10-06', status: 'processing', reason: 'neprišiel do signals' }],
+  }, null);
+  assert.match(html, /Úplnosť nákupov/);
+  assert.match(html, /plugin zatiaľ zoznam objednávok neposlal/);
+  assert.match(html, /neprišiel do signals/);
+  assert.ok(!html.includes('12<b>'), 'escaped');
+});

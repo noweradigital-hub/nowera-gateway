@@ -880,3 +880,14 @@ test('the pixel gets Meta fields only, the gateway gets everything', () => {
   const post = b.posts.find((p) => p.body.event_name === 'Purchase');
   assert.equal(post.body.custom_data.value_net, 45.85);
 });
+
+test('GA4-only funnel steps never reach the Meta pixel', () => {
+  const b = browser({});
+  b.run();
+  for (const name of ['ViewCart', 'RemoveFromCart', 'AddShippingInfo', 'SelectItem', 'Login', 'Refund']) {
+    b.window.nwr('track', name, { value: 1, currency: 'EUR' });
+  }
+  b.window.nwr('track', 'Lead', {});
+  assert.deepEqual(tracked(b.fbq).map((c) => c[1]), ['PageView', 'Lead']);
+  assert.ok(b.posts.some((p) => p.body.event_name === 'ViewCart'), 'the gateway still gets them for GA4');
+});

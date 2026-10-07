@@ -1,3 +1,4 @@
+import { parseSnapshot, saveSnapshot } from '../lib/order-audit.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { normalizeEvent } from '../lib/event.js';
@@ -117,10 +118,11 @@ export default async function collectRoutes(app, opts = {}) {
   const enqueue = opts.enqueue || defaultEnqueue;
   const browserLimit = createLimiter(opts.browserLimit || BROWSER_LIMIT);
   const stats = opts.stats || defaultStats;
+  const saveAudit = opts.saveSnapshot || saveSnapshot;
 
   // Keep the raw body around so the HMAC is computed over exactly what was sent.
   app.addHook('preParsing', async (req, _reply, payload) => {
-    if (req.routeOptions?.url !== '/s') return payload;
+    if (req.routeOptions?.url !== '/s' && req.routeOptions?.url !== '/r') return payload;
     const chunks = [];
     for await (const chunk of payload) chunks.push(chunk);
     const raw = Buffer.concat(chunks);
@@ -278,5 +280,25 @@ export default async function collectRoutes(app, opts = {}) {
     stats.recordReceived(tenant.id, event, 'server');
     const queued = await enqueue(tenant.id, event, tenant.destinations);
     return reply.send({ ok: true, event_id: event.event_id, queued });
+  });
+
+  /**
+   * The shop's order list for one day, signed like /s, so the dashboard can show
+   * which orders produced a delivered Purchase (see lib/order-audit.js).
+   */
+  app.post('/r', async (req, reply) => {
+    const tenant = await tenantByHost(req.headers.host);
+    if (!tenant) return reply.code(404).send({ error: 'unknown host' });
+    const refused = verifyServerRequest(tenant, req.rawBody || '', req.headers);
+    if (refused) return reply.code(401).send({ error: refused });
+    stats.notePlugin(tenant.id, req.headers['x-nwr-plugin']);
+    let snap;
+    try {
+      snap = parseSnapshot(req.body);
+    } catch (err) {
+      return reply.code(400).send({ error: err.message });
+    }
+    await saveAudit(tenant.id, snap);
+    return reply.send({ ok: true, day: snap.day, orders: snap.orders.length });
   });
 }

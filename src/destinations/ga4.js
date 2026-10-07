@@ -17,6 +17,13 @@ const EVENT_NAMES = {
   ViewCategory: 'view_item_list',
   CompleteRegistration: 'sign_up',
   Subscribe: 'subscribe',
+  ViewCart: 'view_cart',
+  RemoveFromCart: 'remove_from_cart',
+  AddShippingInfo: 'add_shipping_info',
+  SelectItem: 'select_item',
+  AddToWishlist: 'add_to_wishlist',
+  Login: 'login',
+  Refund: 'refund',
 };
 
 // GA4 item fields the site may send alongside Meta's id/quantity/item_price.
@@ -78,6 +85,9 @@ export function buildPayload(event, settings) {
   if (props.coupon) params.coupon = String(props.coupon);
   if (props.item_list_name) params.item_list_name = String(props.item_list_name);
   if (props.payment_type) params.payment_type = String(props.payment_type);
+  if (props.shipping_tier) params.shipping_tier = String(props.shipping_tier);
+  if (props.item_list_id) params.item_list_id = String(props.item_list_id);
+  if (props.method) params.method = String(props.method);
   if (event.event_source_url) params.page_location = event.event_source_url;
   if (event.referrer_url) params.page_referrer = event.referrer_url;
 

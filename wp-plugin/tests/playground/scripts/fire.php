@@ -372,6 +372,29 @@ switch ( $event ) {
 		}
 		$purchase = array( 'order' => $order->get_id() );
 		break;
+	case 'audit':
+		// Today's orders: one paid with consent, one failed, one by the admin.
+		$paid = nwr_order( $ids );
+		do_action( 'woocommerce_checkout_order_processed', $paid->get_id(), array(), $paid );
+		$paid = wc_get_order( $paid->get_id() );
+		$paid->set_status( 'processing' );
+		$paid->save();
+		ob_start();
+		do_action( 'woocommerce_thankyou', $paid->get_id() );
+		ob_end_clean();
+		$failed = nwr_order( $ids );
+		$failed->set_status( 'failed' );
+		$failed->save();
+		$admin = nwr_order( $ids );
+		$admin->set_created_via( 'admin' );
+		$admin->set_status( 'processing' );
+		$admin->save();
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		$days     = nowera_capi_send_audit( 1 );
+		$purchase = array( 'days' => $days, 'paid' => $paid->get_id(), 'failed' => $failed->get_id(), 'admin' => $admin->get_id(),
+			'scheduled' => (bool) as_has_scheduled_action( 'nowera_capi_audit', array(), 'nowera-capi' ) );
+		break;
 	default:
 		http_response_code( 400 );
 		nwr_out( array( 'error' => 'unknown event' ) );

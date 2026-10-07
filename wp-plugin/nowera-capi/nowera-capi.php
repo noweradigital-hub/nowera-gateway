@@ -1307,7 +1307,7 @@ function nowera_capi_gateway_paused(): bool {
 }
 
 /** POST one event body to the gateway, signed. Null when it arrived, otherwise why not. */
-function nowera_capi_deliver( string $body ): ?string {
+function nowera_capi_deliver( string $body, string $path = '/s' ): ?string {
 	$s = nowera_capi_settings();
 	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) ) {
 		return 'plugin nemá vyplnený collector alebo kľúč';
@@ -1317,7 +1317,7 @@ function nowera_capi_deliver( string $body ): ?string {
 	}
 	// The time is signed with the body, so a captured request cannot be sent again later.
 	$timestamp = (string) time();
-	$response  = wp_remote_post( 'https://' . $s['collector_host'] . '/s', array(
+	$response  = wp_remote_post( 'https://' . $s['collector_host'] . $path, array(
 		'timeout'     => 3,
 		'redirection' => 0,
 		'headers'     => array(
@@ -1520,6 +1520,91 @@ function nowera_capi_user_from_order( \WC_Order $order ): array {
 			: (string) nowera_capi_visitor_id(),
 		'account'     => $order->get_customer_id() ? (string) $order->get_customer_id() : '',
 	) );
+}
+
+/* -------------------------------------------------------------------------
+ * Order list for the completeness check
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Every six hours the orders of the last three days (created then, in the shop's
+ * time zone) go to the gateway, signed like the events: id, status, times, total
+ * and what this plugin did with each. No contact data. The gateway sets them
+ * against the Purchase events it received and delivered, so a shop can see that
+ * every paid order with consent arrived — and why the others did not count.
+ * Recent days are sent again because orders get paid, cancelled and refunded later.
+ */
+add_action( 'action_scheduler_init', function () {
+	$s = nowera_capi_settings();
+	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) || ! function_exists( 'as_has_scheduled_action' ) ) {
+		return;
+	}
+	if ( ! as_has_scheduled_action( 'nowera_capi_audit', array(), 'nowera-capi' ) ) {
+		as_schedule_recurring_action( time() + 10 * MINUTE_IN_SECONDS, 6 * HOUR_IN_SECONDS, 'nowera_capi_audit', array(), 'nowera-capi' );
+	}
+} );
+
+add_action( 'nowera_capi_audit', function () {
+	nowera_capi_send_audit();
+} );
+
+/** Sends the order list of the last `$days` days; returns how many days went through. */
+function nowera_capi_send_audit( int $days = 3 ): int {
+	$tz   = wp_timezone();
+	$sent = 0;
+	for ( $back = $days - 1; $back >= 0; $back-- ) {
+		$start = ( new \DateTimeImmutable( 'today', $tz ) )->modify( "-{$back} days" );
+		$end   = $start->modify( '+1 day' );
+		$lines = array();
+		$ids   = wc_get_orders( array(
+			'type'         => 'shop_order',
+			'limit'        => -1,
+			'return'       => 'ids',
+			'status'       => array_keys( wc_get_order_statuses() ),
+			'date_created' => $start->getTimestamp() . '...' . ( $end->getTimestamp() - 1 ),
+		) );
+		foreach ( $ids as $id ) {
+			$order = wc_get_order( $id );
+			if ( $order instanceof \WC_Order ) {
+				$lines[] = nowera_capi_audit_line( $order );
+			}
+		}
+		$pages = max( 1, (int) ceil( count( $lines ) / 500 ) );
+		$ok    = true;
+		for ( $page = 1; $page <= $pages && $ok; $page++ ) {
+			$body = wp_json_encode( array(
+				'day'      => $start->format( 'Y-m-d' ),
+				'timezone' => $tz->getName(),
+				'page'     => $page,
+				'pages'    => $pages,
+				'orders'   => array_slice( $lines, ( $page - 1 ) * 500, 500 ),
+			) );
+			$ok = null === nowera_capi_deliver( $body, '/r' );
+		}
+		$sent += $ok ? 1 : 0;
+	}
+	return $sent;
+}
+
+/** One order as the completeness check sees it. */
+function nowera_capi_audit_line( \WC_Order $order ): array {
+	$created = $order->get_date_created();
+	$paid    = $order->get_date_paid();
+	$consent = (string) $order->get_meta( '_nowera_capi_purchase_consent' );
+	return array(
+		'id'       => $order->get_id(),
+		'created'  => $created ? $created->getTimestamp() : null,
+		'paid'     => $paid ? $paid->getTimestamp() : null,
+		'status'   => $order->get_status(),
+		'total'    => (float) $order->get_total(),
+		'currency' => $order->get_currency(),
+		'ready'    => nowera_capi_purchase_ready( $order ),
+		'consent'  => in_array( $consent, array( 'marketing', 'statistics', 'none' ), true ) ? $consent : '',
+		'ctx'      => (bool) $order->get_meta( '_nowera_capi_ctx' ),
+		'sent'     => (bool) $order->get_meta( '_nowera_capi_purchase_sent' ),
+		'thankyou' => (bool) $order->get_meta( '_nowera_capi_thankyou' ),
+		'via'      => (string) $order->get_created_via(),
+	);
 }
 
 /* -------------------------------------------------------------------------

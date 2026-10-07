@@ -4,6 +4,7 @@ import { destinationStats } from './stats.js';
 import { runChecks } from './checks.js';
 import { open, seal } from './secrets.js';
 import { backupCondition } from './backup.js';
+import { auditRows, overdueSnapshots, summarise } from './order-audit.js';
 
 /**
  * Problems worth a message: the gateway checks every few minutes and sends each
@@ -17,6 +18,8 @@ export const RULES = {
   no_events: { title: 'Žiadne eventy', hint: 'Klient nič nepošle dlhšie, než je pri jeho návštevnosti bežné: kým by za to ticho bežne prišlo aspoň 5 eventov (podľa posledných 14 dní), najmenej 2 h, najviac 12 h; v Nastaveniach klienta sa dá prah zadať ručne. Hlási sa medzi 7:00 a 23:00.' },
   plugin_silent: { title: 'Plugin mlčí', hint: '24 hodín bez podpísaného eventu zo servera webu.' },
   site_down: { title: 'Collector nedostupný', hint: 'px.js sa nenačíta pri kontrole inštalácie (každých 15 minút).' },
+  missing_purchase: { title: 'Chýbajú nákupy', hint: 'Zaplatená objednávka so súhlasom nemá ani po 2 hodinách doručený Purchase (podľa zoznamu objednávok, ktorý posiela plugin od verzie 1.2).' },
+  audit_overdue: { title: 'Plugin neposiela objednávky', hint: 'Plugin 1.2 alebo novší neposlal zoznam objednávok 36 hodín — beží na webe WP-Cron / Action Scheduler?' },
   backup: { title: 'Záloha zlyhala', hint: '36 hodín bez úspešnej zálohy databázy (len keď sú zálohy nastavené).' },
 };
 
@@ -140,6 +143,7 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
   const out = [];
   const hour = bratislavaHour(now);
   const counts = await hourlyCounts(now).catch(() => new Map());
+  const overdue = new Set((await overdueSnapshots().catch(() => [])).map((r) => r.tenant_id));
 
   for (const t of tenants) {
     for (const d of dests.filter((x) => x.tenant_id === t.id && x.active)) {
@@ -169,6 +173,22 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
       }
     }
 
+    if (overdue.has(t.id)) {
+      out.push({ tenant_id: t.id, rule: 'audit_overdue', subject: '',
+        message: `Plugin ${t.plugin_version} neposlal zoznam objednávok 36 hodín. Bez neho sa nedá overiť, či prišli všetky nákupy.` });
+    }
+
+    const audit = await auditRows(t.id, 2).catch(() => []);
+    if (audit.length) {
+      const { missing } = summarise(audit, dests.filter((x) => x.tenant_id === t.id && x.active)
+        .map((x) => ({ kind: x.kind, scope: x.settings?.scope || 'all' })), now);
+      if (missing.length) {
+        const list = missing.slice(0, 5).map((m) => `#${m.order_id} (${m.reason})`).join(', ');
+        out.push({ tenant_id: t.id, rule: 'missing_purchase', subject: '',
+          message: `${missing.length} ${missing.length === 1 ? 'objednávka nemá' : 'objednávok nemá'} doručený Purchase: ${list}${missing.length > 5 ? ' …' : ''}` });
+      }
+    }
+
     if (t.plugin_version && t.plugin_seen_at && now - new Date(t.plugin_seen_at).getTime() > 24 * 3600_000) {
       out.push({ tenant_id: t.id, rule: 'plugin_silent', subject: '',
         message: `Plugin ${t.plugin_version} neposlal podpísaný event 24 hodín. Nevypol ho niekto, alebo nezmenil kľúč?` });
@@ -189,7 +209,8 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
 
 function payload(event, alert, tenant) {
   const base = `https://${config.adminHost}`;
-  const tab = ['token', 'failing'].includes(alert.rule) ? 'destinacie' : alert.rule === 'site_down' ? 'instalacia' : '';
+  const tab = ['token', 'failing'].includes(alert.rule) ? 'destinacie' : alert.rule === 'site_down' ? 'instalacia'
+    : ['missing_purchase', 'audit_overdue'].includes(alert.rule) ? 'kvalita' : '';
   const url = tenant ? `${base}/admin/tenants/${tenant.id}${tab ? `/${tab}` : ''}`
     : `${base}/admin/${alert.rule === 'backup' ? 'zalohy' : 'upozornenia'}`;
   const title = RULES[alert.rule]?.title || alert.rule;

@@ -523,6 +523,26 @@ test('a cancellation after a partial refund takes back only the rest of the item
   assert.equal(Math.round((refund.value + cancel.value) * 100) / 100, purchase.total);
 });
 
+test('the order list for the completeness check: signed, no contact data, what the plugin did', async () => {
+  const { sent, purchase } = await fire('audit');
+  assert.equal(purchase.days, 1);
+  assert.equal(purchase.scheduled, true, 'repeats every six hours');
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].url, /^https:\/\/collector\.test\/r$/);
+  assert.equal(sent[0].signature_valid, true);
+  const b = sent[0].body;
+  assert.match(b.day, /^\d{4}-\d{2}-\d{2}$/);
+  const line = (id) => b.orders.find((o) => o.id === id);
+  assert.deepEqual(Object.keys(line(purchase.paid)).sort(), ['consent', 'created', 'ctx', 'currency', 'id', 'paid', 'ready', 'sent', 'status', 'thankyou', 'total', 'via'].sort());
+  assert.equal(line(purchase.paid).ready, true);
+  assert.equal(line(purchase.paid).sent, true);
+  assert.equal(line(purchase.paid).consent, 'marketing');
+  assert.equal(line(purchase.paid).thankyou, true);
+  assert.equal(line(purchase.failed).ready, false);
+  assert.equal(line(purchase.admin).via, 'admin');
+  assert.doesNotMatch(JSON.stringify(sent[0].body), /example\.com|Novák|903/i, 'no contact data');
+});
+
 // ------------------------------------------------------------ cookie keeper
 
 test('pages publish where px.js can refresh the identifiers', async () => {

@@ -96,6 +96,36 @@ CREATE TABLE IF NOT EXISTS received (
   currency    TEXT
 );
 CREATE INDEX IF NOT EXISTS received_tenant_time_idx ON received(tenant_id, created_at DESC);
+-- The shop's own order list, reported by the plugin (POST /r), to prove which
+-- orders produced a delivered Purchase and why the others did not.
+CREATE TABLE IF NOT EXISTS order_audit (
+  tenant_id     INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  order_id      TEXT NOT NULL,
+  day           DATE NOT NULL,
+  created_at    TIMESTAMPTZ,
+  paid_at       TIMESTAMPTZ,
+  status        TEXT NOT NULL,
+  total         NUMERIC(14,2),
+  currency      TEXT,
+  ready         BOOLEAN NOT NULL DEFAULT FALSE,
+  consent       TEXT NOT NULL DEFAULT '',
+  has_ctx       BOOLEAN NOT NULL DEFAULT FALSE,
+  purchase_sent BOOLEAN NOT NULL DEFAULT FALSE,
+  thankyou      BOOLEAN NOT NULL DEFAULT FALSE,
+  via           TEXT NOT NULL DEFAULT '',
+  reported_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, order_id)
+);
+CREATE INDEX IF NOT EXISTS order_audit_day_idx ON order_audit(tenant_id, day);
+CREATE TABLE IF NOT EXISTS audit_snapshots (
+  tenant_id    INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  day          DATE NOT NULL,
+  orders       INTEGER NOT NULL DEFAULT 0,
+  completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, day)
+);
+CREATE INDEX IF NOT EXISTS received_purchase_idx ON received(tenant_id, event_id) WHERE event_name = 'Purchase';
+CREATE INDEX IF NOT EXISTS events_purchase_idx ON events(tenant_id, event_id) WHERE event_name = 'Purchase';
 -- The no_events alert counts every tenant's events of the last two weeks by time.
 CREATE INDEX IF NOT EXISTS received_time_idx ON received(created_at);
 

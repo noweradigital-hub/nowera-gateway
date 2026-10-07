@@ -37,7 +37,9 @@ const stubs = {
     inserted.push({ tenantId, event, destinations });
     return destinations.length;
   },
+  saveSnapshot: async (tenantId, snap) => { audits.push({ tenantId, snap }); },
 };
+const audits = [];
 
 let app;
 before(async () => {
@@ -409,4 +411,35 @@ test('only the signed server leg may mark an event as never seen by a browser', 
   await app.inject({ method: 'POST', url: '/e', headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json' },
     payload: { event_name: 'Purchase', browserless: true } });
   assert.notEqual(inserted.at(-1).event.browserless, true, 'a browser cannot claim it');
+});
+
+
+// ------------------------------------------------------------ order audit (/r)
+
+async function postAudit(host, body, headers) {
+  return app.inject({ method: 'POST', url: '/r', headers: { host, 'content-type': 'application/json', ...headers }, payload: body });
+}
+
+test('/r takes the shop\'s signed order list and nothing unsigned', async () => {
+  audits.length = 0;
+  const body = JSON.stringify({ day: '2026-10-06', page: 1, pages: 1, orders: [
+    { id: 2025003069, created: 1791300000, paid: 1791300060, status: 'processing', total: 9244, currency: 'CZK',
+      ready: true, consent: 'marketing', ctx: true, sent: true, thankyou: false, via: 'checkout', email: 'x@y.sk' },
+    { id: 'not-an-id' },
+  ] });
+  const ts = now();
+  const ok = await postAudit('t.prisny.sk', body, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('tenant-key', body, ts) });
+  assert.equal(ok.statusCode, 200);
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].tenantId, 2);
+  assert.equal(audits[0].snap.orders.length, 1, 'the line that is no order is dropped');
+  assert.equal(audits[0].snap.orders[0].order_id, '2025003069');
+  assert.equal(audits[0].snap.orders[0].email, undefined, 'no contact data is kept');
+
+  const forged = await postAudit('t.prisny.sk', body, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('wrong', body, ts) });
+  assert.equal(forged.statusCode, 401);
+  const bad = JSON.stringify({ day: 'yesterday', orders: [] });
+  const badRes = await postAudit('t.prisny.sk', bad, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('tenant-key', bad, ts) });
+  assert.equal(badRes.statusCode, 400);
+  assert.equal(audits.length, 1);
 });

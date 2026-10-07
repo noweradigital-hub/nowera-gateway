@@ -28,6 +28,8 @@ export const TABLES = [
   { name: 'daily_counters', key: null },
   { name: 'received', key: 'id' },
   { name: 'events', key: 'id' },
+  { name: 'order_audit', key: null },
+  { name: 'audit_snapshots', key: null },
 ];
 // Sessions are not backed up: a restored server starts with everyone signed out.
 

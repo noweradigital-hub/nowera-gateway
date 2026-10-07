@@ -13,6 +13,7 @@ delete_site_transient( 'nowera_capi_release' );
 if ( function_exists( 'as_unschedule_all_actions' ) ) {
 	as_unschedule_all_actions( 'nowera_capi_purchase_fallback' );
 	as_unschedule_all_actions( 'nowera_capi_retry_event' );
+	as_unschedule_all_actions( 'nowera_capi_audit' );
 }
 // Events still waiting for a retry.
 global $wpdb;

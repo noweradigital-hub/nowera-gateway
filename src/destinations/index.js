@@ -1,6 +1,7 @@
 import * as meta from './meta.js';
 import * as ga4 from './ga4.js';
 import { open, seal } from '../lib/secrets.js';
+import { NOT_FOR_META } from '../lib/event-policy.js';
 
 export const drivers = { meta, ga4 };
 
@@ -22,10 +23,11 @@ export const DELIVERY = {
 };
 
 /**
- * Events a kind of destination has no use for. Meta has no refund event; a custom
- * "Refund" would only clutter the dataset and its reports.
+ * Events a kind of destination has no use for: Meta has no refund event, and the
+ * GA4 funnel steps it has no standard event for would only clutter its dataset
+ * (see event-policy.js, which px.js follows too).
  */
-const SKIP = { meta: new Set(['Refund']) };
+const SKIP = { meta: NOT_FOR_META };
 
 /** What a destination may be set to receive (settings.scope). */
 export const SCOPES = {

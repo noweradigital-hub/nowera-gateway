@@ -10,6 +10,8 @@
  * cache: PHP either would not run at all or would bake one event_id into the
  * cached HTML and collapse every visitor's view into a single event.
  */
+import { NOT_FOR_META } from './event-policy.js';
+
 export function loaderScript({ endpoint, pixelId, measurementId, consent, cookieDomain, keepPath }) {
   return `(function (w, d) {
   'use strict';
@@ -44,6 +46,9 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   var CONSENT = (TENANT_CONSENT && TENANT_CONSENT.mode && TENANT_CONSENT.mode !== 'none')
     ? TENANT_CONSENT
     : (w.nwrConsent || { mode: 'none' });
+
+  // Events the Meta pixel is not told about (GA4-only funnel steps, refunds).
+  var NOT_FOR_META = ${JSON.stringify(Object.fromEntries([...NOT_FOR_META].map((n) => [n, 1])))};
 
   var META_STANDARD = {
     AddPaymentInfo: 1, AddToCart: 1, AddToWishlist: 1, CompleteRegistration: 1,
@@ -480,7 +485,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       return;
     }
 
-    if (c.marketing && PIXEL_ID) {
+    if (c.marketing && PIXEL_ID && !NOT_FOR_META[ev.name]) {
       ensurePixel();
       try {
         w.fbq(META_STANDARD[ev.name] ? 'track' : 'trackCustom', ev.name, pixelProps(ev.props), { eventID: ev.id });

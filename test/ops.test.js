@@ -242,3 +242,65 @@ test('GA4 "no page_view" leaves page views to the Google tag and sends everythin
   }
   assert.equal(wants({ kind: 'ga4', settings: {} }, { event_name: 'PageView' }), true, 'unset means all');
 });
+
+test('routing: GA4-only funnel steps skip Meta, GA4 names them its way', async () => {
+  const { wants } = await import('../src/destinations/index.js');
+  const { buildPayload } = await import('../src/destinations/ga4.js');
+  for (const [name, ga] of [['ViewCart', 'view_cart'], ['RemoveFromCart', 'remove_from_cart'], ['AddShippingInfo', 'add_shipping_info'], ['SelectItem', 'select_item'], ['Login', 'login']]) {
+    assert.equal(wants({ kind: 'meta', settings: {} }, { event_name: name }), false, name);
+    assert.equal(wants({ kind: 'ga4', settings: { scope: 'no_page_view' } }, { event_name: name }), true, name);
+    assert.equal(buildPayload({ event_name: name, event_id: 'x', event_time: 1, properties: {} }, {}).events[0].name, ga);
+  }
+  const ship = buildPayload({ event_name: 'AddShippingInfo', event_id: 'x', event_time: 1, properties: { shipping_tier: 'Kuriér' } }, {});
+  assert.equal(ship.events[0].params.shipping_tier, 'Kuriér');
+});
+
+
+// ------------------------------------------------------------ order audit
+
+test('order audit: each order is delivered, excluded with a reason, pending or missing', async () => {
+  const { classifyOrder } = await import('../src/lib/order-audit.js');
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const old = '2026-10-07T06:00:00Z';
+  const fresh = '2026-10-07T11:30:00Z';
+  const both = [{ kind: 'meta' }, { kind: 'ga4', scope: 'no_page_view' }];
+  const base = { ready: true, consent: 'marketing', has_ctx: true, via: 'checkout', status: 'processing', created_at: old, paid_at: old };
+  const c = (o, ev = {}) => classifyOrder({ ...base, ...o }, { destinations: both, now, ...ev });
+
+  assert.equal(c({}, { received: true, deliveries: { meta: 'sent', ga4: 'sent' } }).state, 'ok');
+  assert.match(c({ ready: false, status: 'failed' }).reason, /failed/);
+  assert.equal(c({ consent: 'none' }).reason, 'bez súhlasu s cookies');
+  assert.equal(c({ consent: '', has_ctx: false, via: 'admin' }).state, 'excluded');
+  assert.equal(c({ consent: '', paid_at: fresh, created_at: fresh }).state, 'pending');
+  assert.equal(c({ consent: '' }).state, 'missing');
+  assert.equal(c({}, { received: false }).reason, 'neprišiel do signals');
+  assert.equal(c({}, { received: true, deliveries: { meta: 'dead', ga4: 'sent' } }).reason, 'Meta: nedoručené');
+  assert.equal(c({}, { received: true, deliveries: { meta: 'sent', ga4: 'pending' } }).state, 'pending');
+  // Statistics only: Meta is not owed this purchase.
+  assert.equal(c({ consent: 'statistics' }, { received: true, deliveries: { ga4: 'sent' } }).state, 'ok');
+  // A GA4 fed by GTM: a purchase the thank-you page showed is GTM's to report.
+  const gtm = classifyOrder({ ...base, thankyou: true }, { destinations: [{ kind: 'meta' }, { kind: 'ga4', scope: 'browserless' }], received: true, deliveries: { meta: 'sent' }, now });
+  assert.equal(gtm.state, 'ok');
+  assert.equal(gtm.per.ga4, 'gtm');
+});
+
+test('order audit: days add up, missing orders are listed', async () => {
+  const { summarise } = await import('../src/lib/order-audit.js');
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const row = (id, o) => ({ order_id: id, day: '2026-10-06', status: 'processing', ready: true, consent: 'marketing', has_ctx: true, via: 'checkout',
+    created_at: '2026-10-06T10:00:00Z', received: true, deliveries: { meta: 'sent' }, ...o });
+  const { days, missing } = summarise([
+    row('1'), row('2', { received: false }), row('3', { consent: 'none' }), row('4', { ready: false, status: 'failed' }),
+  ], [{ kind: 'meta' }], now);
+  assert.deepEqual(days, [{ day: '2026-10-06', orders: 4, eligible: 3, consented: 2, received: 1, ok: 1, pending: 0, missing: 1, excluded: 2 }]);
+  assert.deepEqual(missing, [{ order_id: '2', day: '2026-10-06', status: 'processing', reason: 'neprišiel do signals' }]);
+});
+
+test('order audit: the snapshot must be one day, a list, at most 500 lines', async () => {
+  const { parseSnapshot } = await import('../src/lib/order-audit.js');
+  assert.throws(() => parseSnapshot({ day: '2026-13-40', orders: [] }));
+  assert.throws(() => parseSnapshot({ day: '2026-10-06' }));
+  assert.throws(() => parseSnapshot({ day: '2026-10-06', orders: new Array(501).fill({ id: 1 }) }));
+  assert.throws(() => parseSnapshot({ day: '2026-10-06', page: 3, pages: 2, orders: [] }));
+  assert.deepEqual(parseSnapshot({ day: '2026-10-06', orders: [] }), { day: '2026-10-06', page: 1, pages: 1, orders: [] });
+});

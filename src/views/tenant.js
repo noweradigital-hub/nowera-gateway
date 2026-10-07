@@ -91,7 +91,34 @@ export function overviewTab(t, s) {
 
 const QUALITY_COLS = [['em', 'E-mail'], ['ph', 'Telefón'], ['ext', 'External ID'], ['fbp', 'fbp'], ['fbc', 'fbc'], ['ip', 'IP'], ['country', 'Krajina']];
 
-export function qualityTab(rows, findings) {
+/**
+ * Every order of the last two weeks against what reached Meta and GA4: the
+ * shop's list, reported by plugin 1.2+, decides what "all" means.
+ */
+export function completenessCard(audit, lastSnapshot) {
+  if (!audit) return '';
+  const { days, missing } = audit;
+  const when = lastSnapshot ? `posledný zoznam ${esc(time(lastSnapshot))}` : 'plugin zatiaľ zoznam objednávok neposlal (od verzie 1.2)';
+  const rows = days.length ? `<div class="scroll"><table class="compact">
+      <thead><tr><th>Deň</th><th class="r">Objednávky</th><th class="r">Započítané</th><th class="r">So súhlasom</th>
+        <th class="r">Prišli do signals</th><th class="r">Doručené</th><th class="r">Doručuje sa</th><th class="r">Vynechané</th><th class="r">Chýba</th></tr></thead>
+      <tbody>${days.map((d) => `<tr><td class="mono">${esc(d.day)}</td><td class="r">${num(d.orders)}</td><td class="r">${num(d.eligible)}</td>
+        <td class="r">${num(d.consented)}</td><td class="r">${num(d.received)}</td><td class="r">${num(d.ok)}</td><td class="r">${num(d.pending)}</td>
+        <td class="r">${num(d.excluded)}</td><td class="r">${d.missing ? pill('warn', String(d.missing)) : '0'}</td></tr>`).join('')}</tbody>
+    </table></div>` : '<div class="empty">Zatiaľ bez objednávok v zozname.</div>';
+  const list = missing.length ? `<div class="card-b" style="border-top:1px solid var(--line-2)"><div class="findings">${missing.slice(0, 50).map((m) => `
+      <div class="finding">${pill('warn', `#${esc(m.order_id)}`)}<div>${esc(m.reason)}<p>${esc(m.day)} · stav ${esc(m.status)}</p></div></div>`).join('')}</div></div>` : '';
+  return `
+  <div class="card">
+    <div class="card-h"><h2>Úplnosť nákupov</h2><span class="sub">objednávky z e-shopu oproti doručeným Purchase · 14 dní · ${when}</span></div>
+    ${rows}
+    ${list}
+    <div class="card-b" style="border-top:1px solid var(--line-2)"><div class="hint" style="margin:0">Vynechané: nezaplatené a zrušené objednávky,
+      bez súhlasu s cookies, vytvorené mimo pokladne. Chýba: zaplatená objednávka so súhlasom, ktorej Purchase sa po 2 hodinách nedoručil.</div></div>
+  </div>`;
+}
+
+export function qualityTab(rows, findings, completeness = '') {
   const table = rows.length ? `<div class="scroll"><table class="compact">
       <thead><tr><th>Event</th><th class="r">Počet</th>${QUALITY_COLS.map(([, l]) => `<th style="text-align:center">${l}</th>`).join('')}<th style="text-align:center">Prehliadač + server</th></tr></thead>
       <tbody>${rows.map((r) => `<tr><td class="mono">${esc(r.event_name)}</td><td class="r">${num(r.n)}</td>
@@ -99,7 +126,7 @@ export function qualityTab(rows, findings) {
         <td>${heat(r.paired, r.browser && !r.server ? 'Posiela len prehliadač' : 'Posiela len server')}</td></tr>`).join('')}</tbody>
     </table></div>` : '<div class="empty">Zatiaľ bez dát. Štatistiky sa zbierajú od nasadenia verzie 1.0.</div>';
   const tone = { warn: 'warn', info: 'info', ok: 'ok' };
-  return `
+  return `${completeness}
   <div class="grid">
     <div class="card">
       <div class="card-h"><h2>Údaje pri eventoch</h2><span class="sub">podiel eventov s daným údajom, ako ich dostáva Meta · 7 dní</span></div>

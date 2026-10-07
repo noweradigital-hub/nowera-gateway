@@ -27,7 +27,7 @@ import { forgetChecks, runChecks } from '../lib/checks.js';
 import { verifyMeta } from '../destinations/verify.js';
 import { overviewPage } from '../views/overview.js';
 import {
-  TABS, destinationsTab, installTab, overviewTab, qualityTab, settingsTab, tenantHeader,
+  TABS, completenessCard, destinationsTab, installTab, overviewTab, qualityTab, settingsTab, tenantHeader,
 } from '../views/tenant.js';
 import { eventBrowser } from '../views/events.js';
 import {
@@ -45,6 +45,7 @@ import {
 import { keySource, recoveryKey } from '../lib/secrets.js';
 import { deriveFromSite, detectConsent, gatewayIp, pairingCode } from '../lib/onboarding.js';
 import { backupsPage, recoveryKeyPage } from '../views/backups.js';
+import { auditRows, summarise } from '../lib/order-audit.js';
 
 /** A tenant's signing key: 256 random bits, shown once and pasted into the plugin. */
 const newIngestKey = () => randomBytes(32).toString('hex');
@@ -413,7 +414,10 @@ export default async function adminRoutes(app) {
       body = overviewTab(tenant, await tenantOverview(id));
     } else if (tab === 'kvalita') {
       const rows = await quality(id);
-      body = qualityTab(rows, qualityFindings(rows));
+      const audit = summarise(await auditRows(id), destinations.filter((d) => d.active)
+        .map((d) => ({ kind: d.kind, scope: d.settings?.scope || 'all' })));
+      const snap = await one('SELECT max(completed_at) AS last FROM audit_snapshots WHERE tenant_id = $1', [id]);
+      body = qualityTab(rows, qualityFindings(rows), completenessCard(audit, snap?.last));
     } else if (tab === 'destinacie') {
       body = destinationsTab(tenant, destinations, SCHEMAS, config.metaApiVersion);
     } else if (tab === 'instalacia') {
