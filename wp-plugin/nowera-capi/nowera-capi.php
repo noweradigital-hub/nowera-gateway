@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.2.0
+ * Version:      1.2.1
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.2.0';
+const NOWERA_CAPI_VERSION = '1.2.1';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -259,7 +259,7 @@ function nowera_capi_render_settings(): void {
 						}
 						if ( ! $seen ) :
 							?>
-							<p class="description">Formuláre sa tu zobrazia, keď ich návštevník prvýkrát odošle (Contact Form 7, Forminator, Elementor Pro, WPForms, Fluent Forms, Gravity Forms, Bricks s akciou „Custom“).</p>
+							<p class="description">Formuláre sa tu zobrazia, keď ich návštevník prvýkrát odošle (Contact Form 7, Forminator, Elementor Pro, WPForms, Fluent Forms, Gravity Forms, Bricks s akciou „Custom“, Bricksforge Pro Forms).</p>
 						<?php else : ?>
 							<table class="widefat striped" style="max-width:640px"><tbody>
 							<?php foreach ( $seen as $k => $f ) : ?>
@@ -1764,10 +1764,118 @@ add_action( 'gform_after_submission', function ( $entry, $form ) {
 
 // Bricks forms: runs when the form has "Custom" among its actions.
 add_action( 'bricks/form/custom_action', function ( $form ) {
+	// Bricksforge Pro Forms fire this hook too from their own "Custom" action;
+	// those count once, in the Bricksforge handler below.
+	if ( did_action( 'bricksforge/pro_forms/before_submit' ) || is_a( $form, 'Bricksforge\ProForms\Actions\Base' ) ) {
+		return;
+	}
 	$settings = method_exists( $form, 'get_settings' ) ? (array) $form->get_settings() : array();
 	$fields   = method_exists( $form, 'get_fields' ) ? (array) $form->get_fields() : array();
 	nowera_capi_form_sent( 'bricks', (string) ( $fields['formId'] ?? '' ), (string) ( $settings['formName'] ?? ( $fields['formId'] ?? 'Bricks' ) ), $fields );
 } );
+
+/**
+ * Bricksforge Pro Forms (element brf-pro-forms), whatever actions the form has.
+ * after_submit runs once every action is done; a failed validation, captcha,
+ * honeypot, file check or duplicate ends the request before it. An action that
+ * reported an error makes the visitor see an error, so that is no lead either.
+ * Payment forms (Stripe, Mollie) return before it and finish in a webhook:
+ * not counted.
+ *
+ * The form is keyed by the post or template that holds the element plus the
+ * element's id, so a form in a footer template stays one form on every page.
+ */
+add_action( 'bricksforge/pro_forms/after_submit', function ( $form_data, $return_values = array() ) {
+	static $done = false;
+	if ( $done || ! is_array( $form_data ) || ( is_array( $return_values ) && ! empty( $return_values['results']['error'] ) ) ) {
+		return;
+	}
+	// Resolved in Bricksforge's own order: formId (data-script-id, a random one
+	// inside query loops), then formIdFallback (data-element-id). A fallback that
+	// names another form must not take this submission's place.
+	$ids = array();
+	foreach ( array( 'formId', 'formIdFallback' ) as $param ) {
+		$id = substr( preg_replace( '/[^A-Za-z0-9_-]/', '', is_scalar( $form_data[ $param ] ?? null ) ? (string) $form_data[ $param ] : '' ), 0, 40 );
+		if ( '' !== $id && ! in_array( $id, $ids, true ) ) {
+			$ids[] = $id;
+		}
+	}
+	if ( ! $ids ) {
+		return;
+	}
+	$done    = true;
+	$post_id = absint( $form_data['postId'] ?? 0 );
+	$owner   = $post_id;
+	$element = '';
+	$found   = null;
+	$all     = array();
+	if ( class_exists( '\Bricks\Helpers' ) && method_exists( '\Bricks\Helpers', 'get_element_data' ) ) {
+		foreach ( $ids as $id ) {
+			$data = \Bricks\Helpers::get_element_data( $post_id, $id );
+			if ( is_array( $data ) && is_array( $data['element'] ?? null ) && 'brf-pro-forms' === ( $data['element']['name'] ?? '' ) ) {
+				$element = $id;
+				$found   = $data['element'];
+				$all     = is_array( $data['elements'] ?? null ) ? $data['elements'] : array();
+				$owner   = is_numeric( $data['source_id'] ?? null ) && (int) $data['source_id'] > 0 ? (int) $data['source_id'] : ( 'component' === ( $data['source_id'] ?? '' ) ? 'c' : $post_id );
+				break;
+			}
+		}
+	}
+	// Not found in the page or its templates: the element id as sent, on its page.
+	if ( '' === $element ) {
+		$element = end( $ids );
+	}
+	// The title the site gave it: Bricksforge's "Form Title" (its submissions
+	// table), else the element's name in the structure panel. Never a dynamic tag:
+	// the name goes to Meta, it must not carry what a visitor typed or who they are.
+	$title = '';
+	foreach ( array( $found['settings']['submission_form_title'] ?? '', $found['label'] ?? '' ) as $candidate ) {
+		$candidate = is_string( $candidate ) ? trim( wp_strip_all_tags( $candidate ) ) : '';
+		if ( '' !== $candidate && false === strpos( $candidate, '{' ) ) {
+			$title = $candidate;
+			break;
+		}
+	}
+	if ( '' === $title ) {
+		$page  = is_int( $owner ) && $owner > 0 ? get_the_title( $owner ) : '';
+		$title = 'Pro Forms' . ( '' !== $page ? ' – ' . $page : '' );
+	}
+	// Posted as form-field-<id>, id being the field's custom ID or its element id
+	// (nested field elements), or the row id of the older "fields" repeater.
+	$types = array();
+	foreach ( (array) ( $found['settings']['fields'] ?? array() ) as $field ) {
+		if ( is_array( $field ) && ! empty( $field['id'] ) && is_string( $field['type'] ?? null ) ) {
+			$types[ (string) $field['id'] ] = $field['type'];
+		}
+	}
+	foreach ( $all as $el ) {
+		if ( is_array( $el ) && 0 === strpos( (string) ( $el['name'] ?? '' ), 'brf-pro-forms-field-' ) ) {
+			$id = (string) ( ( $el['settings']['id'] ?? '' ) ?: ( $el['id'] ?? '' ) );
+			if ( '' !== $id ) {
+				$types[ $id ] = substr( (string) $el['name'], 20 );
+			}
+		}
+	}
+	$declared = in_array( 'email', $types, true );
+	$emails   = array();
+	$values   = array();
+	foreach ( $form_data as $name => $value ) {
+		if ( 0 !== strpos( (string) $name, 'form-field-' ) || ! is_scalar( $value ) ) {
+			continue;
+		}
+		$id   = substr( (string) $name, 11 );
+		$type = $types[ $id ] ?? 'field';
+		// E-mail fields first: a hidden field may hold some other address. When the
+		// form declares an e-mail field, only it and phone fields are read, so an
+		// address written into the message never stands in for an empty one.
+		if ( 'email' === $type ) {
+			$emails[ $type . '_' . $id ] = $value;
+		} elseif ( ! $declared || 'tel' === $type || preg_match( '/phone|tel|mobil/i', $id ) ) {
+			$values[ $type . '_' . $id ] = $value;
+		}
+	}
+	nowera_capi_form_sent( 'bricksforge', $owner . '-' . $element, $title, $emails + $values );
+}, 10, 2 );
 
 /* -------------------------------------------------------------------------
  * Order list for the completeness check

@@ -546,7 +546,7 @@ test('the order list for the completeness check: signed, paged, no contact data,
   assert.equal(line(purchase.paid).thankyou, true);
   assert.equal(line(purchase.failed).ready, false);
   assert.equal(line(purchase.admin).via, 'admin');
-  assert.doesNotMatch(JSON.stringify(orders), /example\.com|Novák|903/i, 'no contact data');
+  assert.doesNotMatch(JSON.stringify(orders), /example\.com|Novák|0903|421 ?903/i, 'no contact data'); // not a bare 903: timestamps contain it
   assert.deepEqual(Object.keys(sent[0].body.cron).sort(), ['disabled', 'due', 'oldest'], 'how the scheduler is doing');
   assert.equal(typeof sent[0].body.cron.disabled, 'boolean');
 });
@@ -587,6 +587,57 @@ test('a form counts only as the settings say, as Lead with its kind and contact 
   assert.doesNotMatch(JSON.stringify(b), /Dobrý deň/, 'the message itself stays on the site');
   const news = await fire('form', '', '&role=newsletter');
   assert.equal(news.sent[0].body.custom_data.content_category, 'newsletter');
+});
+
+test('a Bricksforge Pro Forms submission counts once, keyed by page and element, as the settings say', async () => {
+  const none = await fire('bricksforge', '', '&role=none');
+  assert.equal(none.sent.length, 0, 'unclassified forms are no conversion');
+  assert.deepEqual(Object.keys(none.purchase.seen), [none.purchase.key], 'one form, under its element id, not the loop\'s random one');
+  assert.match(none.purchase.key, /^bricksforge:\d+-cnt001$/);
+  assert.equal(none.purchase.seen[none.purchase.key].name, 'Kontaktný formulár', 'the element\'s name from the structure panel');
+
+  const lead = await fire('bricksforge', '', '&role=lead');
+  assert.equal(lead.sent.length, 1, 'once, though the legacy Bricks hook and after_submit both ran, and after_submit twice');
+  const b = lead.sent[0].body;
+  assert.equal(b.event_name, 'Lead');
+  assert.equal(b.custom_data.content_category, 'enquiry');
+  assert.equal(b.custom_data.content_name, 'Kontaktný formulár');
+  assert.equal(b.custom_data.form_id, lead.purchase.key);
+  assert.equal(b.user_data.em, sha('dopyt@example.com'), 'the e-mail field, not an address in a hidden field before it');
+  assert.equal(b.user_data.ph, sha('421903123456'), 'the tel field');
+  assert.doesNotMatch(JSON.stringify(b), /Dobrý deň|0911|office@/, 'the message and other fields stay on the site');
+  assert.ok(lead.sent[0].signature_valid);
+
+  const news = await fire('bricksforge', '', '&role=newsletter&variant=footer');
+  assert.equal(news.sent.length, 1);
+  assert.equal(news.purchase.key, 'bricksforge:77-nlf001', 'a footer form is keyed by its template, the same on every page');
+  assert.equal(news.sent[0].body.custom_data.content_category, 'newsletter');
+  assert.equal(news.sent[0].body.custom_data.content_name, 'Newsletter v pätičke', 'Bricksforge\'s own "Form Title" first');
+  assert.equal(news.sent[0].body.user_data.em, sha('news@example.com'), 'a field with a custom ID');
+
+  const failed = await fire('bricksforge', '', '&role=lead&variant=error');
+  assert.equal(failed.sent.length, 0, 'an action that reported an error shows the visitor an error: no lead');
+});
+
+test('a Bricksforge form is the one Bricksforge itself resolved, and only its e-mail field gives the address', async () => {
+  const forged = await fire('bricksforge', '', '&role=lead&variant=forged');
+  assert.equal(forged.sent.length, 0, 'the footer newsletter named as fallback does not get the page form\'s submission');
+  assert.deepEqual(Object.keys(forged.purchase.seen), [forged.purchase.key], 'recorded as the form that was really sent');
+  assert.match(forged.purchase.key, /^bricksforge:\d+-cnt001$/);
+
+  const empty = await fire('bricksforge', '', '&role=lead&variant=emptymail');
+  assert.equal(empty.sent.length, 1);
+  assert.equal(empty.sent[0].body.user_data.em, undefined, 'an address in the message is not the visitor\'s e-mail');
+  assert.equal(empty.sent[0].body.user_data.ph, sha('421903123456'), 'the tel field still counts');
+});
+
+test('Bricksforge without Bricks helpers still lists the form under its page; plain Bricks forms keep their own key', async () => {
+  const bare = await fire('bricksforge', '', '&role=none&variant=nostub');
+  assert.match(bare.purchase.key, /^bricksforge:\d+-cnt001$/);
+  assert.deepEqual(Object.keys(bare.purchase.seen), [bare.purchase.key]);
+  assert.equal(bare.purchase.seen[bare.purchase.key].name, 'Pro Forms – Detská osuška', 'named after the page it was on');
+  const native = await fire('bricksforge', '', '&variant=native');
+  assert.deepEqual(Object.keys(native.purchase.seen), ['bricks:brx001'], 'a Bricks form outside Bricksforge still counts as before');
 });
 
 test('the cart page describes this visitor\'s cart for ViewCart', async () => {

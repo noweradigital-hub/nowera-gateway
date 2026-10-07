@@ -1,11 +1,11 @@
 {
-  "version": "1.2.0",
-  "file": "nowera-capi-1.2.0.zip",
-  "sha256": "ae5befbf8aee5161143f97fda6485921dfe4ab8f049779c8adf71de57a6fc397",
-  "signature": "LPJFou/1lDd1xlbU9UOqLI/vSxZiES1tuvr65UA+G218z2Abn4bNa0n0Wosdl6k+U+QJNoRJ7hTpf/txpNXuDw==",
-  "released_at": "2026-10-07T14:43:13.778Z",
+  "version": "1.2.1",
+  "file": "nowera-capi-1.2.1.zip",
+  "sha256": "008d3bcf1856efc9928fb8d0c390b995584a8986b8957b7b02cea75a9024dcf8",
+  "signature": "yEIxaPBF0BkAvM76PWEwsbCGrqXsMLp/W/tvz3zI7JSkZg9399uTSnbDREsMy/ONAsUdE0JqpiwzRyPfyHIqAQ==",
+  "released_at": "2026-10-07T15:33:27.455Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Úplnosť nákupov (zoznam objednávok pre signals) s hlásením stavu WP-Cron; nové udalosti: košík, odobratie z košíka, doprava, klik v zozname, registrácia, leady z formulárov."
+  "notes": "Bricksforge Pro Forms: leads a newsletter"
 }

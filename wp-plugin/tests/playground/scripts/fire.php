@@ -427,6 +427,85 @@ switch ( $event ) {
 		nowera_capi_form_sent( 'cf7', '42', 'Kontakt', array( 'your-name' => 'Ján', 'your-email' => 'Dopyt@Example.com', 'your-phone' => '0903 123 456', 'msg' => 'Dobrý deň' ) );
 		$purchase = array( 'seen' => get_option( 'nowera_capi_forms_seen' ) );
 		break;
+	case 'bricksforge':
+		// A Bricksforge Pro Forms submission as its REST handler sends it.
+		// &role=lead|newsletter|none for this form; &variant=contact (a page form
+		// inside a query loop, with a "Custom" action) | footer (a footer template
+		// form) | error (an action reported an error) | nostub (no Bricks helpers)
+		// | native (a plain Bricks form's custom action, no Bricksforge) | forged
+		// (the page form sent with the footer form as its fallback id; &role then
+		// classifies the footer form) | emptymail (no e-mail typed, an address in
+		// the message).
+		$role    = sanitize_key( $_GET['role'] ?? 'none' );
+		$variant = sanitize_key( $_GET['variant'] ?? 'contact' );
+		$page_id = (int) $ids['simple'];
+		if ( 'nostub' !== $variant ) {
+			require_once __DIR__ . '/bricksforge-stub.php';
+			\Bricks\Helpers::$data = array(
+				$page_id => array(
+					array( 'id' => 'cnt001', 'name' => 'brf-pro-forms', 'label' => 'Kontaktný formulár', 'children' => array( 'hd0001', 'tx0001', 'em0002', 'tl0001', 'ta0001' ), 'settings' => array( 'actions' => array( 'email', 'custom' ) ) ),
+					array( 'id' => 'hd0001', 'name' => 'brf-pro-forms-field-hidden', 'parent' => 'cnt001', 'settings' => array() ),
+					array( 'id' => 'tx0001', 'name' => 'brf-pro-forms-field-text', 'parent' => 'cnt001', 'settings' => array() ),
+					array( 'id' => 'em0002', 'name' => 'brf-pro-forms-field-email', 'parent' => 'cnt001', 'settings' => array() ),
+					array( 'id' => 'tl0001', 'name' => 'brf-pro-forms-field-tel', 'parent' => 'cnt001', 'settings' => array() ),
+					array( 'id' => 'ta0001', 'name' => 'brf-pro-forms-field-textarea', 'parent' => 'cnt001', 'settings' => array() ),
+				),
+				77 => array(
+					array( 'id' => 'nlf001', 'name' => 'brf-pro-forms', 'label' => 'Form', 'settings' => array( 'submission_form_title' => 'Newsletter v pätičke', 'actions' => array( 'create_submission' ) ) ),
+					array( 'id' => 'em0001', 'name' => 'brf-pro-forms-field-email', 'parent' => 'nlf001', 'settings' => array( 'id' => 'mail' ) ),
+				),
+			);
+		}
+		if ( 'native' === $variant ) {
+			nwr_settings( array( 'forms' => array() ) );
+			delete_option( 'nowera_capi_forms_seen' );
+			$native = new class() {
+				public function get_settings() { return array( 'formName' => 'Bricks kontakt' ); }
+				public function get_fields() { return array( 'formId' => 'brx001', 'form-field-abc' => 'x@example.com' ); }
+			};
+			do_action( 'bricks/form/custom_action', $native );
+			$purchase = array( 'seen' => get_option( 'nowera_capi_forms_seen' ) );
+			break;
+		}
+		$footer_form = 'footer' === $variant;
+		$key         = 'bricksforge:' . ( $footer_form ? 77 : $page_id ) . '-' . ( $footer_form ? 'nlf001' : 'cnt001' );
+		$classified  = 'forged' === $variant ? 'bricksforge:77-nlf001' : $key;
+		nwr_settings( array( 'forms' => 'none' === $role ? array() : array( $classified => $role ) ) );
+		delete_option( 'nowera_capi_forms_seen' );
+		$form_data = $footer_form
+			? array( 'form-field-mail' => 'News@Example.com' )
+			: array(
+				'form-field-hd0001' => 'office@example.com',
+				'form-field-tx0001' => 'Ján',
+				'form-field-em0002' => 'Dopyt@Example.com',
+				'form-field-tl0001' => '0903 123 456',
+				'form-field-ta0001' => 'Dobrý deň, volajte na 0911 222 333',
+			);
+		if ( 'emptymail' === $variant ) {
+			$form_data['form-field-em0002'] = '';
+			$form_data['form-field-ta0001'] = 'jan.novak@example.com';
+		}
+		$form_data += array(
+			'postId'         => (string) $page_id,
+			'formId'         => $footer_form ? 'nlf001' : ( 'forged' === $variant ? 'cnt001' : 'q7x9z2' ), // random inside a query loop
+			'formIdFallback' => $footer_form || 'forged' === $variant ? 'nlf001' : 'cnt001',
+			'referrer'       => home_url( '/kontakt/?utm_source=x' ),
+			'fieldIds'       => '{}',
+			'fieldLabels'    => '{"em0002":"E-mail"}',
+			'hiddenFields'   => '[]',
+		);
+		$results = 'error' === $variant
+			? array( 'results' => array( 'error' => array( array( 'action' => 'email', 'type' => 'error', 'message' => 'Mail failed' ) ) ) )
+			: array( 'results' => array( 'success' => array( array( 'action' => 'email', 'type' => 'success' ) ) ) );
+		do_action( 'bricksforge/pro_forms/before_submit', $form_data );
+		if ( class_exists( '\Bricksforge\ProForms\Actions\Base' ) ) {
+			// Its "Custom" action fires the legacy Bricks hook with its own object.
+			do_action( 'bricks/form/custom_action', new \Bricksforge\ProForms\Actions\Base( array(), $form_data ) );
+		}
+		do_action( 'bricksforge/pro_forms/after_submit', $form_data, $results );
+		do_action( 'bricksforge/pro_forms/after_submit', $form_data, $results ); // a second listener re-firing it
+		$purchase = array( 'seen' => get_option( 'nowera_capi_forms_seen' ), 'key' => $key );
+		break;
 	case 'cart_page':
 		WC()->cart->empty_cart();
 		WC()->cart->add_to_cart( $ids['simple'], 2 );
