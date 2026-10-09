@@ -996,6 +996,28 @@ test('the settings page never prints the key, and takes a pairing code', async (
   assert.equal(s.ga4_bad, '', 'anything but a measurement id is dropped');
 });
 
+test('the cookie prefix field shows only for the consent modes that read it, and is still sent', async () => {
+  const { prefix_row: rows } = await json('/nwr-test/settings-page.php');
+  for (const mode of ['none', 'faz', 'cookiescript']) assert.equal(rows[mode].hidden, true, `${mode} ignores the prefix`);
+  for (const mode of ['complianz', 'custom']) assert.equal(rows[mode].hidden, false, `${mode} reads it`);
+  for (const mode of Object.keys(rows)) assert.equal(rows[mode].input, true, `${mode}: the stored prefix stays in the form`);
+});
+
+test('catalog setting: only the site\'s public custom types, each with a Meta content_type', async () => {
+  const s = await json('/nwr-test/settings-page.php');
+  assert.ok(s.cpt_offered.includes('nwr_listing') && s.cpt_offered.includes('nwr_project'));
+  for (const type of ['post', 'page', 'attachment', 'product', 'nwr_internal']) {
+    assert.ok(!s.cpt_offered.includes(type), `${type} is not offered`);
+  }
+  assert.deepEqual(s.cpt_saved, { nwr_listing: 'home_listing' }, 'saved through the sanitizer: no built-in type, no unknown content_type');
+  assert.equal(s.cpt_saved_key_kept, true);
+  assert.equal(s.cpt_selected, true, 'the saved choice shows as selected');
+  assert.deepEqual(s.cpt_clean, { nwr_listing: 'home_listing', nwr_project: 'vehicle' });
+  assert.deepEqual(s.cpt_bad_value, []);
+  assert.deepEqual(s.cpt_not_array, []);
+  assert.deepEqual(s.cpt_default, [], 'nothing is measured until chosen');
+});
+
 test('the visitor address comes from Cloudflare or a local proxy only', async () => {
   const r = await json('/nwr-test/misc.php');
   assert.equal(r.via_cloudflare, '2a02:ab88:1:2::3');
@@ -1081,4 +1103,138 @@ test('the GA4 session id is read from the current GS2 cookie as well', async () 
   assert.equal(gs2.sent[0].body.ga_session_id, '1759740000');
   const gs1 = await fire('checkout', '_ga_XYZ:GS1.1.1700000500.4.1.1700000600.0.0.0');
   assert.equal(gs1.sent[0].body.ga_session_id, '1700000500');
+});
+
+// ------------------------------------------- custom post type catalog
+
+const cpt = (query = '') => json(`/nwr-test/cpt.php?${query}`);
+const ours = (page) => (page.match(/<script>window\.nwr[^<]*<\/script>/) || [null])[0];
+const listingTitle = 'RODINNÝ DOM | TRNAVA & okolie';
+
+test('a listing of a selected type publishes ViewContent context: post ID, chosen content_type, no price', async () => {
+  const { ids, settings } = await cpt('catalog=nwr_listing:home_listing&filter=none');
+  try {
+    assert.deepEqual(settings, { nwr_listing: 'home_listing' });
+    const page = await html(`/?post_type=nwr_listing&p=${ids.listing}`);
+    assert.match(page, /collector\.test\/px\.js/);
+    const p = inline(page, 'nwrPage');
+    assert.equal(p.type, 'product', 'px.js fires ViewContent from it, as from a product page');
+    assert.deepEqual(p.data, {
+      content_name: listingTitle,
+      content_ids: [String(ids.listing)],
+      content_type: 'home_listing',
+      contents: [{ id: String(ids.listing), item_name: listingTitle, quantity: 1 }],
+    }, 'no price found: no value and no currency');
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('the site\'s nowera_capi_cpt_item filter adds price and category, never another id', async () => {
+  const { ids } = await cpt('catalog=nwr_listing:home_listing&filter=price');
+  try {
+    const p = inline(await html(`/?post_type=nwr_listing&p=${ids.listing}`), 'nwrPage');
+    assert.deepEqual(p.data.content_ids, [String(ids.listing)], 'the feed knows the listing by its post ID');
+    assert.equal(p.data.value, 385000);
+    assert.equal(p.data.value_net, 385000);
+    assert.equal(p.data.currency, 'EUR');
+    assert.equal(p.data.content_category, 'Rodinné domy');
+    assert.deepEqual(p.data.contents, [{
+      id: String(ids.listing), item_name: listingTitle, quantity: 1, item_price: 385000, price_net: 385000, item_category: 'Rodinné domy',
+    }], 'only known item fields');
+
+    await cpt('filter=price_no_currency');
+    const woo = inline(await html(`/?post_type=nwr_listing&p=${ids.listing}`), 'nwrPage');
+    assert.equal(woo.data.currency, 'EUR', 'without one from the filter, WooCommerce\'s currency');
+    assert.equal(woo.data.value, 1000);
+
+    await cpt('filter=price_inf');
+    const inf = inline(await html(`/?post_type=nwr_listing&p=${ids.listing}`), 'nwrPage');
+    assert.ok(inf, 'a price JSON cannot carry does not break the page context');
+    assert.equal(inf.data.value, undefined);
+    await cpt('filter=net_inf');
+    const net = inline(await html(`/?post_type=nwr_listing&p=${ids.listing}`), 'nwrPage');
+    assert.equal(net.data.value_net, 1200, 'an unusable net price falls back to the price');
+
+    await cpt('filter=skip');
+    assert.equal(inline(await html(`/?post_type=nwr_listing&p=${ids.listing}`), 'nwrPage'), null, 'the filter can leave a listing out');
+  } finally {
+    await cpt('filter=none');
+    await setConsent('none');
+  }
+});
+
+test('types not selected, archives, drafts and protected posts publish no catalog context', async () => {
+  const { ids } = await cpt('catalog=nwr_listing:home_listing,nwr_internal:product&filter=none');
+  try {
+    for (const path of [
+      `/?post_type=nwr_project&p=${ids.project}`,
+      `/?p=${ids.post}`,
+      `/?post_type=nwr_listing`,
+      `/?post_type=nwr_listing&p=${ids.draft}`,
+      `/?post_type=nwr_listing&p=${ids.locked}`,
+    ]) {
+      const page = await html(path);
+      assert.equal(inline(page, 'nwrPage'), null, path);
+      assert.match(page, /collector\.test\/px\.js/, `${path}: the loader still loads`);
+    }
+    await cpt('catalog=nwr_project:product');
+    assert.equal(inline(await html(`/?post_type=nwr_listing&p=${ids.listing}`), 'nwrPage'), null, 'no longer selected');
+    const project = inline(await html(`/?post_type=nwr_project&p=${ids.project}`), 'nwrPage');
+    assert.equal(project.data.content_type, 'product');
+    assert.deepEqual(project.data.content_ids, [String(ids.project)]);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('a listing page is the same for every visitor, so it can be cached; consent is px.js\'s to apply', async () => {
+  await setConsent('cookiescript');
+  const { ids } = await cpt('catalog=nwr_listing:home_listing&filter=none');
+  try {
+    const path = `/?post_type=nwr_listing&p=${ids.listing}`;
+    const undecided = await html(path);
+    const accepted = await html(path, csCookie(['strict', 'targeting', 'performance']));
+    const refused = await html(path, csCookie(['strict'], 'reject'));
+    assert.ok(ours(undecided));
+    assert.equal(ours(accepted), ours(undecided), 'consent does not change the page');
+    assert.equal(ours(refused), ours(undecided));
+    assert.deepEqual(inline(undecided, 'nwrConsent'), { mode: 'cookiescript', prefix: 'cmplz_' }, 'px.js waits for CookieScript');
+    assert.deepEqual(inline(undecided, 'nwrPage').data.content_ids, [String(ids.listing)]);
+
+    // Built in-process, where requests to the gateway are captured.
+    for (const cs of ['', 'targeting|performance']) {
+      const r = await cpt(`render=${ids.listing}${cs ? `&cs=${encodeURIComponent(cs)}` : ''}`);
+      assert.equal(r.context.data.content_type, 'home_listing');
+      assert.match(r.head, /window\.nwrPage=/);
+      assert.deepEqual(r.sent, [], 'the site sends nothing for a view: px.js does, under consent, and the gateway makes the server leg');
+      assert.equal(r.nocache, false, 'the page stays cacheable');
+      assert.doesNotMatch(r.head, /nwrUser/, 'no visitor identity in a guest page');
+    }
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('the catalog works on a site without WooCommerce', async () => {
+  const { ids } = await cpt('catalog=nwr_listing:home_listing&filter=price_no_currency&woo=off');
+  try {
+    const page = await html(`/?post_type=nwr_listing&p=${ids.listing}`);
+    assert.doesNotMatch(page, /NWR_FATAL|critical error/i);
+    const p = inline(page, 'nwrPage');
+    assert.deepEqual(p.data.content_ids, [String(ids.listing)]);
+    assert.equal(p.data.value, undefined, 'a price without any currency is left out');
+    assert.equal(p.data.contents[0].item_price, undefined);
+
+    await cpt('filter=price');
+    const priced = inline(await html(`/?post_type=nwr_listing&p=${ids.listing}`), 'nwrPage');
+    assert.equal(priced.data.currency, 'EUR');
+    assert.equal(priced.data.value, 385000);
+    assert.equal(inline(await html('/'), 'nwrPage'), null, 'other pages: no context, no error');
+  } finally {
+    await cpt('woo=on&filter=none');
+    await setConsent('none');
+  }
+  const d = await json('/nwr-test/diag.php');
+  assert.equal(d.woo_class, true, 'WooCommerce is back for the other tests');
 });

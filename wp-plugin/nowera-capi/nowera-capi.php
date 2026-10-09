@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.2.1
+ * Version:      1.2.2
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.2.1';
+const NOWERA_CAPI_VERSION = '1.2.2';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -51,6 +51,17 @@ const NOWERA_CAPI_CALLING_CODES = array(
 /** What a national number starts with and the international form drops. Default '0'. */
 const NOWERA_CAPI_TRUNK_PREFIXES = array( 'HU' => '06', 'IT' => '', 'ES' => '' );
 
+/**
+ * What a single page of a custom post type can be in a Meta catalog, as the
+ * content_type its pixel events carry: products, a real-estate (home listing)
+ * catalog or a vehicle catalog.
+ */
+const NOWERA_CAPI_CPT_CONTENT_TYPES = array(
+	'product'      => 'product (katalóg produktov)',
+	'home_listing' => 'home_listing (nehnuteľnosti)',
+	'vehicle'      => 'vehicle (vozidlá)',
+);
+
 /* -------------------------------------------------------------------------
  * Settings
  * ---------------------------------------------------------------------- */
@@ -65,6 +76,7 @@ function nowera_capi_settings(): array {
 		'auto_update'    => 1,
 		'ga4_tag'        => '',
 		'forms'          => array(),
+		'cpt_catalog'    => array(),
 	);
 	return wp_parse_args( get_option( NOWERA_CAPI_OPTION, array() ), $defaults );
 }
@@ -75,6 +87,34 @@ function nowera_capi_clean_forms( $input ): array {
 	foreach ( is_array( $input ) ? $input : array() as $key => $role ) {
 		if ( preg_match( '/^[a-z0-9]{2,20}:[A-Za-z0-9_-]{1,64}$/', (string) $key ) && in_array( $role, array( 'lead', 'newsletter' ), true ) ) {
 			$out[ (string) $key ] = $role;
+		}
+	}
+	return $out;
+}
+
+/**
+ * Post types whose single pages can be reported as catalog items: the site's
+ * own public types. WordPress's built-in ones are no catalog, WooCommerce
+ * products have their own handling, and page-builder templates are no content.
+ */
+function nowera_capi_cpt_choices(): array {
+	$out = array();
+	foreach ( get_post_types( array( 'public' => true, '_builtin' => false ), 'objects' ) as $name => $type ) {
+		if ( in_array( $name, array( 'product', 'product_variation', 'bricks_template', 'elementor_library' ), true ) ) {
+			continue;
+		}
+		$out[ $name ] = wp_strip_all_tags( (string) ( $type->labels->name ?? $name ) );
+	}
+	return $out;
+}
+
+/** Which post types count as a catalog, as post type => Meta content_type. */
+function nowera_capi_clean_cpt_catalog( $input ): array {
+	$out     = array();
+	$choices = nowera_capi_cpt_choices();
+	foreach ( is_array( $input ) ? $input : array() as $type => $content_type ) {
+		if ( isset( $choices[ (string) $type ] ) && is_string( $content_type ) && isset( NOWERA_CAPI_CPT_CONTENT_TYPES[ $content_type ] ) ) {
+			$out[ (string) $type ] = $content_type;
 		}
 	}
 	return $out;
@@ -134,6 +174,7 @@ add_action( 'admin_init', function () {
 					: 'none',
 				'consent_prefix' => preg_replace( '/[^a-zA-Z0-9_\-]/', '', $input['consent_prefix'] ?? 'cmplz_' ) ?: 'cmplz_',
 				'forms'          => nowera_capi_clean_forms( $input['forms'] ?? array() ),
+				'cpt_catalog'    => nowera_capi_clean_cpt_catalog( $input['cpt_catalog'] ?? array() ),
 				'ga4_tag'        => preg_match( '/^G-[A-Z0-9]{4,20}$/', strtoupper( trim( (string) ( $input['ga4_tag'] ?? '' ) ) ) )
 					? strtoupper( trim( (string) $input['ga4_tag'] ) )
 					: '',
@@ -239,12 +280,26 @@ function nowera_capi_render_settings(): void {
 						</p>
 					</td>
 				</tr>
-				<tr>
+				<?php // Read only for Complianz (without the WP Consent API) and another tool; FAZ and CookieScript have their own cookies. ?>
+				<tr id="nwr_prefix_row" <?php echo in_array( $s['consent_mode'], array( 'complianz', 'custom' ), true ) ? '' : 'style="display:none"'; ?>>
 					<th scope="row"><label for="nwr_prefix">Prefix súhlasových cookies</label></th>
 					<td>
 						<input id="nwr_prefix" class="regular-text code" type="text" name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[consent_prefix]"
 						       value="<?php echo esc_attr( $s['consent_prefix'] ); ?>">
-						<p class="description">Complianz predvolene <code>cmplz_</code> — cookie <code>cmplz_marketing=allow</code>.</p>
+						<p class="description">
+							Platí len pre Complianz a „Iný nástroj (cookie s prefixom)“; FAZ a CookieScript ho nepoužívajú.
+							Complianz predvolene <code>cmplz_</code> — cookie <code>cmplz_marketing=allow</code>.
+						</p>
+						<script>
+						( function () {
+							var mode = document.getElementById( 'nwr_consent' ), row = document.getElementById( 'nwr_prefix_row' );
+							if ( ! mode || ! row ) return;
+							// Hidden, the field is still sent, so the stored prefix stays.
+							mode.addEventListener( 'change', function () {
+								row.style.display = ( mode.value === 'complianz' || mode.value === 'custom' ) ? '' : 'none';
+							} );
+						} )();
+						</script>
 					</td>
 				</tr>
 				<tr>
@@ -272,6 +327,35 @@ function nowera_capi_render_settings(): void {
 							<?php endforeach; ?>
 							</tbody></table>
 							<p class="description">Odoslaný formulár ide do Mety ako Lead a do GA4 ako generate_lead, s druhom v <code>content_category</code>.</p>
+						<?php endif; ?>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">Katalóg z vlastného typu obsahu</th>
+					<td>
+						<?php
+						$choices = nowera_capi_cpt_choices();
+						$catalog = is_array( $s['cpt_catalog'] ) ? $s['cpt_catalog'] : array();
+						if ( ! $choices ) :
+							?>
+							<p class="description">Web nemá žiadny verejný vlastný typ obsahu (napr. nehnuteľnosti, vozidlá).</p>
+						<?php else : ?>
+							<table class="widefat striped" style="max-width:640px"><tbody>
+							<?php foreach ( $choices as $type => $label ) : ?>
+								<tr><td><?php echo esc_html( $label ); ?> <code><?php echo esc_html( $type ); ?></code></td>
+									<td><select name="<?php echo esc_attr( NOWERA_CAPI_OPTION ); ?>[cpt_catalog][<?php echo esc_attr( $type ); ?>]">
+										<option value="">Nemerať</option>
+										<?php foreach ( NOWERA_CAPI_CPT_CONTENT_TYPES as $value => $name ) : ?>
+											<option value="<?php echo esc_attr( $value ); ?>" <?php selected( $catalog[ $type ] ?? '', $value ); ?>>ViewContent – <?php echo esc_html( $name ); ?></option>
+										<?php endforeach; ?>
+									</select></td></tr>
+							<?php endforeach; ?>
+							</tbody></table>
+							<p class="description">
+								Zobrazenie jedného záznamu vybraného typu ide do Mety ako ViewContent a do GA4 ako view_item.
+								<code>content_ids</code> je ID príspevku (to isté ID musí mať záznam v katalógovom feede), <code>content_type</code> podľa výberu.
+								Cenu a kategóriu môže doplniť filter <code>nowera_capi_cpt_item</code>.
+							</p>
 						<?php endif; ?>
 					</td>
 				</tr>
@@ -612,11 +696,98 @@ function nowera_capi_cart_items(): array {
 }
 
 /**
+ * A single published post of a type chosen under "Katalóg z vlastného typu
+ * obsahu", described like a product page, so px.js fires ViewContent (GA4
+ * view_item) from it: content_ids is the post ID, which is what the site's own
+ * catalog feed uses as the item id, content_type the one chosen for the type.
+ *
+ * Sites add a price or category with the nowera_capi_cpt_item filter, which gets
+ * the item (id, item_name, quantity) and the WP_Post and may set item_price,
+ * price_net, currency (ISO 4217; WooCommerce's, when that is installed and none
+ * is given), item_brand, item_variant and item_category…item_category5, or return
+ * false to leave the post out. The id stays the post ID. Value and currency go
+ * out only when there is both a price and a currency. Whatever the filter adds
+ * ends up in cached HTML, so it must be the same for every visitor.
+ */
+function nowera_capi_cpt_context(): ?array {
+	$catalog = nowera_capi_settings()['cpt_catalog'];
+	if ( ! is_array( $catalog ) || ! $catalog || ! is_singular( array_keys( $catalog ) ) ) {
+		return null;
+	}
+	$post         = get_queried_object();
+	$content_type = $post instanceof \WP_Post ? ( $catalog[ $post->post_type ] ?? '' ) : '';
+	if ( ! $post instanceof \WP_Post || 'product' === $post->post_type || ! isset( NOWERA_CAPI_CPT_CONTENT_TYPES[ $content_type ] )
+		|| 'publish' !== $post->post_status || '' !== (string) $post->post_password ) {
+		return null;
+	}
+	$id     = (string) $post->ID;
+	// As written, not as stored: WordPress keeps "&" in a title as "&amp;". Tags go
+	// after decoding, so an encoded one cannot come back as markup.
+	$name   = trim( wp_strip_all_tags( html_entity_decode( (string) $post->post_title, ENT_QUOTES, 'UTF-8' ) ) );
+	$filter = apply_filters( 'nowera_capi_cpt_item', array( 'id' => $id, 'item_name' => $name, 'quantity' => 1 ), $post );
+	if ( ! is_array( $filter ) ) {
+		return null; // the site left this one out
+	}
+	$text = function ( $value, int $max ) {
+		return is_scalar( $value ) ? mb_substr( trim( wp_strip_all_tags( html_entity_decode( (string) $value, ENT_QUOTES, 'UTF-8' ) ) ), 0, $max ) : '';
+	};
+	$item = array(
+		'id'        => $id,
+		'item_name' => $text( $filter['item_name'] ?? '', 200 ) ?: $name,
+		'quantity'  => 1,
+	);
+	// A price JSON can carry: "1e309" is numeric too, and would break the page's script.
+	$amount = function ( $value ): ?float {
+		return is_numeric( $value ) && is_finite( (float) $value ) && (float) $value >= 0 ? (float) $value : null;
+	};
+	$price    = $amount( $filter['item_price'] ?? null );
+	$currency = strtoupper( $text( $filter['currency'] ?? '', 3 ) );
+	if ( ! preg_match( '/^[A-Z]{3}$/', $currency ) ) {
+		$currency = function_exists( 'get_woocommerce_currency' ) ? (string) get_woocommerce_currency() : '';
+	}
+	if ( null !== $price && preg_match( '/^[A-Z]{3}$/', $currency ) ) {
+		$item['item_price'] = round( $price, 2 );
+		// GA4 counts revenue without VAT; Meta never sees this field.
+		$net               = $amount( $filter['price_net'] ?? null );
+		$item['price_net'] = null === $net ? $item['item_price'] : round( $net, 2 );
+	} else {
+		$price = null;
+	}
+	foreach ( array( 'item_brand', 'item_variant', 'item_category', 'item_category2', 'item_category3', 'item_category4', 'item_category5' ) as $key ) {
+		$value = $text( $filter[ $key ] ?? '', 100 );
+		if ( '' !== $value ) {
+			$item[ $key ] = $value;
+		}
+	}
+	$data = array(
+		'content_name' => $item['item_name'],
+		'content_ids'  => array( $id ),
+		'content_type' => $content_type,
+		'contents'     => array( $item ),
+	);
+	if ( isset( $item['item_category'] ) ) {
+		$data['content_category'] = $item['item_category'];
+	}
+	if ( null !== $price ) {
+		$data['value']     = $item['item_price'];
+		$data['value_net'] = $item['price_net'];
+		$data['currency']  = $currency;
+	}
+	return array( 'type' => 'product', 'data' => $data );
+}
+
+/**
  * Describes the current shop page for the browser leg: a product, a category
  * or a search. Mirrors what Meta for WooCommerce used to send, so catalog
  * matching and audiences keep working after its own tracking is switched off.
  */
 function nowera_capi_page_context(): ?array {
+	// A listing, a vehicle or another item of the site's own catalog; also on
+	// sites without WooCommerce.
+	$item = nowera_capi_cpt_context();
+	if ( $item ) {
+		return $item;
+	}
 	if ( ! function_exists( 'is_product' ) ) {
 		return null;
 	}

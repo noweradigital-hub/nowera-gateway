@@ -29,6 +29,11 @@
 			"data": "<?php\n// Test only: stands in for FAZ Cookie Manager while a test turns it on (set.php?consent=faz).\nif ( get_option( 'nwr_test_faz_stub' ) && file_exists( '/wordpress/nwr-test/faz-stub.php' ) ) {\n\trequire '/wordpress/nwr-test/faz-stub.php';\n}\n"
 		},
 		{
+			"step": "writeFile",
+			"path": "/wordpress/wp-content/mu-plugins/nwr-cpt-stub.php",
+			"data": "<?php\n// Test only: custom post types for the catalog tests (see /wordpress/nwr-test/cpt-stub.php).\nif ( file_exists( '/wordpress/nwr-test/cpt-stub.php' ) ) {\n\trequire '/wordpress/nwr-test/cpt-stub.php';\n}\n"
+		},
+		{
 			"step": "runPHP",
 			"code": "<?php require '/wordpress/wp-load.php'; delete_transient( '_wc_activation_redirect' ); update_option( 'woocommerce_onboarding_profile', array( 'skipped' => true ) ); update_option( 'woocommerce_currency', 'EUR' ); update_option( 'woocommerce_default_country', 'SK' ); update_option( 'permalink_structure', '' );"
 		}

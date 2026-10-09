@@ -539,3 +539,35 @@ test('quiet threshold: a manual value below two hours applies; a silent fortnigh
   assert.deepEqual(quietThreshold({ counts: new Array(24).fill(0), days: 14, manual: '1' }), { hours: 1, source: 'manual' });
   assert.deepEqual(quietThreshold({ counts: new Array(24).fill(0), days: 14, now: at('2026-10-07T16:00:00Z') }), { hours: 12, source: 'auto' });
 });
+
+test('a real-estate listing view: Meta keeps content_type home_listing and the post ID, GA4 gets view_item', () => {
+  // What px.js sends for a nowera-capi "Katalóg z vlastného typu obsahu" page.
+  const listing = {
+    content_name: 'Rodinný dom Trnava',
+    content_ids: ['988'],
+    content_type: 'home_listing',
+    contents: [{ id: '988', item_name: 'Rodinný dom Trnava', quantity: 1 }],
+  };
+  const e = normalizeEvent({ event_name: 'ViewContent', event_id: 'vc-1', custom_data: listing }, {});
+  const meta = metaPayload(e, {}).data[0].custom_data;
+  assert.equal(meta.content_type, 'home_listing');
+  assert.deepEqual(meta.content_ids, ['988']);
+  assert.deepEqual(meta.contents, [{ id: '988', quantity: 1, title: 'Rodinný dom Trnava' }]);
+  assert.equal(meta.value, undefined, 'no price, no value');
+
+  const ga4 = ga4Payload(e, {}).events[0];
+  assert.equal(ga4.name, 'view_item');
+  assert.deepEqual(ga4.params.items, [{ item_id: '988', item_name: 'Rodinný dom Trnava', quantity: 1, price: undefined }]);
+  assert.equal(ga4.params.value, undefined);
+  assert.equal(ga4.params.currency, undefined);
+
+  const priced = normalizeEvent({ event_name: 'ViewContent', custom_data: {
+    ...listing, value: 385000, value_net: 385000, currency: 'EUR',
+    contents: [{ ...listing.contents[0], item_price: 385000, price_net: 385000 }],
+  } }, {});
+  assert.equal(metaPayload(priced, {}).data[0].custom_data.value, 385000);
+  const pricedGa4 = ga4Payload(priced, {}).events[0].params;
+  assert.equal(pricedGa4.value, 385000);
+  assert.equal(pricedGa4.currency, 'EUR');
+  assert.equal(pricedGa4.items[0].price, 385000);
+});

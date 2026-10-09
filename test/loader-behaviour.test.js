@@ -123,6 +123,30 @@ test('a product page also fires ViewContent with the published product data', ()
   assert.equal(pixel[3].eventID, vc.body.event_id);
 });
 
+test('a listing page (custom post type catalog) fires ViewContent with home_listing on both legs, under consent', () => {
+  const data = {
+    content_name: 'Rodinný dom', content_ids: ['988'], content_type: 'home_listing',
+    contents: [{ id: '988', item_name: 'Rodinný dom', quantity: 1 }],
+  };
+  const b = browser({ page: { type: 'product', data } });
+  b.run();
+  const vc = b.posts.find((p) => p.body.event_name === 'ViewContent');
+  assert.deepEqual(vc.body.custom_data, data);
+  const pixel = tracked(b.fbq).find((c) => c[1] === 'ViewContent');
+  assert.equal(pixel[2].content_type, 'home_listing');
+  assert.deepEqual(pixel[2].content_ids, ['988']);
+  assert.deepEqual(pixel[2].contents, [{ id: '988', quantity: 1, title: 'Rodinný dom' }]);
+  assert.equal(pixel[3].eventID, vc.body.event_id, 'one id: Meta dedupes the pixel and the gateway leg');
+
+  const gated = browser({ consent: { mode: 'complianz' }, page: { type: 'product', data } });
+  gated.run();
+  assert.equal(gated.posts.length + gated.fbq.length, 0, 'nothing before consent');
+  const stats = browser({ consent: { mode: 'complianz' }, cookie: 'cmplz_statistics=allow', page: { type: 'product', data } });
+  stats.run();
+  assert.ok(stats.posts.find((p) => p.body.event_name === 'ViewContent'), 'statistics alone: to the gateway for GA4');
+  assert.equal(tracked(stats.fbq).length, 0, 'but not to the pixel');
+});
+
 test('each visitor gets a fresh event id even though the page came from cache', () => {
   const page = { type: 'product', data: { content_ids: ['42'] } };
   const a = browser({ page }); a.run();
