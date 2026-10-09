@@ -1,11 +1,11 @@
 {
-  "version": "1.2.1",
-  "file": "nowera-capi-1.2.1.zip",
-  "sha256": "008d3bcf1856efc9928fb8d0c390b995584a8986b8957b7b02cea75a9024dcf8",
-  "signature": "yEIxaPBF0BkAvM76PWEwsbCGrqXsMLp/W/tvz3zI7JSkZg9399uTSnbDREsMy/ONAsUdE0JqpiwzRyPfyHIqAQ==",
-  "released_at": "2026-10-07T15:33:27.455Z",
+  "version": "1.2.2",
+  "file": "nowera-capi-1.2.2.zip",
+  "sha256": "a18a1875e400ba168e54954a7881266518879eaba74a7bd2fd3a679fb3901a37",
+  "signature": "X71kjFDjRYu2Vh0xzNfdvkVRZ9d85iRpIASIkC/ikRgvzTkckefGg/TRaxQaWh31XB5+UEErlcbOaLr3p4V2CA==",
+  "released_at": "2026-10-09T13:11:47.897Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Bricksforge Pro Forms: leads a newsletter"
+  "notes": "Katalóg z vlastného typu obsahu (napr. nehnuteľnosti): ViewContent / view_item"
 }
