@@ -255,7 +255,9 @@ export function qualityFindings(rows) {
   const expectsBrowser = ['AddToCart', 'InitiateCheckout', 'Purchase'];
   for (const name of expectsBrowser) {
     const r = get(name);
-    if (r && r.server > 0 && r.browser === 0) {
+    // A handful of checkouts in a week can all come from browsers that block
+    // trackers; only a real sample without any browser leg says something.
+    if (r && r.server >= 10 && r.browser === 0) {
       out.push({ tone: 'warn', event: name, title: 'Ide len zo servera.',
         text: 'Meta nevie porovnať pixel so serverom. Pomôže prehliadačová vetva s rovnakým event_id.' });
     }

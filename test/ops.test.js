@@ -364,3 +364,22 @@ test('WP-Cron install check: calls, fresh plugin reports, server cron, unknown',
   assert.equal(cronCheck({ cron_enabled: false, cron_report: { disabled: true, due: 0, at: '2026-10-05T00:00:00Z' } }, now).state, 'warn', 'an old report proves nothing');
   assert.equal(cronCheck({ cron_enabled: false }, now).state, 'warn');
 });
+
+
+test('order audit: orders placed before measuring began are excluded, recorded ones are judged', async () => {
+  const { classifyOrder } = await import('../src/lib/order-audit.js');
+  const now = Date.parse('2026-10-09T12:00:00Z');
+  const since = '2026-10-06T08:00:00Z';
+  const old = { ready: true, consent: '', has_ctx: false, via: 'checkout', status: 'dorucena', created_at: '2026-10-04T09:33:00Z', paid_at: '2026-10-04T09:34:00Z' };
+  assert.deepEqual(classifyOrder(old, { destinations: [{ id: 1, kind: 'meta' }], now, since }), { state: 'excluded', reason: 'pred spustením merania' });
+  assert.equal(classifyOrder(old, { destinations: [{ id: 1, kind: 'meta' }], now }).state, 'missing', 'without the start date as before');
+  const recorded = { ...old, consent: 'marketing', has_ctx: true };
+  assert.equal(classifyOrder(recorded, { destinations: [{ id: 1, kind: 'meta' }], now, since, received: false }).state, 'missing');
+});
+
+test('quality: "only from the server" needs a real sample, not two checkouts', async () => {
+  const { qualityFindings } = await import('../src/lib/stats.js');
+  const row = (server) => ({ event_name: 'InitiateCheckout', n: server, server, browser: 0, fbp: 1, fbc: 1, em: 1, ph: 1 });
+  assert.equal(qualityFindings([row(2)]).filter((f) => f.title === 'Ide len zo servera.').length, 0);
+  assert.equal(qualityFindings([row(12)]).filter((f) => f.title === 'Ide len zo servera.').length, 1);
+});

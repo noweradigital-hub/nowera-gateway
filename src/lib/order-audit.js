@@ -110,10 +110,15 @@ const GRACE_MS = 2 * 3600_000;
  * id ({ 12: 'sent' | 'dead' | 'pending' }), `destinations` the tenant's active
  * ones ({ id, kind, scope }).
  */
-export function classifyOrder(o, { received, deliveries = {}, destinations = [], now = Date.now() }) {
+export function classifyOrder(o, { received, deliveries = {}, destinations = [], now = Date.now(), since = null }) {
   const at = new Date(o.paid_at || o.created_at || now).getTime();
   const young = now - at < GRACE_MS;
   if (!o.ready) return { state: 'excluded', reason: `nezapočítaná: ${o.status}` };
+  // Placed before this shop's measuring began (and shown now only because its
+  // status changed): nothing could have reported it. An order the plugin did
+  // record is judged as usual.
+  const before = since && o.created_at && new Date(o.created_at).getTime() < new Date(since).getTime();
+  if (before && !o.has_ctx && !o.consent && !received) return { state: 'excluded', reason: 'pred spustením merania' };
   if (o.consent === 'none') return { state: 'excluded', reason: 'bez súhlasu s cookies' };
   if (!o.consent) {
     if (!o.has_ctx && o.via && o.via !== 'checkout') return { state: 'excluded', reason: `mimo pokladne (${o.via})` };
@@ -167,11 +172,11 @@ export async function auditRows(tenantId, days = 14) {
 }
 
 /** Per day: how many orders, how many counted, delivered, excluded and missing. */
-export function summarise(rows, destinations, now = Date.now()) {
+export function summarise(rows, destinations, now = Date.now(), { since = null } = {}) {
   const days = new Map();
   const missing = [];
   for (const row of rows) {
-    const verdict = classifyOrder(row, { received: row.received, deliveries: row.deliveries || {}, destinations, now });
+    const verdict = classifyOrder(row, { received: row.received, deliveries: row.deliveries || {}, destinations, now, since });
     const day = row.day instanceof Date ? row.day.toISOString().slice(0, 10) : String(row.day).slice(0, 10);
     if (!days.has(day)) days.set(day, { day, orders: 0, eligible: 0, consented: 0, received: 0, ok: 0, pending: 0, missing: 0, excluded: 0 });
     const d = days.get(day);
