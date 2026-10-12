@@ -124,6 +124,36 @@ CREATE TABLE IF NOT EXISTS audit_snapshots (
   completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, day)
 );
+-- From plugin 1.3 the list says what each order is (goods, a booking, a gift
+-- card, a subscription), which events stand for it and how its money splits;
+-- the reports read it, so it is kept longer than the completeness view needs.
+ALTER TABLE order_audit ADD COLUMN IF NOT EXISTS kind TEXT;
+ALTER TABLE order_audit ADD COLUMN IF NOT EXISTS expect JSONB;
+ALTER TABLE order_audit ADD COLUMN IF NOT EXISTS goods NUMERIC(14,2);
+ALTER TABLE order_audit ADD COLUMN IF NOT EXISTS tender NUMERIC(14,2);
+ALTER TABLE order_audit ADD COLUMN IF NOT EXISTS refunded NUMERIC(14,2);
+ALTER TABLE order_audit ADD COLUMN IF NOT EXISTS parts JSONB;
+ALTER TABLE order_audit ADD COLUMN IF NOT EXISTS bookings INTEGER;
+-- Bookings as the site's booking plugin holds them, those entered by staff
+-- included. No contact data: what was booked, when, its state and price.
+CREATE TABLE IF NOT EXISTS booking_ledger (
+  tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  booking_id  TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT 'web',
+  type        TEXT NOT NULL DEFAULT 'appointment',
+  item        TEXT,
+  name        TEXT NOT NULL DEFAULT '',
+  status      TEXT NOT NULL DEFAULT 'unknown',
+  created_at  TIMESTAMPTZ,
+  starts_at   TIMESTAMPTZ,
+  price       NUMERIC(14,2),
+  currency    TEXT,
+  order_id    TEXT,
+  day         DATE NOT NULL,
+  reported_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, booking_id)
+);
+CREATE INDEX IF NOT EXISTS booking_ledger_day_idx ON booking_ledger(tenant_id, day);
 -- The gateway can run the site's WP-Cron itself (pages served from a cache never do).
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_url TEXT;

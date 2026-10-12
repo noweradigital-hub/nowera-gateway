@@ -14,6 +14,7 @@ import { polls, traefikConfig } from './lib/routing.js';
 import collectRoutes from './routes/collect.js';
 import adminRoutes from './routes/admin.js';
 import updateRoutes from './routes/updates.js';
+import reportRoutes from './routes/report.js';
 
 assertConfig();
 
@@ -31,6 +32,7 @@ await app.register(formbody);
 await app.register(collectRoutes);
 await app.register(adminRoutes);
 await app.register(updateRoutes);
+await app.register(reportRoutes);
 
 app.setNotFoundHandler((req, reply) => reply.code(404).type('text/plain').send('not found'));
 

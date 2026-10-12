@@ -122,8 +122,10 @@ export function startStatsWriter(log, intervalMs = 5000) {
   const retention = setInterval(() => {
     query(`DELETE FROM received WHERE created_at < now() - interval '90 days'`)
       .catch((err) => log.error({ err }, 'received retention failed'));
-    // The completeness view looks two weeks back; a month is plenty to keep.
-    query(`DELETE FROM order_audit WHERE day < now() - interval '35 days'`)
+    // The completeness view looks two weeks back; the reports (this month against
+    // the same month a year ago) read the order and booking lists far longer.
+    query(`DELETE FROM order_audit WHERE day < now() - interval '400 days'`)
+      .then(() => query(`DELETE FROM booking_ledger WHERE day < now() - interval '400 days'`))
       .then(() => query(`DELETE FROM audit_snapshots WHERE day < now() - interval '35 days'`))
       .catch((err) => log.error({ err }, 'order audit retention failed'));
   }, 3600_000);

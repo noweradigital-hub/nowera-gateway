@@ -28,10 +28,16 @@ const STRICT = {
   ingest_secret: 'tenant-key', legacy_ingest: false, server_only_events: 'Purchase, AddPaymentInfo',
 };
 
+// A client that only sends to GA4.
+const GA_ONLY = {
+  ...TENANT, id: 3, slug: 'len-ga', collector_host: 't.lenga.sk', allowed_origins: 'https://lenga.sk', cookie_domain: '.lenga.sk',
+  destinations: [{ id: 30, kind: 'ga4', settings: { measurement_id: 'G-TEST', api_secret: 's' } }],
+};
+
 const stubs = {
   tenantByHost: async (host) => {
     const h = String(host).split(':')[0];
-    return h === TENANT.collector_host ? TENANT : h === STRICT.collector_host ? STRICT : null;
+    return h === TENANT.collector_host ? TENANT : h === STRICT.collector_host ? STRICT : h === GA_ONLY.collector_host ? GA_ONLY : null;
   },
   enqueue: async (tenantId, event, destinations) => {
     inserted.push({ tenantId, event, destinations });
@@ -99,6 +105,18 @@ test('a first-party _fbp cookie is set from the server, not from JavaScript', as
   assert.equal(cookies[0].domain, '.klient.sk');
   assert.equal(cookies[0].sameSite, 'Lax');
   assert.ok(!cookies[0].httpOnly, 'the Meta pixel must be able to read _fbp');
+});
+
+test('a client without Meta gets no Meta cookies, only the visitor id', async () => {
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: 't.lenga.sk', origin: 'https://lenga.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'PageView', event_source_url: 'https://lenga.sk/?fbclid=AbC' },
+  });
+  assert.equal(res.statusCode, 200);
+  const names = res.cookies.map((c) => c.name);
+  assert.ok(names.includes('_nwr_id'));
+  assert.ok(!names.includes('_fbp') && !names.includes('_fbc'), 'no Meta destination, no Meta identifiers');
 });
 
 test('_fbc is derived from fbclid on the landing url', async () => {
@@ -435,6 +453,7 @@ test('/r takes the shop\'s signed order list and nothing unsigned', async () => 
   assert.equal(audits[0].snap.orders.length, 1, 'the line that is no order is dropped');
   assert.equal(audits[0].snap.orders[0].order_id, '2025003069');
   assert.equal(audits[0].snap.orders[0].email, undefined, 'no contact data is kept');
+  assert.equal(audits[0].snap.orders[0].expect, null, 'a plugin before 1.3 does not say what an order stands for');
 
   const forged = await postAudit('t.prisny.sk', body, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('wrong', body, ts) });
   assert.equal(forged.statusCode, 401);

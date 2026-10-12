@@ -395,6 +395,132 @@ switch ( $event ) {
 		$purchase = array( 'days' => $days, 'paid' => $paid->get_id(), 'failed' => $failed->get_id(), 'admin' => $admin->get_id(),
 			'scheduled' => (bool) as_has_scheduled_action( 'nowera_capi_audit', array(), 'nowera-capi' ) );
 		break;
+	case 'kind_order':
+		// An order that is not plain goods. &lines=booking,booking2,product,subscription,giftcard
+		// &free=1 (a coupon took it all)  &tender=<amount paid by gift card>  &renewal=1
+		// &then=refund|cancel  &noreturn=1 (paid, the buyer never came back)
+		$order = wc_create_order();
+		foreach ( array_filter( explode( ',', (string) ( $_GET['lines'] ?? 'booking' ) ) ) as $what ) {
+			if ( 'product' === $what ) {
+				$order->add_product( wc_get_product( $ids['simple'] ), 2 );
+				continue;
+			}
+			if ( 'subscription' === $what ) {
+				$sub = new WC_Product_Simple();
+				$sub->set_name( 'Členstvo 1 mesiac' );
+				$sub->set_regular_price( '7.50' );
+				$sub->update_meta_data( '_subscrpt_enabled', '1' );
+				$sub->save();
+				$order->add_product( $sub, 1 );
+				continue;
+			}
+			$item = $order->get_item( $order->add_product( wc_get_product( $ids['variations'][1] ), 1 ) );
+			if ( 'giftcard' === $what ) {
+				$item->add_meta_data( '_nwr_test_kind', 'gift_card', true );
+			} else {
+				// As Amelia leaves it on the line it puts in the cart.
+				$item->add_meta_data( 'ameliabooking', array(
+					'type' => 'appointment', 'serviceId' => 'booking2' === $what ? 1 : 5,
+					'name' => 'booking2' === $what ? 'Konzultácia' : 'Masáž 60 min',
+					'bookingStart' => '2026-11-30 18:25', 'bookings' => array( array( 'customer' => array( 'email' => 'secret@example.com' ) ) ),
+				), true );
+			}
+			$item->save();
+		}
+		// Stands in for a gift-card plugin's product type, which only that plugin registers.
+		add_filter( 'nowera_capi_line_kind', function ( $kind, $line ) {
+			return $line->get_meta( '_nwr_test_kind' ) ?: $kind;
+		}, 10, 2 );
+		$order->set_address( array(
+			'first_name' => 'Ján', 'last_name' => 'Novák', 'email' => 'Jan.Novak@Example.com',
+			'phone' => '+421 903 123 456', 'city' => 'Banská Bystrica', 'postcode' => '974 01', 'country' => 'SK',
+		), 'billing' );
+		if ( ! empty( $_GET['free'] ) ) {
+			foreach ( $order->get_items() as $line ) {
+				$line->set_total( 0 );
+				$line->save();
+			}
+		}
+		$order->calculate_totals();
+		$goods  = (float) $order->get_total();
+		$tender = isset( $_GET['tender'] ) ? (float) $_GET['tender'] : 0.0;
+		if ( $tender > 0 ) {
+			// A gift card lowers what is left to pay; the adapter reads it off the order.
+			$order->set_total( max( 0, $goods - $tender ) );
+			$order->update_meta_data( '_nwr_test_tender', $tender );
+			add_filter( 'nowera_capi_order_tender', function ( $t, $o ) {
+				return $t + (float) $o->get_meta( '_nwr_test_tender' );
+			}, 10, 2 );
+		}
+		if ( ! empty( $_GET['renewal'] ) ) {
+			$order->set_created_via( '' );
+			add_filter( 'nowera_capi_order_renewal', '__return_true' );
+		}
+		$order->save();
+		if ( empty( $_GET['renewal'] ) ) {
+			do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		}
+		$order = wc_get_order( $order->get_id() );
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		remove_all_actions( 'wp_footer' );
+		if ( ! empty( $_GET['unreported'] ) ) {
+			// Paid, and neither the thank-you page nor the after-payment job has run yet.
+			$order->set_status( 'processing' );
+			$order->save();
+		} elseif ( ! empty( $_GET['noreturn'] ) || ! empty( $_GET['renewal'] ) ) {
+			nwr_cookies( array() ); // the payment's confirmation carries no visitor
+			$order->payment_complete( 'TX-TEST' );
+			do_action( 'nowera_capi_purchase_fallback', $order->get_id() );
+		} else {
+			$order->set_status( 'processing' );
+			$order->save();
+			ob_start();
+			do_action( 'woocommerce_thankyou', $order->get_id() );
+			do_action( 'woocommerce_thankyou', $order->get_id() ); // refresh of the thank-you page
+			ob_end_clean();
+		}
+		ob_start();
+		do_action( 'wp_footer' );
+		$footer = ob_get_clean();
+		foreach ( array_filter( explode( ',', (string) ( $_GET['then'] ?? '' ) ) ) as $then ) {
+		$then  = sanitize_key( $then );
+		$order = wc_get_order( $order->get_id() );
+		if ( 'refund' === $then || 'refund_small' === $then ) {
+			nwr_flush();
+			wc_create_refund( array( 'order_id' => $order->get_id(), 'amount' => 'refund_small' === $then ? 10 : round( (float) $order->get_total() / 2, 2 ), 'reason' => 'test' ) );
+		} elseif ( 'cancel' === $then ) {
+			nwr_flush();
+			wc_get_order( $order->get_id() )->update_status( 'cancelled' );
+		} elseif ( 'refund_booking' === $then || 'refund_goods' === $then ) {
+			// Line by line: only the booking, or only the goods.
+			nwr_flush();
+			$lines  = array();
+			$amount = 0.0;
+			foreach ( $order->get_items() as $id => $line ) {
+				if ( (bool) $line->get_meta( 'ameliabooking' ) === ( 'refund_booking' === $then ) ) {
+					$lines[ $id ] = array( 'qty' => $line->get_quantity(), 'refund_total' => (float) $line->get_total() );
+					$amount      += (float) $line->get_total();
+				}
+			}
+			wc_create_refund( array( 'order_id' => $order->get_id(), 'amount' => $amount, 'reason' => 'test', 'line_items' => $lines ) );
+		}
+		}
+		$fresh    = wc_get_order( $order->get_id() );
+		$purchase = array(
+			'order'   => $fresh->get_id(),
+			'total'   => (float) $fresh->get_total(),
+			'goods'   => $goods,
+			'consent' => $fresh->get_meta( '_nowera_capi_purchase_consent' ),
+			'sent'    => (bool) $fresh->get_meta( '_nowera_capi_purchase_sent' ),
+			'plan'    => $fresh->get_meta( '_nowera_capi_plan' ),
+			'line'    => nowera_capi_audit_line( $fresh ),
+			'notes'   => array_map(
+				function ( $n ) { return $n->content; },
+				wc_get_order_notes( array( 'order_id' => $fresh->get_id(), 'limit' => 5 ) )
+			),
+		);
+		break;
 	case 'remove_from_cart':
 		WC()->cart->empty_cart();
 		$key = WC()->cart->add_to_cart( $ids['simple'], 3 );

@@ -3,7 +3,7 @@ import { dateTime, pill } from './components.js';
 import { RULES } from '../lib/alerts.js';
 
 /** Alert rules, the webhook they go to, and what happened in the last 30 days. */
-export function alertsPage({ settings, history }) {
+export function alertsPage({ settings, history, report = null, newKey = null }) {
   const open = history.filter((a) => !a.resolved_at);
   const bars = open.map((a) => `
     <div class="alertbar bad"><span><b>${esc(a.tenant_name || 'Gateway')}:</b> ${esc(RULES[a.rule]?.title || a.rule)} — ${esc(a.message)}</span>
@@ -47,6 +47,19 @@ export function alertsPage({ settings, history }) {
             <code>text</code>. V n8n: Webhook (POST) → e-mail alebo Slack s <code>{{ $json.body.text }}</code>.</div></div>
         ${settings.webhook_url ? '<label class="check"><input type="checkbox" name="clear_webhook"> <span>Zmazať uložený webhook</span></label>' : ''}
         <div class="actions"><button class="btn primary" type="submit">Uložiť</button></div>
+      </form>
+    </div>
+  </div>
+  <div class="card" id="reporty">
+    <div class="card-h"><h2>Reporty (n8n)</h2><span class="sub">denné čísla všetkých klientov na stiahnutie</span></div>
+    <div class="card-b form">
+      ${newKey ? `<div class="alertbar ok"><span>Nový kľúč (zobrazí sa len teraz, uložte si ho do n8n): <code class="mono">${esc(newKey)}</code></span></div>` : ''}
+      <div class="hint" style="margin:0">Objednávky, rezervácie, poukazy a predplatné podľa dní, zo zoznamu, ktorý plugin 1.3+ posiela každú hodinu.
+        V n8n: HTTP Request (GET) na <code>/api/report/daily?from=2026-10-01&amp;to=2026-10-31</code> s hlavičkou
+        <code>Authorization: Bearer &lt;kľúč&gt;</code>; jeden klient cez <code>&amp;tenant=slug</code>. Bez <code>from</code> a <code>to</code> posledných 7 dní.</div>
+      <form class="inline" method="post" action="/admin/reporty/kluc">
+        <div class="actions"><span class="dim" style="font-size:12.5px">${report ? `Kľúč vytvorený ${dateTime(report.created_at)}.` : 'Kľúč zatiaľ nie je vytvorený.'}</span>
+          <button class="btn" type="submit">${report ? 'Vytvoriť nový kľúč (starý prestane platiť)' : 'Vytvoriť kľúč'}</button></div>
       </form>
     </div>
   </div>`;

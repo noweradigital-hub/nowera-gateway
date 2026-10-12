@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.2.2
+ * Version:      1.3.0
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.2.2';
+const NOWERA_CAPI_VERSION = '1.3.0';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -1611,10 +1611,13 @@ function nowera_capi_note_status( ?string $error ): void {
  * after-payment job tries again from the order, later each time.
  */
 function nowera_capi_purchase_failed( int $order_id, string $error ): void {
+	static $done = array();
 	$order = wc_get_order( $order_id );
-	if ( ! $order ) {
+	// An order's Lead and Purchase failing together are one failure, one retry.
+	if ( ! $order || isset( $done[ $order_id ] ) ) {
 		return;
 	}
+	$done[ $order_id ] = true;
 	$attempt = (int) $order->get_meta( '_nowera_capi_purchase_retry' ) + 1;
 	$delays  = array( 2, 10, 30, 60, 180 ); // minutes
 	$order->delete_meta_data( '_nowera_capi_purchase_sent' );
@@ -1632,11 +1635,13 @@ function nowera_capi_purchase_failed( int $order_id, string $error ): void {
 
 /** Plain-language outcome of a Purchase, written to the order so it can be checked later. */
 function nowera_capi_record_outcome( \WC_Order $order, string $outcome, bool $after_payment = false ): void {
+	$what  = nowera_capi_plan_label( $order );
 	$notes = array(
-		'marketing'      => 'Purchase odoslaný do Mety aj GA4 (súhlas: marketing).',
-		'statistics'     => 'Purchase odoslaný len pre štatistiku — bez marketingového súhlasu ho Meta nedostane.',
-		'none'           => 'Purchase neodoslaný — návštevník nedal súhlas s cookies.',
-		'not_configured' => 'Purchase neodoslaný — plugin nemá vyplnený collector alebo kľúč.',
+		'marketing'      => $what . ' odoslaný do Mety aj GA4 (súhlas: marketing).',
+		'statistics'     => $what . ' odoslaný len pre štatistiku — bez marketingového súhlasu ho Meta nedostane.',
+		'none'           => $what . ' neodoslaný — návštevník nedal súhlas s cookies.',
+		'not_configured' => $what . ' neodoslaný — plugin nemá vyplnený collector alebo kľúč.',
+		'ledger'         => 'Do Mety ani GA4 sa neposiela (nulová suma alebo obnovenie predplatného) — objednávka je len v evidencii.',
 	);
 	$note = $notes[ $outcome ] ?? $outcome;
 	if ( $after_payment ) {
@@ -1698,8 +1703,212 @@ function nowera_capi_order_items( \WC_Order $order ): array {
 	return $items;
 }
 
-function nowera_capi_purchase_data( \WC_Order $order ): array {
-	$contents = nowera_capi_order_items( $order );
+/* -------------------------------------------------------------------------
+ * What an order is, and how it is reported
+ * ---------------------------------------------------------------------- */
+
+/**
+ * What one order line sells: a product unless an adapter (adapters/*.php) knows
+ * better — a booking, a gift card, a subscription. A refund's line is what the
+ * line it gives back was.
+ */
+function nowera_capi_line_kind( \WC_Order_Item_Product $line, \WC_Abstract_Order $order ): string {
+	$origin = (int) $line->get_meta( '_refunded_item_id' );
+	if ( $origin ) {
+		$original = \WC_Order_Factory::get_order_item( $origin );
+		if ( $original instanceof \WC_Order_Item_Product ) {
+			$line = $original;
+		}
+	}
+	$kind = (string) apply_filters( 'nowera_capi_line_kind', 'product', $line, $order );
+	return preg_match( '/^[a-z][a-z0-9_]{0,29}$/', $kind ) ? $kind : 'product';
+}
+
+/** Kinds that are a lead (an appointment booked), not a sale of goods. */
+function nowera_capi_lead_kinds(): array {
+	return (array) apply_filters( 'nowera_capi_lead_kinds', array( 'booking' ) );
+}
+
+/** The part of an order settled with a voucher (a gift card), not with money. */
+function nowera_capi_order_tender( \WC_Order $order ): float {
+	return max( 0.0, round( (float) apply_filters( 'nowera_capi_order_tender', 0.0, $order ), wc_get_price_decimals() ) );
+}
+
+/**
+ * How an order is reported. A booking is a Lead, whether paid or free; goods
+ * are a Purchase of the money actually paid for them (a gift card was counted
+ * when it was sold, so what it settles later is not counted again); an order
+ * that cost nothing and a subscription's renewal are kept in the order list
+ * only. Amounts are split by what the lines are worth.
+ *
+ * Returns kind (of the order: one kind, 'mixed' or 'renewal'), expect (the
+ * events to send), paid, tender, goods, parts (money paid per kind) and the
+ * lead / purchase / subscribe figures.
+ */
+function nowera_capi_order_plan( \WC_Order $order ): array {
+	$dp      = wc_get_price_decimals();
+	$total   = (float) $order->get_total();
+	$tender  = nowera_capi_order_tender( $order );
+	$base    = $total + $tender; // what was sold, however it was settled
+	$cash    = $base > 0 ? $total / $base : 0.0;
+	$leads   = nowera_capi_lead_kinds();
+	$renewal = (bool) apply_filters( 'nowera_capi_order_renewal', false, $order );
+
+	$gross = array(); // per kind, with VAT, after coupons
+	$net   = array();
+	$tax   = array();
+	$qty   = array();
+	$names = array();
+	foreach ( $order->get_items() as $line ) {
+		if ( ! $line instanceof \WC_Order_Item_Product ) {
+			continue;
+		}
+		$kind           = nowera_capi_line_kind( $line, $order );
+		$gross[ $kind ] = ( $gross[ $kind ] ?? 0 ) + (float) $line->get_total() + (float) $line->get_total_tax();
+		$net[ $kind ]   = ( $net[ $kind ] ?? 0 ) + (float) $line->get_total();
+		$tax[ $kind ]   = ( $tax[ $kind ] ?? 0 ) + (float) $line->get_total_tax();
+		$qty[ $kind ]   = ( $qty[ $kind ] ?? 0 ) + (int) $line->get_quantity();
+		$names[ $kind ][] = (string) apply_filters( 'nowera_capi_line_name', $line->get_name(), $line, $order );
+	}
+
+	$parts = array();
+	foreach ( $gross as $kind => $amount ) {
+		$parts[ $kind ] = round( $amount * $cash, $dp );
+	}
+	// Shipping and fees: money paid for none of the lines.
+	$rest = round( $total - array_sum( $parts ), $dp );
+	if ( abs( $rest ) >= 0.01 ) {
+		$parts['other'] = $rest;
+	}
+
+	$lead_kinds     = array_values( array_intersect( array_keys( $gross ), $leads ) );
+	$purchase_kinds = array_values( array_diff( array_keys( $gross ), $leads ) );
+	$lead_value     = 0.0;
+	foreach ( $lead_kinds as $kind ) {
+		$lead_value += $parts[ $kind ];
+	}
+	$lead_value     = round( $lead_value, $dp );
+	// An order without a single product line (fees only) is still a sale.
+	$purchase       = $purchase_kinds || ! $lead_kinds;
+	$purchase_value = $purchase ? round( max( 0, $total - $lead_value ), $dp ) : 0.0;
+
+	$expect = array();
+	if ( ! $renewal ) {
+		if ( $lead_kinds ) {
+			$expect[] = 'Lead';
+		}
+		if ( $purchase_value > 0 ) {
+			$expect[] = 'Purchase';
+			if ( ( $parts['subscription'] ?? 0 ) > 0 ) {
+				$expect[] = 'Subscribe';
+			}
+		}
+	}
+
+	$kinds = array_keys( $gross );
+	$plan  = array(
+		'kind'    => $renewal ? 'renewal' : ( 1 === count( $kinds ) ? $kinds[0] : ( $kinds ? 'mixed' : 'product' ) ),
+		'expect'  => $expect,
+		'paid'    => round( $total, $dp ),
+		'tender'  => $tender,
+		'goods'   => round( $base, $dp ),
+		'parts'   => $parts,
+		'cash'    => $cash,
+		'split'   => (bool) $lead_kinds || $tender > 0, // the Purchase is not simply the whole order
+		'lead'    => null,
+		'purchase' => null,
+		'subscribe' => null,
+	);
+	if ( $lead_kinds ) {
+		$lead_names = array();
+		$count      = 0;
+		foreach ( $lead_kinds as $kind ) {
+			$lead_names = array_merge( $lead_names, $names[ $kind ] );
+			$count     += $qty[ $kind ];
+		}
+		$plan['lead'] = array(
+			'value' => $lead_value,
+			'kind'  => $lead_kinds[0],
+			'names' => array_values( array_unique( array_filter( $lead_names ) ) ),
+			'count' => $count,
+		);
+	}
+	if ( $purchase ) {
+		$p_net = 0.0;
+		$p_tax = 0.0;
+		$p_qty = 0;
+		foreach ( $purchase_kinds as $kind ) {
+			$p_net += $net[ $kind ];
+			$p_tax += $tax[ $kind ];
+			$p_qty += $qty[ $kind ];
+		}
+		$plan['purchase'] = array(
+			'value'     => $purchase_value,
+			'value_net' => round( $p_net * $cash, $dp ),
+			'tax'       => round( ( $p_tax + (float) $order->get_shipping_tax() ) * $cash, $dp ),
+			'shipping'  => round( (float) $order->get_shipping_total() * $cash, $dp ),
+			'num_items' => $p_qty,
+			'kinds'     => $purchase_kinds,
+			// The share of the order's money a refund of "an amount" takes back from GA4.
+			'share'     => $total > 0 ? $purchase_value / $total : 0.0,
+		);
+	}
+	if ( in_array( 'Subscribe', $expect, true ) ) {
+		$plan['subscribe'] = array(
+			'value' => $parts['subscription'],
+			'names' => array_values( array_unique( array_filter( $names['subscription'] ) ) ),
+		);
+	}
+	return $plan;
+}
+
+/** The plan an order was reported under, or null for one reported before plans existed. */
+function nowera_capi_reported_plan( \WC_Order $order ): ?array {
+	$stored = $order->get_meta( '_nowera_capi_plan' );
+	return is_array( $stored ) && isset( $stored['expect'] ) && is_array( $stored['expect'] ) ? $stored : null;
+}
+
+/**
+ * The plan a refund or a cancellation goes by: the one the order was reported
+ * under; for an order not reported yet (refunded before its buyer returned or
+ * its payment's confirmation was worked off) the one it would be reported
+ * under; null for an order reported before plans existed — a plain Purchase.
+ */
+function nowera_capi_refund_plan( \WC_Order $order ): ?array {
+	$plan = nowera_capi_reported_plan( $order );
+	if ( $plan || $order->get_meta( '_nowera_capi_purchase_sent' ) ) {
+		return $plan;
+	}
+	$now = nowera_capi_order_plan( $order );
+	return array(
+		'expect' => $now['expect'],
+		'share'  => $now['purchase']['share'] ?? 0.0,
+		'net'    => $now['split'] ? ( $now['purchase']['value_net'] ?? 0.0 ) : nowera_capi_order_net( $order ),
+		'split'  => $now['split'],
+		'cash'   => $now['cash'],
+	);
+}
+
+function nowera_capi_purchase_data( \WC_Order $order, ?array $plan = null ): array {
+	$plan     = $plan ?? nowera_capi_order_plan( $order );
+	$leads    = nowera_capi_lead_kinds();
+	$contents = array();
+	foreach ( $order->get_items() as $line ) {
+		// A booking on the same order is its own Lead, not part of the purchase.
+		if ( $line instanceof \WC_Order_Item_Product && ! in_array( nowera_capi_line_kind( $line, $order ), $leads, true ) ) {
+			$item = nowera_capi_order_item( $line, $order );
+			// Part paid with a gift card: each item at the share paid in money, so the
+			// items add up to the purchase's value.
+			if ( $plan['tender'] > 0 ) {
+				foreach ( array( 'item_price', 'price_net', 'discount' ) as $key ) {
+					if ( isset( $item[ $key ] ) ) {
+						$item[ $key ] = round( $item[ $key ] * $plan['cash'], wc_get_price_decimals() );
+					}
+				}
+			}
+			$contents[] = $item;
+		}
+	}
 
 	// value is what the customer paid, VAT and shipping included (Meta, and the
 	// shop's own reports); GA4 counts value_net — the items without VAT and
@@ -1716,6 +1925,17 @@ function nowera_capi_purchase_data( \WC_Order $order ): array {
 		'tax'          => round( (float) $order->get_total_tax(), wc_get_price_decimals() ),
 		'shipping'     => round( (float) $order->get_shipping_total(), wc_get_price_decimals() ),
 	);
+	// Part of the order is a lead, or part was settled with a gift card: only the
+	// money paid for the goods counts.
+	if ( $plan['split'] && $plan['purchase'] ) {
+		$custom_data = array_merge( $custom_data, array_intersect_key( $plan['purchase'], array_flip( array( 'value', 'value_net', 'tax', 'shipping', 'num_items' ) ) ) );
+	}
+	// Gift cards and subscriptions apart from goods, for a conversion of their own.
+	$kinds    = $plan['purchase']['kinds'] ?? array();
+	$category = 1 === count( $kinds ) ? $kinds[0] : ( $kinds ? 'mixed' : 'product' );
+	if ( 'product' !== $category ) {
+		$custom_data['content_category'] = $category;
+	}
 	if ( $order->get_coupon_codes() ) {
 		$custom_data['coupon'] = implode( ',', $order->get_coupon_codes() );
 	}
@@ -1725,6 +1945,72 @@ function nowera_capi_purchase_data( \WC_Order $order ): array {
 		$custom_data['customer_segmentation'] = $segment;
 	}
 	return $custom_data;
+}
+
+/** The names of what was booked or subscribed to, as one label. */
+function nowera_capi_names_label( array $names ): string {
+	return mb_substr( wp_strip_all_tags( implode( ' + ', $names ) ), 0, 100 );
+}
+
+/**
+ * Sends everything an order's plan expects — a Lead for its bookings, a
+ * Purchase for its goods, a Subscribe for a new subscription — and remembers
+ * the plan on the order, so a later refund knows what there is to take back.
+ * Returns what nowera_capi_send does, or 'ledger' when the order is reported to
+ * nobody (it cost nothing, or it renews a subscription) and only kept in the
+ * order list. `$on_page` adds the browser halves (the thank-you page).
+ */
+function nowera_capi_report_order( \WC_Order $order, array $user, ?array $ctx = null, bool $on_page = false ): string {
+	$plan = nowera_capi_order_plan( $order );
+	$order->update_meta_data( '_nowera_capi_plan', array(
+		'kind'   => $plan['kind'],
+		'expect' => $plan['expect'],
+		// For a refund later: the Purchase's share of the order's money, what GA4
+		// was told it is worth, and whether it was the whole order as it stands.
+		'share'  => $plan['purchase']['share'] ?? 0.0,
+		'net'    => $plan['split'] ? ( $plan['purchase']['value_net'] ?? 0.0 ) : nowera_capi_order_net( $order ),
+		'split'  => $plan['split'],
+		'cash'   => $plan['cash'],
+	) );
+	if ( ! $plan['expect'] ) {
+		return 'ledger';
+	}
+	$url     = nowera_capi_order_url( $order );
+	$id      = $order->get_id();
+	$events  = array();
+	if ( in_array( 'Lead', $plan['expect'], true ) ) {
+		$events[] = array( 'Lead', 'book-' . $id, array(
+			'value'            => $plan['lead']['value'],
+			'currency'         => $order->get_currency(),
+			'content_name'     => nowera_capi_names_label( $plan['lead']['names'] ),
+			'content_category' => $plan['lead']['kind'],
+			'num_items'        => $plan['lead']['count'],
+		) );
+	}
+	if ( in_array( 'Purchase', $plan['expect'], true ) ) {
+		$events[] = array( 'Purchase', 'ord-' . $id, nowera_capi_purchase_data( $order, $plan ) );
+	}
+	if ( in_array( 'Subscribe', $plan['expect'], true ) ) {
+		$events[] = array( 'Subscribe', 'sub-' . $id, array(
+			'value'        => $plan['subscribe']['value'],
+			'currency'     => $order->get_currency(),
+			'content_name' => nowera_capi_names_label( $plan['subscribe']['names'] ),
+		) );
+	}
+	$outcome = 'none';
+	foreach ( $events as $event ) {
+		$outcome = nowera_capi_send( $event[0], $event[1], $user, $event[2], $url, $ctx, $id );
+		if ( $on_page ) {
+			nowera_capi_browser_leg( $event[0], $event[1], $event[2] );
+		}
+	}
+	return $outcome;
+}
+
+/** What an order's plan sends, in words for the order note. */
+function nowera_capi_plan_label( \WC_Order $order ): string {
+	$plan = nowera_capi_reported_plan( $order );
+	return $plan && $plan['expect'] ? implode( ' + ', $plan['expect'] ) : 'Purchase';
 }
 
 /**
@@ -2049,24 +2335,53 @@ add_action( 'bricksforge/pro_forms/after_submit', function ( $form_data, $return
 }, 10, 2 );
 
 /* -------------------------------------------------------------------------
+ * Adapters: what other plugins' orders are
+ * ---------------------------------------------------------------------- */
+
+// Each one only answers the filters above for data its own plugin wrote, so
+// loading them all costs nothing on a site without that plugin.
+foreach ( array( 'amelia', 'wpsubscription', 'pw-gift-cards' ) as $nowera_capi_adapter ) {
+	$nowera_capi_adapter = __DIR__ . '/adapters/' . $nowera_capi_adapter . '.php';
+	if ( is_readable( $nowera_capi_adapter ) ) {
+		require_once $nowera_capi_adapter;
+	}
+}
+unset( $nowera_capi_adapter );
+
+/* -------------------------------------------------------------------------
  * Order list for the completeness check
  * ---------------------------------------------------------------------- */
 
 /**
- * Every six hours the orders that changed in the last three days (new, paid,
+ * Every hour the orders that changed in the last three days (new, paid,
  * cancelled, refunded) go to the gateway, signed like the events: id, the day it
- * was created (shop time zone), status, times, total and what this plugin did
- * with it. No contact data. The gateway sets them against the Purchase events it
- * received and delivered, so a shop can see that every paid order with consent
- * arrived — and why the others did not count. Read and sent 200 at a time.
+ * was created (shop time zone), status, times, what it is (goods, a booking, a
+ * gift card, a subscription), its amounts and what this plugin did with it. No
+ * contact data. The gateway sets them against the events it received and
+ * delivered, so a shop can see that every order with consent arrived — and why
+ * the others did not count — and keeps them as the order list its reports read.
+ * Read and sent 200 at a time.
  */
+const NOWERA_CAPI_AUDIT_EVERY = HOUR_IN_SECONDS;
+/** How far back the first list after an update reaches, so the reports have a history. */
+const NOWERA_CAPI_BACKFILL_DAYS = 90;
+
 add_action( 'action_scheduler_init', function () {
 	$s = nowera_capi_settings();
 	if ( empty( $s['collector_host'] ) || empty( $s['ingest_secret'] ) || ! function_exists( 'as_has_scheduled_action' ) ) {
 		return;
 	}
+	// The list used to go every six hours: put it on the current rhythm once.
+	if ( (int) get_option( 'nowera_capi_audit_every' ) !== NOWERA_CAPI_AUDIT_EVERY ) {
+		as_unschedule_all_actions( 'nowera_capi_audit', array(), 'nowera-capi' );
+		update_option( 'nowera_capi_audit_every', NOWERA_CAPI_AUDIT_EVERY, false );
+	}
 	if ( ! as_has_scheduled_action( 'nowera_capi_audit', array(), 'nowera-capi' ) ) {
-		as_schedule_recurring_action( time() + 10 * MINUTE_IN_SECONDS, 6 * HOUR_IN_SECONDS, 'nowera_capi_audit', array(), 'nowera-capi' );
+		as_schedule_recurring_action( time() + 10 * MINUTE_IN_SECONDS, NOWERA_CAPI_AUDIT_EVERY, 'nowera_capi_audit', array(), 'nowera-capi' );
+	}
+	// Once per version of the list: the older orders, described the new way.
+	if ( get_option( 'nowera_capi_backfill' ) !== '1.3' && ! as_has_scheduled_action( 'nowera_capi_audit_backfill', array(), 'nowera-capi' ) ) {
+		as_schedule_single_action( time() + 2 * MINUTE_IN_SECONDS, 'nowera_capi_audit_backfill', array(), 'nowera-capi' );
 	}
 } );
 
@@ -2074,14 +2389,62 @@ add_action( 'nowera_capi_audit', function () {
 	nowera_capi_send_audit();
 } );
 
-/** Sends the orders changed in the last `$days` days; true when every page went through. */
-function nowera_capi_send_audit( int $days = 3 ): bool {
-	$tz    = wp_timezone();
-	$today = ( new \DateTimeImmutable( 'now', $tz ) )->format( 'Y-m-d' );
-	$since = time() - $days * DAY_IN_SECONDS;
-	$per   = 200;
-	$page  = 1;
-	$pages = 1;
+add_action( 'nowera_capi_audit_backfill', function ( $page = 1, $attempt = 1 ) {
+	// Marked first, so page loads do not queue it again while it runs.
+	update_option( 'nowera_capi_backfill', '1.3', false );
+	$page = max( 1, (int) $page );
+	// A busy shop's quarter of a year does not fit one run: twenty seconds at a
+	// time, the next run takes over where this one stopped.
+	$next = nowera_capi_send_audit( NOWERA_CAPI_BACKFILL_DAYS, $page, 20 );
+	if ( ! function_exists( 'as_schedule_single_action' ) ) {
+		return;
+	}
+	if ( is_int( $next ) ) {
+		as_schedule_single_action( time() + MINUTE_IN_SECONDS, 'nowera_capi_audit_backfill', array( $next, 1 ), 'nowera-capi' );
+	} elseif ( false === $next && (int) $attempt < 8 ) {
+		// The gateway did not take a page: the same page again, later each time.
+		as_schedule_single_action( time() + (int) $attempt * 15 * MINUTE_IN_SECONDS, 'nowera_capi_audit_backfill', array( $page, (int) $attempt + 1 ), 'nowera-capi' );
+	}
+}, 10, 2 );
+
+/**
+ * The bookings one request did not hold, 500 at a time: marked as a part, so
+ * the gateway does not take the request for a list of orders. A request that
+ * fails ends the chain; the next hourly list starts it again.
+ */
+add_action( 'nowera_capi_bookings_more', function ( $since, $offset ) {
+	$rows = nowera_capi_ledger_bookings( (int) $since, (int) $offset );
+	if ( ! $rows ) {
+		return;
+	}
+	$tz   = wp_timezone();
+	$body = wp_json_encode( array(
+		'day'      => ( new \DateTimeImmutable( 'now', $tz ) )->format( 'Y-m-d' ),
+		'timezone' => $tz->getName(),
+		'page'     => 1,
+		'pages'    => 1,
+		'partial'  => true,
+		'orders'   => array(),
+		'bookings' => $rows,
+	) );
+	if ( null === nowera_capi_deliver( $body, '/r', 15 ) && 500 === count( $rows ) && function_exists( 'as_schedule_single_action' ) ) {
+		as_schedule_single_action( time() + MINUTE_IN_SECONDS, 'nowera_capi_bookings_more', array( (int) $since, (int) $offset + 500 ), 'nowera-capi' );
+	}
+}, 10, 2 );
+
+/**
+ * Sends the orders changed in the last `$days` days; true when every page went
+ * through, false when the gateway did not take one. With a time budget (seconds)
+ * it stops when that is spent and returns the page to go on from.
+ */
+function nowera_capi_send_audit( int $days = 3, int $from_page = 1, int $budget = 0 ) {
+	$tz      = wp_timezone();
+	$today   = ( new \DateTimeImmutable( 'now', $tz ) )->format( 'Y-m-d' );
+	$since   = time() - $days * DAY_IN_SECONDS;
+	$started = microtime( true );
+	$per     = 200;
+	$page    = $from_page;
+	$pages   = 1;
 	do {
 		$found = wc_get_orders( array(
 			'type'          => 'shop_order',
@@ -2108,13 +2471,26 @@ function nowera_capi_send_audit( int $days = 3 ): bool {
 			'page'     => $page,
 			'pages'    => $pages,
 			'total'    => (int) $found->total,
-			'cron'     => 1 === $page ? nowera_capi_cron_report() : null,
+			'cron'     => $from_page === $page ? nowera_capi_cron_report() : null,
 			'orders'   => $lines,
+			// Bookings as the booking plugin holds them, the ones made by staff
+			// included (no order ever exists for those). No contact data either.
+			'bookings' => 1 === $page ? nowera_capi_ledger_bookings( $since ) : null,
 		) );
+		$first = 1 === $page;
 		if ( null !== nowera_capi_deliver( $body, '/r', 15 ) ) {
 			return false; // the next run sends it all again
 		}
+		// More bookings than one request holds: the rest follow on their own, one
+		// request a minute (see nowera_capi_bookings_more).
+		if ( $first && 500 === count( nowera_capi_ledger_bookings( $since ) ) && function_exists( 'as_schedule_single_action' )
+			&& ! as_has_scheduled_action( 'nowera_capi_bookings_more', null, 'nowera-capi' ) ) {
+			as_schedule_single_action( time() + MINUTE_IN_SECONDS, 'nowera_capi_bookings_more', array( $since, 500 ), 'nowera-capi' );
+		}
 		$page++;
+		if ( $budget && $page <= $pages && microtime( true ) - $started > $budget ) {
+			return $page;
+		}
 	} while ( $page <= $pages );
 	return true;
 }
@@ -2146,12 +2522,40 @@ function nowera_capi_cron_report(): array {
 	);
 }
 
+/**
+ * Bookings made since `$since` or still to take place (those can still change),
+ * from whichever booking plugin an adapter reads: id, source (web or staff),
+ * type, what was booked, status, when it takes place, its price and the order
+ * it belongs to. 500 at a time, from `$offset`.
+ */
+function nowera_capi_ledger_bookings( int $since, int $offset = 0 ): array {
+	static $cache = array();
+	$key = $since . ':' . $offset;
+	if ( ! isset( $cache[ $key ] ) ) {
+		$rows          = apply_filters( 'nowera_capi_ledger_bookings', array(), $since, $offset );
+		$cache[ $key ] = is_array( $rows ) ? array_slice( array_values( $rows ), 0, 500 ) : array();
+	}
+	return $cache[ $key ];
+}
+
 /** One order as the completeness check sees it. */
 function nowera_capi_audit_line( \WC_Order $order, ?\DateTimeZone $tz = null ): array {
 	$created = $order->get_date_created();
 	$paid    = $order->get_date_paid();
 	$consent = (string) $order->get_meta( '_nowera_capi_purchase_consent' );
+	$plan    = nowera_capi_order_plan( $order );
+	// What was sent stands, whatever the order looks like now; an order reported
+	// before plans existed was reported as a Purchase.
+	$reported = nowera_capi_reported_plan( $order );
+	$expect   = $reported ? $reported['expect'] : ( $order->get_meta( '_nowera_capi_purchase_sent' ) ? array( 'Purchase' ) : $plan['expect'] );
 	return array(
+		'kind'     => $plan['kind'],
+		'expect'   => array_values( $expect ),
+		'goods'    => $plan['goods'],
+		'tender'   => $plan['tender'],
+		'parts'    => (object) $plan['parts'],
+		'bookings' => $plan['lead']['count'] ?? 0,
+		'refunded' => round( (float) $order->get_total_refunded(), wc_get_price_decimals() ),
 		'id'       => $order->get_id(),
 		'day'      => $created ? ( new \DateTimeImmutable( '@' . $created->getTimestamp() ) )->setTimezone( $tz ?: wp_timezone() )->format( 'Y-m-d' ) : null,
 		'created'  => $created ? $created->getTimestamp() : null,
@@ -2198,18 +2602,9 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		return;
 	}
 
-	$event_id    = 'ord-' . $order->get_id();
-	$custom_data = nowera_capi_purchase_data( $order );
-
-	$outcome = nowera_capi_send(
-		'Purchase',
-		$event_id,
-		nowera_capi_user_from_order( $order ),
-		$custom_data,
-		nowera_capi_order_url( $order ),
-		null,
-		$order->get_id()
-	);
+	// A Lead for bookings, a Purchase for goods, as the order's plan says; each
+	// with its browser half under the same id.
+	$outcome = nowera_capi_report_order( $order, nowera_capi_user_from_order( $order ), null, true );
 
 	nowera_capi_record_outcome( $order, $outcome );
 	// Only a delivered event closes the order for good. Without consent the
@@ -2223,8 +2618,6 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		}
 	}
 	$order->save();
-
-	nowera_capi_browser_leg( 'Purchase', $event_id, $custom_data );
 }, 10, 1 );
 
 /**
@@ -2312,7 +2705,7 @@ add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
 		$user['external_id'] = (string) $stored['visitor']; // no visitor cookie in this request
 	}
 
-	$outcome = nowera_capi_send( 'Purchase', 'ord-' . $order->get_id(), $user, nowera_capi_purchase_data( $order ), nowera_capi_order_url( $order ), $ctx, $order->get_id() );
+	$outcome = nowera_capi_report_order( $order, $user, $ctx );
 	if ( ! $retry ) {
 		nowera_capi_record_outcome( $order, $outcome, true );
 	}
@@ -2461,15 +2854,65 @@ function nowera_capi_refund( $order_id, $refund_id ): void {
 	if ( $order->get_meta( '_nowera_capi_cancel_sent' ) ) {
 		return;
 	}
+	// A booking was a Lead and an order that cost nothing was reported to nobody:
+	// GA4 holds no purchase to take back. Of an order that was part booking, part
+	// goods, only the goods' share of the money returned is taken back.
+	$plan  = nowera_capi_refund_plan( $order );
+	$share = 1.0;
+	$split = false;
+	if ( $plan ) {
+		if ( ! in_array( 'Purchase', $plan['expect'], true ) ) {
+			return;
+		}
+		$share = max( 0.0, min( 1.0, (float) ( $plan['share'] ?? 1.0 ) ) );
+		$split = ! empty( $plan['split'] );
+	}
 
 	$contents = array();
 	foreach ( $refund->get_items() as $item ) {
-		if ( $item instanceof \WC_Order_Item_Product && abs( (int) $item->get_quantity() ) ) {
+		// Lines keep their full prices; a purchase reported in part has none to match.
+		if ( ! $split && $item instanceof \WC_Order_Item_Product && abs( (int) $item->get_quantity() ) ) {
 			$contents[] = nowera_capi_order_item( $item, $refund );
 		}
 	}
-	$amount = abs( (float) $refund->get_amount() );
-	if ( $contents ) {
+	$returned = abs( (float) $refund->get_amount() );
+	$amount   = round( $returned * $share, wc_get_price_decimals() );
+	if ( $split ) {
+		// What was given back line by line says which part it was: a booking's
+		// line takes nothing from the purchase, the goods' lines all of theirs —
+		// each at the share that was paid in money, as it was counted.
+		$cash   = max( 0.0, min( 1.0, (float) ( $plan['cash'] ?? 1.0 ) ) );
+		$leads  = nowera_capi_lead_kinds();
+		$lines  = false;
+		$gross  = 0.0;
+		$net    = 0.0;
+		foreach ( $refund->get_items( array( 'line_item', 'shipping', 'fee' ) ) as $item ) {
+			$lines = true;
+			if ( $item instanceof \WC_Order_Item_Product ) {
+				if ( in_array( nowera_capi_line_kind( $item, $order ), $leads, true ) ) {
+					continue;
+				}
+				$net += abs( (float) $item->get_total() );
+			}
+			$gross += abs( (float) $item->get_total() ) + abs( (float) $item->get_total_tax() );
+		}
+		if ( $lines ) {
+			$amount = round( $gross * $cash, wc_get_price_decimals() );
+			$net   *= $cash;
+		} else {
+			// An amount without lines: the purchase's share of it.
+			$total = (float) $order->get_total();
+			$net   = $total > 0 ? $returned * (float) ( $plan['net'] ?? 0 ) / $total : 0.0;
+		}
+		// Never more than the purchase was reported for, whatever mix of amounts
+		// and lines the refunds come in.
+		$reported = round( (float) $order->get_total() * $share, wc_get_price_decimals() );
+		$amount   = min( $amount, max( 0.0, $reported - (float) $order->get_meta( '_nowera_capi_refunded_value' ) ) );
+		$net      = min( $net, max( 0.0, (float) ( $plan['net'] ?? 0 ) - (float) $order->get_meta( '_nowera_capi_refunded_net' ) ) );
+		if ( $amount <= 0 ) {
+			return; // only the booking was given back, or nothing of the purchase is left
+		}
+	} elseif ( $contents ) {
 		$net = array_sum( array_map( function ( $i ) { return $i['price_net'] * $i['quantity']; }, $contents ) );
 	} elseif ( $refund->get_items( array( 'shipping', 'fee', 'tax' ) ) ) {
 		// No products, only shipping, fees or tax given back: no item revenue.
@@ -2486,6 +2929,7 @@ function nowera_capi_refund( $order_id, $refund_id ): void {
 	);
 	// What GA4 has been told back so far, so a later cancellation takes only the rest.
 	$order->update_meta_data( '_nowera_capi_refunded_net', round( (float) $order->get_meta( '_nowera_capi_refunded_net' ) + $net, wc_get_price_decimals() ) );
+	$order->update_meta_data( '_nowera_capi_refunded_value', round( (float) $order->get_meta( '_nowera_capi_refunded_value' ) + $amount, wc_get_price_decimals() ) );
 	$order->save_meta_data();
 	// Without items GA4 takes it as a refund of the whole order.
 	if ( $contents ) {
@@ -2521,14 +2965,26 @@ function nowera_capi_cancelled( $order_id ): void {
 	}
 	$stored = $order->get_meta( '_nowera_capi_ctx' );
 	$stored = is_array( $stored ) ? $stored : array();
-	$left = round( (float) $order->get_total() - (float) $order->get_total_refunded(), wc_get_price_decimals() );
+	$plan  = nowera_capi_refund_plan( $order );
+	$share = 1.0;
+	if ( $plan ) {
+		if ( ! in_array( 'Purchase', $plan['expect'], true ) ) {
+			return; // a Lead or nothing was reported: GA4 holds no purchase to take back
+		}
+		$share = max( 0.0, min( 1.0, (float) ( $plan['share'] ?? 1.0 ) ) );
+	}
+	$left = round( ( (float) $order->get_total() - (float) $order->get_total_refunded() ) * $share, wc_get_price_decimals() );
+	if ( $plan && ! empty( $plan['split'] ) ) {
+		// Part of the order was a purchase: what of that part is not yet taken back.
+		$left = round( (float) $order->get_total() * $share - (float) $order->get_meta( '_nowera_capi_refunded_value' ), wc_get_price_decimals() );
+	}
 	if ( $left <= 0 ) {
 		return;
 	}
 	$outcome = nowera_capi_send( 'Refund', 'cancel-' . $order->get_id(), array(), array(
 		'order_id'  => $order->get_id(),
 		'value'     => $left,
-		'value_net' => max( 0, round( nowera_capi_order_net( $order ) - (float) $order->get_meta( '_nowera_capi_refunded_net' ), wc_get_price_decimals() ) ),
+		'value_net' => max( 0, round( (float) ( $plan['net'] ?? nowera_capi_order_net( $order ) ) - (float) $order->get_meta( '_nowera_capi_refunded_net' ), wc_get_price_decimals() ) ),
 		'currency'  => $order->get_currency(),
 	), nowera_capi_order_url( $order ), array(
 		'marketing'     => ! empty( $stored['marketing'] ),

@@ -284,6 +284,107 @@ test('order audit: each order is delivered, excluded with a reason, pending or m
   assert.equal(gtm.per.ga4, 'gtm');
 });
 
+test('order audit: a booking is judged by its Lead, an order kept in the list only by nothing', async () => {
+  const { classifyOrder, summarise } = await import('../src/lib/order-audit.js');
+  const now = Date.parse('2026-10-07T12:00:00Z');
+  const old = '2026-10-07T06:00:00Z';
+  const both = [{ id: 1, kind: 'meta' }, { id: 2, kind: 'ga4', scope: 'no_page_view' }];
+  const base = { ready: true, consent: 'marketing', has_ctx: true, via: 'checkout', status: 'completed', created_at: old, paid_at: old };
+  const lead = (deliveries, received = true) => ({ Lead: { received, deliveries }, Purchase: { received: false, deliveries: {} } });
+  const c = (o, evidence) => classifyOrder({ ...base, ...o }, { destinations: both, now, evidence });
+
+  // A booking: its Lead delivered is all there is to deliver; no Purchase is owed.
+  assert.equal(c({ kind: 'booking', expect: ['Lead'] }, lead({ 1: 'sent', 2: 'sent' })).state, 'ok');
+  assert.equal(c({ kind: 'booking', expect: ['Lead'] }, lead({}, false)).reason, 'Lead neprišiel do signals');
+  assert.equal(c({ kind: 'booking', expect: ['Lead'] }, lead({ 1: 'sent', 2: 'dead' })).reason, 'Lead → GA4: nedoručené');
+  assert.equal(c({ kind: 'booking', expect: ['Lead'], consent: '' }, lead({}, false)).reason, 'plugin Lead neodoslal');
+  // A booking with goods on the same order: both events are owed.
+  const mixed = { Lead: { received: true, deliveries: { 1: 'sent', 2: 'sent' } }, Purchase: { received: true, deliveries: { 1: 'sent', 2: 'sent' } } };
+  assert.equal(c({ kind: 'mixed', expect: ['Lead', 'Purchase'] }, mixed).state, 'ok');
+  assert.equal(c({ kind: 'mixed', expect: ['Lead', 'Purchase'] }, { ...mixed, Purchase: { received: false, deliveries: {} } }).reason, 'Purchase neprišiel do signals');
+  // A Subscribe rides with its Purchase and is not looked for on its own.
+  assert.equal(c({ kind: 'subscription', expect: ['Purchase', 'Subscribe'] }, { Purchase: mixed.Purchase }).state, 'ok');
+  // Nothing is owed for an order that cost nothing, or one that renews a subscription.
+  assert.deepEqual(c({ kind: 'booking', expect: [], consent: '' }), { state: 'excluded', reason: 'nulová suma (len evidencia)' });
+  assert.deepEqual(c({ kind: 'renewal', expect: [], consent: '', has_ctx: false, via: '' }), { state: 'excluded', reason: 'obnovenie predplatného (len evidencia)' });
+  // A plugin that does not say (before 1.3) is judged by its Purchase, as before.
+  assert.equal(classifyOrder(base, { destinations: both, now, received: true, deliveries: { 1: 'sent', 2: 'sent' } }).state, 'ok');
+
+  const row = (id, o) => ({ order_id: id, day: '2026-10-06', created_at: '2026-10-06T10:00:00Z', ...base, ...o });
+  const { days } = summarise([
+    row('1', { kind: 'booking', expect: ['Lead'], evidence: lead({ 1: 'sent', 2: 'sent' }) }),
+    row('2', { kind: 'renewal', expect: [], consent: '' }),
+    row('3', { received: true, deliveries: { 1: 'sent', 2: 'sent' } }),
+  ], both, now);
+  assert.deepEqual(days, [{ day: '2026-10-06', orders: 3, eligible: 2, consented: 2, received: 2, ok: 2, pending: 0, missing: 0, excluded: 1 }]);
+});
+
+test('order list: kinds, amounts and bookings are taken, anything else is dropped', async () => {
+  const { parseSnapshot, dayIn } = await import('../src/lib/order-audit.js');
+  const snap = parseSnapshot({ day: '2026-10-12', timezone: 'Europe/Bratislava', orders: [
+    { id: 7, status: 'completed', total: 0, kind: 'booking', expect: ['Lead', 'Bogus'], goods: 60, tender: '60', refunded: 0,
+      parts: { booking: 0, 'Bad Key': 5, other: 'x' }, bookings: 2 },
+    { id: 8, status: 'completed', total: 5, kind: 'DROP TABLE', expect: 'Lead' },
+  ], bookings: [
+    { id: 'amelia-10', source: 'staff', type: 'appointment', item: 'service-5', name: 'Masáž\u0007 60 min', status: 'approved', created: 1791800000, starts: 1791900000, price: '100', currency: 'EUR', order_id: 7, email: 'a@b.sk' },
+    { id: 'no id!' },
+  ] });
+  assert.deepEqual(snap.orders[0].expect, ['Lead']);
+  assert.deepEqual(snap.orders[0].parts, { booking: 0 });
+  assert.equal(snap.orders[0].tender, 60);
+  assert.equal(snap.orders[0].bookings, 2);
+  assert.equal(snap.orders[1].kind, null);
+  assert.equal(snap.orders[1].expect, null);
+  assert.equal(snap.bookings.length, 1);
+  assert.deepEqual(snap.bookings[0], { booking_id: 'amelia-10', source: 'staff', type: 'appointment', item: 'service-5', name: 'Masáž  60 min',
+    status: 'approved', created: 1791800000, starts: 1791900000, price: 100, currency: 'EUR', order_id: '7' });
+  assert.throws(() => parseSnapshot({ day: '2026-10-12', orders: [], bookings: new Array(501).fill({ id: 'a' }) }));
+  // 23:30 UTC is already the next day in Bratislava.
+  assert.equal(dayIn(Date.parse('2026-10-12T23:30:00Z') / 1000, 'Europe/Bratislava'), '2026-10-13');
+  assert.equal(dayIn(Date.parse('2026-10-12T23:30:00Z') / 1000, 'Not/AZone'), '2026-10-12');
+});
+
+test('report: days per client with money by kind, bookings by source, totals in one currency', async () => {
+  const { shapeReport, parseRange } = await import('../src/lib/report.js');
+  const { parseSnapshot } = await import('../src/lib/order-audit.js');
+  assert.deepEqual(parseRange({}, new Date('2026-10-12T09:00:00Z')), { from: '2026-10-06', to: '2026-10-12' });
+  // Half past midnight in Bratislava is still yesterday in UTC: the shop's day counts.
+  assert.deepEqual(parseRange({}, new Date('2026-10-11T22:30:00Z')), { from: '2026-10-06', to: '2026-10-12' });
+  assert.equal(parseSnapshot({ day: '2026-10-12', orders: [], bookings: [], partial: true }).partial, true);
+  assert.deepEqual(parseRange({ from: '2026-10-01', to: '2026-10-31' }), { from: '2026-10-01', to: '2026-10-31' });
+  assert.throws(() => parseRange({ from: '2026-10-31', to: '2026-10-01' }));
+  assert.throws(() => parseRange({ from: '2024-01-01', to: '2026-10-01' }));
+  const rep = shapeReport({
+    tenants: [{ id: 1, slug: 'studio', name: 'Studio', plugin_version: '1.3.0', ledger_at: '2026-10-12T08:00:00Z' }, { id: 2, slug: 'prazdny', name: 'Prázdny' }],
+    orders: [
+      { tenant_id: 1, day: '2026-10-12', currency: 'EUR', orders: '5', counted: '4', free_orders: '1', leads: '2', paid: '102.50', goods: '162.50', tender: '60', refunded: '0', renewals: '1', renewals_paid: '7.5' },
+      { tenant_id: 1, day: '2026-10-11', currency: 'EUR', orders: '1', counted: '1', free_orders: '0', leads: '1', paid: '40', goods: '40', tender: '0', refunded: '0', renewals: '0', renewals_paid: '0' },
+    ],
+    kinds: [
+      { tenant_id: 1, day: '2026-10-12', currency: 'EUR', kind: 'booking', orders: '2', paid: '75' },
+      { tenant_id: 1, day: '2026-10-12', currency: 'EUR', kind: 'gift_card', orders: '1', paid: '20' },
+      { tenant_id: 1, day: '2026-10-11', currency: 'EUR', kind: 'booking', orders: '1', paid: '40' },
+    ],
+    bookings: [
+      { tenant_id: 1, day: '2026-10-12', currency: 'EUR', source: 'web', type: 'appointment', status: 'approved', n: '2', value: '140' },
+      { tenant_id: 1, day: '2026-10-12', currency: 'EUR', source: 'staff', type: 'appointment', status: 'approved', n: '1', value: '40' },
+      { tenant_id: 1, day: '2026-10-12', currency: 'EUR', source: 'web', type: 'event', status: 'canceled', n: '1', value: '55' },
+      { tenant_id: 9, day: '2026-10-12', currency: 'EUR', source: 'web', type: 'event', status: 'approved', n: '1', value: '55' },
+    ],
+  }, { from: '2026-10-06', to: '2026-10-12' });
+  const [studio, empty] = rep.tenants;
+  assert.deepEqual(studio.days.map((d) => d.day), ['2026-10-12', '2026-10-11']);
+  assert.deepEqual(studio.days[0].by_kind, { booking: { orders: 2, paid: 75 }, gift_card: { orders: 1, paid: 20 } });
+  assert.deepEqual(studio.days[0].bookings, { web: 2, staff: 1, canceled: 1, value: 180, by_type: { appointment: 3 } });
+  assert.deepEqual(studio.days[0].renewals, { orders: 1, paid: 7.5 });
+  assert.equal(studio.currency, 'EUR');
+  assert.equal(studio.totals.paid, 142.5);
+  assert.equal(studio.totals.leads, 3);
+  assert.deepEqual(studio.totals.by_kind.booking, { orders: 3, paid: 115 });
+  assert.deepEqual(empty.days, []);
+  assert.equal(empty.totals.orders, 0);
+});
+
 test('order audit: days add up, missing orders are listed', async () => {
   const { summarise } = await import('../src/lib/order-audit.js');
   const now = Date.parse('2026-10-07T12:00:00Z');
@@ -302,7 +403,7 @@ test('order audit: the snapshot must be one day, a list, at most 500 lines', asy
   assert.throws(() => parseSnapshot({ day: '2026-10-06' }));
   assert.throws(() => parseSnapshot({ day: '2026-10-06', orders: new Array(501).fill({ id: 1 }) }));
   assert.throws(() => parseSnapshot({ day: '2026-10-06', page: 3, pages: 2, orders: [] }));
-  assert.deepEqual(parseSnapshot({ day: '2026-10-06', orders: [] }), { day: '2026-10-06', page: 1, pages: 1, total: null, cron: null, orders: [] });
+  assert.deepEqual(parseSnapshot({ day: '2026-10-06', orders: [] }), { day: '2026-10-06', page: 1, pages: 1, total: null, cron: null, orders: [], bookings: null, timezone: null, partial: false });
   assert.deepEqual(parseSnapshot({ day: '2026-10-06', cron: { disabled: true, due: '3', oldest: 900, x: 1 }, orders: [] }).cron, { disabled: true, due: 3, oldest: 900 });
   assert.equal(parseSnapshot({ day: '2026-10-06', total: 201, orders: [] }).total, 201);
 });

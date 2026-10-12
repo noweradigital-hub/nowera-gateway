@@ -48,6 +48,9 @@ function ensureIdentity(req, reply, tenant, body = {}) {
   if (!visitorId) visitorId = newEventId();
   if (visitorId !== cookies._nwr_id) persistCookie(reply, tenant, '_nwr_id', visitorId);
 
+  // Meta's identifiers are only for a client that sends to Meta.
+  if (!(tenant.destinations || []).some((d) => d.kind === 'meta')) return { fbp: null, fbc: null, visitorId };
+
   let fbp = cookies._fbp || body.fbp || null;
   if (!fbp) {
     fbp = newFbp();

@@ -140,6 +140,38 @@ by label using the existing `mytlschallenge` ACME resolver.
 6. Turn on Meta test mode, press **Poslať testovací event**, confirm it in Events
    Manager under Test Events.
 
+## Orders that are not plain goods, and the report API
+
+From plugin 1.3 every order line has a kind. Adapters in
+`wp-plugin/nowera-capi/adapters/` name the ones other plugins create: a booking
+(Amelia, paid through WooCommerce), a gift card (PW WooCommerce Gift Cards), a
+subscription (WPSubscription). What is sent follows from it:
+
+| Order | Sent |
+|---|---|
+| Goods | `Purchase` (`ord-<id>`) of the money paid for them |
+| A booking, paid or free | one `Lead` per order (`book-<id>`), kind `booking`, named after the service |
+| Goods and a booking | both, adding up to the order's total |
+| A gift card sold | `Purchase` with `content_category: gift_card` |
+| Paid with a gift card | only the money added on top counts (the card was counted when sold) |
+| Nothing left to pay | nothing; the order is in the order list only |
+| A new subscription | `Purchase` and `Subscribe` (`sub-<id>`) |
+| A subscription's renewal | nothing; in the order list only |
+
+A refund or a cancellation takes back from GA4 only what a `Purchase` reported.
+
+The plugin sends its order list every hour (`POST /r`, no contact data): each
+order's kind, the events that stand for it, what it was worth, what was paid
+and what a gift card settled, plus the bookings from the booking plugin's own
+tables — those entered by staff included. The gateway keeps both for 400 days.
+
+`GET /api/report/daily?from=YYYY-MM-DD&to=YYYY-MM-DD[&tenant=slug]` on the
+administration's host returns them per client and day (orders, money by kind,
+free orders, leads, renewals, bookings by web or staff). The key is made under
+Upozornenia → Reporty, shown once, and goes in `Authorization: Bearer …`.
+Without dates the last seven days. Meant for an n8n workflow that pulls it when
+its report is due.
+
 ## Backups and secrets
 
 - Tokens, the sites' signing keys, authenticator secrets, the alert webhook and

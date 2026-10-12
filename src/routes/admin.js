@@ -47,6 +47,7 @@ import { keySource, recoveryKey } from '../lib/secrets.js';
 import { deriveFromSite, detectConsent, gatewayIp, pairingCode } from '../lib/onboarding.js';
 import { backupsPage, recoveryKeyPage } from '../views/backups.js';
 import { auditRows, summarise } from '../lib/order-audit.js';
+import { newReportKey, reportKeyInfo } from '../lib/report.js';
 
 /** A tenant's signing key: 256 random bits, shown once and pasted into the plugin. */
 const newIngestKey = () => randomBytes(32).toString('hex');
@@ -707,10 +708,22 @@ export default async function adminRoutes(app) {
   });
 
   app.get('/admin/upozornenia', async (req, reply) => {
-    const [settings, history] = await Promise.all([alertSettings(), alertHistory()]);
+    const [settings, history, report] = await Promise.all([alertSettings(), alertHistory(), reportKeyInfo()]);
     return reply.type('text/html').send(page({
       alerts: req.openAlerts, backupWarn: req.backupWarn, title: 'Upozornenia', user: req.adminUser, flash: flashFrom(req.query), nav: 'upozornenia',
-      body: alertsPage({ settings, history }),
+      body: alertsPage({ settings, history, report }),
+    }));
+  });
+
+  // The key for the reports API. Shown once, in this answer only: never in an
+  // address, where it would stay in the browser's history and the proxy's log.
+  app.post('/admin/reporty/kluc', async (req, reply) => {
+    const newKey = await newReportKey();
+    await audit(req, 'report.key');
+    const [settings, history, report] = await Promise.all([alertSettings(), alertHistory(), reportKeyInfo()]);
+    return reply.header('cache-control', 'no-store').type('text/html').send(page({
+      alerts: await openAlertCount().catch(() => 0), title: 'Upozornenia', user: req.adminUser, nav: 'upozornenia',
+      body: alertsPage({ settings, history, report, newKey }),
     }));
   });
 

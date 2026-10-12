@@ -110,11 +110,12 @@ export function completenessCard(audit, lastSnapshot) {
       <div class="finding">${pill('warn', `#${esc(m.order_id)}`)}<div>${esc(m.reason)}<p>${esc(m.day)} · stav ${esc(m.status)}</p></div></div>`).join('')}</div></div>` : '';
   return `
   <div class="card">
-    <div class="card-h"><h2>Úplnosť nákupov</h2><span class="sub">objednávky z e-shopu oproti doručeným Purchase · 14 dní · ${when}</span></div>
+    <div class="card-h"><h2>Úplnosť nákupov</h2><span class="sub">objednávky z e-shopu oproti doručeným Purchase a Lead · 14 dní · ${when}</span></div>
     ${rows}
     ${list}
     <div class="card-b" style="border-top:1px solid var(--line-2)"><div class="hint" style="margin:0">Vynechané: nezaplatené a zrušené objednávky,
-      bez súhlasu s cookies, vytvorené mimo pokladne. Chýba: zaplatená objednávka so súhlasom, ktorej Purchase sa po 2 hodinách nedoručil.</div></div>
+      bez súhlasu s cookies, vytvorené mimo pokladne, s nulovou sumou a obnovenia predplatného (tie sú len v evidencii). Rezervácia sa počíta
+      ako Lead, tovar ako Purchase. Chýba: zaplatená objednávka so súhlasom, ktorej Purchase alebo Lead sa po 2 hodinách nedoručil.</div></div>
   </div>`;
 }
 

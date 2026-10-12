@@ -185,7 +185,7 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
       if (missing.length) {
         const list = missing.slice(0, 5).map((m) => `#${m.order_id} (${m.reason})`).join(', ');
         out.push({ tenant_id: t.id, rule: 'missing_purchase', subject: '',
-          message: `${missing.length} ${missing.length === 1 ? 'objednávka nemá' : 'objednávok nemá'} doručený Purchase: ${list}${missing.length > 5 ? ' …' : ''}` });
+          message: `${missing.length} ${missing.length === 1 ? 'objednávka nemá' : 'objednávok nemá'} doručený Purchase alebo Lead: ${list}${missing.length > 5 ? ' …' : ''}` });
       }
     }
 
