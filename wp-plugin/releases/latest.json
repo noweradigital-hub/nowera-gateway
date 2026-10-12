@@ -1,11 +1,11 @@
 {
-  "version": "1.2.2",
-  "file": "nowera-capi-1.2.2.zip",
-  "sha256": "a18a1875e400ba168e54954a7881266518879eaba74a7bd2fd3a679fb3901a37",
-  "signature": "X71kjFDjRYu2Vh0xzNfdvkVRZ9d85iRpIASIkC/ikRgvzTkckefGg/TRaxQaWh31XB5+UEErlcbOaLr3p4V2CA==",
-  "released_at": "2026-10-09T13:11:47.897Z",
+  "version": "1.3.0",
+  "file": "nowera-capi-1.3.0.zip",
+  "sha256": "58d7c64c547d4a46176fc92274ad7b2451eaa7726f97a40b0890c9b6299863a4",
+  "signature": "3xGCp4qvVCFOVn6tBv0x86gJ4M8FBSYADIMzYTqhmnhRhsmN13JuRihk79lvY0HCodqa27adgccPxTC6JXPDCw==",
+  "released_at": "2026-10-12T15:52:05.402Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Katalóg z vlastného typu obsahu (napr. nehnuteľnosti): ViewContent / view_item"
+  "notes": "Rezervácie (Amelia) ako Lead, darčekové poukazy a predplatné ako vlastné druhy, objednávky za 0 € a obnovenia len v evidencii. Zoznam objednávok každú hodinu, s druhmi, sumami a rezerváciami."
 }
