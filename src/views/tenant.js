@@ -289,5 +289,38 @@ export function settingsTab(t) {
         <p class="dim" style="margin:0;font-size:12.5px">Nový kľúč sa ukáže raz. Starý platí, kým ho nezrušíte, takže sa medzitým nestratí žiadny event.</p>
       </div>
     </div>
+  </div>
+  <div class="card" id="reporty">
+    <div class="card-h"><h2>Reporty (n8n)</h2>${state(t.report_key_at ? 'ok' : 'off', t.report_key_at ? 'kľúč vytvorený' : 'bez kľúča')}</div>
+    <div class="card-b" style="display:grid;gap:10px">
+      <p style="margin:0">Vlastný kľúč tohto klienta: otvára len jeho čísla. ${t.report_key_at ? `Vytvorený ${esc(time(t.report_key_at))}.` : 'Zatiaľ nie je vytvorený.'}</p>
+      <p class="dim" style="margin:0;font-size:13px">Leady (rezervácie) po dňoch v tvare pluginu nwr-lead-stats:
+        <code>GET /api/report/leads?since=2026-10-01&amp;until=2026-10-31</code> s hlavičkou <code>X-NWR-Leads-Key: &lt;kľúč&gt;</code>.
+        Objednávky a peniaze podľa druhu: <code>GET /api/report/daily?from=…&amp;to=…</code> s tým istým kľúčom.</p>
+      <div class="actions">
+        <form class="inline" method="post" action="/admin/tenants/${t.id}/report-key"${t.report_key_at ? ` onsubmit="return confirm('Vytvoriť nový kľúč? Doterajší prestane platiť hneď.')"` : ''}>
+          <button class="btn sm" type="submit">${t.report_key_at ? 'Vytvoriť nový kľúč' : 'Vytvoriť kľúč'}</button></form>
+        ${t.report_key_at ? `<form class="inline" method="post" action="/admin/tenants/${t.id}/report-key/revoke"
+              onsubmit="return confirm('Zrušiť kľúč? Report v n8n pre tohto klienta prestane fungovať.')">
+          <button class="btn sm danger" type="submit">Zrušiť kľúč</button></form>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+/** The client's new report key, shown once, with how to use it. */
+export function reportKeyPage(t, key, base) {
+  return `
+  <div class="head"><div><h1>${esc(t.name)} · kľúč pre reporty</h1>
+    <p class="meta"><span>Zobrazí sa len teraz. Uložte si ho v n8n ako Header Auth credential.</span></p></div>
+    <div class="actions"><a class="btn" href="/admin/tenants/${t.id}/nastavenia">Späť na nastavenia</a></div></div>
+  <div class="card">
+    <div class="card-h"><h2>Kľúč</h2><span class="sub">otvára len čísla klienta ${esc(t.slug)}</span></div>
+    <div class="card-b" style="display:grid;gap:12px">
+      <code class="mono" style="font-size:14px;word-break:break-all">${esc(key)}</code>
+      <div class="hint" style="margin:0">Hlavička: <code>X-NWR-Leads-Key: &lt;kľúč&gt;</code> (rovnaká ako pri plugine nwr-lead-stats) alebo <code>Authorization: Bearer &lt;kľúč&gt;</code>.</div>
+      <div class="hint" style="margin:0">Leady po dňoch: <code>${esc(base)}/api/report/leads?since=2026-10-01&amp;until=2026-10-31</code><br>
+        Objednávky a peniaze podľa druhu: <code>${esc(base)}/api/report/daily?from=2026-10-01&amp;to=2026-10-31</code></div>
+    </div>
   </div>`;
 }

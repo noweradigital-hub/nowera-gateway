@@ -165,12 +165,25 @@ order's kind, the events that stand for it, what it was worth, what was paid
 and what a gift card settled, plus the bookings from the booking plugin's own
 tables — those entered by staff included. The gateway keeps both for 400 days.
 
-`GET /api/report/daily?from=YYYY-MM-DD&to=YYYY-MM-DD[&tenant=slug]` on the
-administration's host returns them per client and day (orders, money by kind,
-free orders, leads, renewals, bookings by web or staff). The key is made under
-Upozornenia → Reporty, shown once, and goes in `Authorization: Bearer …`.
-Without dates the last seven days. Meant for an n8n workflow that pulls it when
-its report is due.
+Two read-only endpoints on the administration's host serve them to the agency's
+reports (an n8n workflow that pulls when its report is due):
+
+- `GET /api/report/daily?from=YYYY-MM-DD&to=YYYY-MM-DD[&tenant=slug]`: per
+  client and day the orders, money by kind, free orders, leads, renewals and
+  bookings by web or staff. Without dates the last seven days.
+- `GET /api/report/leads?since=YYYY-MM-DD&until=YYYY-MM-DD[&group=day|week|month][&forms=key,key]`:
+  one client's leads per day in the shape of the
+  [nwr-lead-stats](https://github.com/noweradigital-hub/nwr-lead-stats) plugin's
+  `/counts` answer (`total`, `days`, `forms[]` with `key`, `title`, `total`,
+  `days`, `complete_since`), so the same report node reads either. A lead is a
+  counted order that holds a booking — one per order, under the service first
+  booked on it (`amelia:<service id>`). Without dates today and the fourteen
+  days before it, like the plugin.
+
+Keys are shown once and kept as a hash. One for all clients is made under
+Upozornenia → Reporty (with it, `/leads` needs `&tenant=slug`); a client's own,
+made in its Nastavenia, opens that client alone. Either goes in
+`Authorization: Bearer …` or `X-NWR-Leads-Key`.
 
 ## Backups and secrets
 

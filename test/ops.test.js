@@ -354,6 +354,7 @@ test('report: days per client with money by kind, bookings by source, totals in 
   assert.deepEqual(parseRange({ from: '2026-10-01', to: '2026-10-31' }), { from: '2026-10-01', to: '2026-10-31' });
   assert.throws(() => parseRange({ from: '2026-10-31', to: '2026-10-01' }));
   assert.throws(() => parseRange({ from: '2024-01-01', to: '2026-10-01' }));
+  assert.throws(() => parseRange({ from: '2026-02-30', to: '2026-03-05' }), /from must be/);
   const rep = shapeReport({
     tenants: [{ id: 1, slug: 'studio', name: 'Studio', plugin_version: '1.3.0', ledger_at: '2026-10-12T08:00:00Z' }, { id: 2, slug: 'prazdny', name: 'Prázdny' }],
     orders: [
@@ -483,4 +484,86 @@ test('quality: "only from the server" needs a real sample, not two checkouts', a
   const row = (server) => ({ event_name: 'InitiateCheckout', n: server, server, browser: 0, fbp: 1, fbc: 1, em: 1, ph: 1 });
   assert.equal(qualityFindings([row(2)]).filter((f) => f.title === 'Ide len zo servera.').length, 0);
   assert.equal(qualityFindings([row(12)]).filter((f) => f.title === 'Ide len zo servera.').length, 1);
+});
+
+// ------------------------------------------------------------ reports API
+
+test('leads report: the shape of the lead-stats plugin, one lead per booked order, filtered and grouped', async () => {
+  const { shapeLeads, parseLeadRange } = await import('../src/lib/report.js');
+  const now = new Date('2026-10-12T09:00:00Z');
+  assert.deepEqual({ ...parseLeadRange({}, now), only: null }, { since: '2026-09-28', until: '2026-10-12', group: 'day', only: null });
+  assert.throws(() => parseLeadRange({ since: '2026-13-01' }), /since must be/);
+  assert.throws(() => parseLeadRange({ since: '2026-02-30', until: '2026-03-05' }), /since must be/, 'a day that does not exist');
+  assert.throws(() => parseLeadRange({ since: '2026-10-12', until: '2026-10-01' }), /before/);
+  assert.throws(() => parseLeadRange({ group: 'year' }), /group/);
+  assert.throws(() => parseLeadRange({ since: '2020-01-01', until: '2026-10-01' }), /limited/);
+
+  const tenant = { id: 1, slug: 'studio', name: 'Studio', allowed_origins: 'https://www.studio.sk, https://studio.sk', plugin_version: '1.3.0' };
+  const rows = [
+    { day: '2026-10-10', booking_id: 'amelia-10', item: 'service-5', name: 'Masáž 60 min', c: '2' },
+    { day: '2026-10-12', booking_id: 'amelia-12', item: 'service-5', name: 'Masáž 60 min', c: '1' },
+    { day: '2026-10-12', booking_id: 'amelia-13', item: 'event-35', name: 'Workshop', c: '1' },
+    { day: '2026-10-12', booking_id: null, item: null, name: null, c: '1' }, // an order whose booking the list does not hold
+    { day: '2026-09-01', booking_id: 'amelia-1', item: 'service-5', name: 'Masáž 60 min', c: '9' }, // outside the range
+  ];
+  const range = parseLeadRange({ since: '2026-10-09', until: '2026-10-12' }, now);
+  const out = shapeLeads(rows, { tenant, range, first: '2026-07-14', now });
+  assert.equal(out.site, 'https://www.studio.sk/');
+  assert.equal(out.total, 5);
+  assert.deepEqual(out.days, { '2026-10-09': 0, '2026-10-10': 2, '2026-10-11': 0, '2026-10-12': 3 });
+  assert.deepEqual(out.forms.map((f) => [f.key, f.title, f.total]), [['amelia:5', 'Masáž 60 min', 3], ['amelia:event-35', 'Workshop', 1], ['booking:unknown', '', 1]]);
+  assert.deepEqual(out.forms[0], { key: 'amelia:5', source: 'amelia', form_id: '5', title: 'Masáž 60 min', total: 3,
+    days: { '2026-10-10': 2, '2026-10-12': 1 }, complete_since: '2026-07-14' });
+  assert.equal(out.forms.reduce((sum, f) => sum + f.total, 0), out.total, 'the forms add up to the total');
+  assert.equal(out.live_since, '2026-07-14');
+  assert.match(out.generated_at, /^2026-10-12 11:00:00$/, 'local time, like the plugin');
+
+  const only = shapeLeads(rows, { tenant, range: parseLeadRange({ since: '2026-10-09', until: '2026-10-12', forms: 'amelia:5' }, now), now });
+  assert.equal(only.total, 3);
+  const weeks = shapeLeads(rows, { tenant, range: parseLeadRange({ since: '2026-09-28', until: '2026-10-12', group: 'week' }, now), now });
+  assert.deepEqual(weeks.days, { '2026-W40': 0, '2026-W41': 2, '2026-W42': 3 });
+  const months = shapeLeads(rows, { tenant, range: parseLeadRange({ since: '2026-09-01', until: '2026-10-12', group: 'month' }, now), now });
+  assert.deepEqual(months.days, { '2026-09': 9, '2026-10': 5 });
+  // ISO weeks at the turn of a year: 4 January is always in week 1, and 2027 has 52 weeks.
+  const week = (day) => Object.keys(shapeLeads([], { tenant, range: parseLeadRange({ since: day, until: day, group: 'week' }, now), now }).days)[0];
+  assert.deepEqual(['2027-01-04', '2027-12-31', '2027-01-03', '2026-12-31', '2024-12-30'].map(week), ['2027-W01', '2027-W52', '2026-W53', '2026-W53', '2025-W01']);
+});
+
+test('reports API: only on the administration\'s host with a key; a client\'s own key opens that client alone', async () => {
+  process.env.SESSION_SECRET ||= 'x'.repeat(40);
+  process.env.INGEST_SECRET ||= 'ingest-secret';
+  process.env.DATABASE_URL ||= 'postgres://stub';
+  process.env.ADMIN_HOST ||= 'gw.example.com';
+  const { config } = await import('../src/config.js');
+  const Fastify = (await import('fastify')).default;
+  const reportRoutes = (await import('../src/routes/report.js')).default;
+  const studio = { id: 1, slug: 'studio', name: 'Studio', allowed_origins: 'https://studio.sk' };
+  const asked = [];
+  const app = Fastify({ logger: false });
+  await app.register(reportRoutes, {
+    reportAccess: async (key) => (key === 'key-of-all-clients-000000' ? { all: true } : key === 'key-of-the-studio-0000000' ? { tenant: studio } : null),
+    dailyReport: async (range, o) => { asked.push(['daily', o.tenant]); return { tenants: [] }; },
+    leadCounts: async (tenant, range) => { asked.push(['leads', tenant.slug, range.since]); return { total: 0 }; },
+    tenantBySlug: async (slug) => (slug === 'studio' ? studio : null),
+  });
+  await app.ready();
+  const get = (url, headers = {}) => app.inject({ method: 'GET', url, headers: { host: config.adminHost, ...headers } });
+  try {
+    assert.equal((await get('/api/report/daily')).statusCode, 404, 'no key: as if it did not exist');
+    assert.equal((await get('/api/report/leads', { 'x-nwr-leads-key': 'wrong-key-00000000000000' })).statusCode, 404);
+    assert.equal((await app.inject({ method: 'GET', url: '/api/report/daily', headers: { host: 't.klient.sk', authorization: 'Bearer key-of-all-clients-000000' } })).statusCode, 404, 'not on a collector host');
+
+    assert.equal((await get('/api/report/daily?tenant=iny', { authorization: 'Bearer key-of-the-studio-0000000' })).statusCode, 200);
+    assert.deepEqual(asked.pop(), ['daily', 'studio'], 'its own key cannot be pointed at another client');
+    assert.equal((await get('/api/report/daily', { authorization: 'Bearer key-of-all-clients-000000' })).statusCode, 200);
+    assert.deepEqual(asked.pop(), ['daily', null]);
+
+    assert.equal((await get('/api/report/leads?since=2026-10-01&until=2026-10-12', { 'x-nwr-leads-key': 'key-of-the-studio-0000000' })).statusCode, 200);
+    assert.deepEqual(asked.pop(), ['leads', 'studio', '2026-10-01']);
+    assert.equal((await get('/api/report/leads', { authorization: 'Bearer key-of-all-clients-000000' })).statusCode, 400, 'the key of all clients must name one');
+    assert.equal((await get('/api/report/leads?tenant=studio', { authorization: 'Bearer key-of-all-clients-000000' })).statusCode, 200);
+    assert.equal((await get('/api/report/leads?since=zle', { 'x-nwr-leads-key': 'key-of-the-studio-0000000' })).statusCode, 400);
+  } finally {
+    await app.close();
+  }
 });

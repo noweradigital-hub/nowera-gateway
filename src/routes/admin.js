@@ -28,7 +28,7 @@ import { forgetChecks, runChecks } from '../lib/checks.js';
 import { verifyMeta } from '../destinations/verify.js';
 import { overviewPage } from '../views/overview.js';
 import {
-  TABS, completenessCard, destinationsTab, installTab, overviewTab, qualityTab, settingsTab, tenantHeader,
+  TABS, completenessCard, destinationsTab, installTab, overviewTab, qualityTab, reportKeyPage, settingsTab, tenantHeader,
 } from '../views/tenant.js';
 import { eventBrowser } from '../views/events.js';
 import {
@@ -47,7 +47,7 @@ import { keySource, recoveryKey } from '../lib/secrets.js';
 import { deriveFromSite, detectConsent, gatewayIp, pairingCode } from '../lib/onboarding.js';
 import { backupsPage, recoveryKeyPage } from '../views/backups.js';
 import { auditRows, summarise } from '../lib/order-audit.js';
-import { newReportKey, reportKeyInfo } from '../lib/report.js';
+import { dropTenantReportKey, newReportKey, newTenantReportKey, reportKeyInfo } from '../lib/report.js';
 
 /** A tenant's signing key: 256 random bits, shown once and pasted into the plugin. */
 const newIngestKey = () => randomBytes(32).toString('hex');
@@ -503,6 +503,30 @@ export default async function adminRoutes(app) {
       alerts: req.openAlerts, backupWarn: req.backupWarn, title: `${row.name} · kľúč`, user: req.adminUser,
       body: ingestKeyPage(row, key, { pairing: pairingCode(row.collector_host, key) }),
     }));
+  });
+
+  /**
+   * The client's own key for the reports API: opens this client's figures only.
+   * Shown once, on this response, and never put in a URL.
+   */
+  app.post('/admin/tenants/:id/report-key', async (req, reply) => {
+    const id = idOf(req.params.id);
+    const row = id && await one('SELECT id, name, slug FROM tenants WHERE id = $1', [id]);
+    const key = row && await newTenantReportKey(id);
+    if (!key) return reply.code(404).send('not found');
+    await audit(req, 'tenant.report_key', row.name);
+    return reply.header('cache-control', 'no-store').type('text/html').send(page({
+      alerts: req.openAlerts, backupWarn: req.backupWarn, title: `${row.name} · kľúč pre reporty`, user: req.adminUser,
+      body: reportKeyPage(row, key, `https://${config.adminHost}`),
+    }));
+  });
+
+  app.post('/admin/tenants/:id/report-key/revoke', async (req, reply) => {
+    const id = idOf(req.params.id);
+    if (!id) return reply.code(404).send('not found');
+    await dropTenantReportKey(id);
+    await audit(req, 'tenant.report_key_revoke', `klient ${id}`);
+    return redirect(reply, tabUrl(id, 'nastavenia'), 'Kľúč pre reporty zrušený.');
   });
 
   app.post('/admin/tenants/:id/key/revoke-previous', async (req, reply) => {

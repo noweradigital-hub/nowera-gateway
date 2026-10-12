@@ -154,6 +154,10 @@ CREATE TABLE IF NOT EXISTS booking_ledger (
   PRIMARY KEY (tenant_id, booking_id)
 );
 CREATE INDEX IF NOT EXISTS booking_ledger_day_idx ON booking_ledger(tenant_id, day);
+CREATE INDEX IF NOT EXISTS booking_ledger_order_idx ON booking_ledger(tenant_id, order_id);
+-- A report key of the client's own: opens the reports API for this client only.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS report_key_hash TEXT;
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS report_key_at TIMESTAMPTZ;
 -- The gateway can run the site's WP-Cron itself (pages served from a cache never do).
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS cron_url TEXT;
