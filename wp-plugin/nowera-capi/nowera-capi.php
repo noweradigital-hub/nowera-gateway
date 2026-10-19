@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.3.0
+ * Version:      1.3.1
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.3.0';
+const NOWERA_CAPI_VERSION = '1.3.1';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -409,6 +409,12 @@ add_action( 'wp_head', function () {
 	// This site's own endpoint that re-sets our identifiers from its server,
 	// which Safari keeps for 90 days instead of 7. Same for every visitor.
 	$config[] = 'window.nwrKeep=' . wp_json_encode( plugins_url( 'keep.php', __FILE__ ) ) . ';';
+
+	// Where px.js picks up the browser half of an add to cart made through the
+	// Store API (block buttons, custom buy boxes). Same for every visitor.
+	if ( class_exists( 'WC_AJAX' ) ) {
+		$config[] = 'window.nwrLegs=' . wp_json_encode( WC_AJAX::get_endpoint( 'nwr_legs' ) ) . ';';
+	}
 
 	// Hashed identifiers only for signed-in customers, whose pages are never
 	// served from the shared page cache. For a guest this line could be cached
@@ -2724,7 +2730,8 @@ function nowera_capi_atc_leg( ?array $leg = null ): ?array {
 	return $current;
 }
 
-add_action( 'woocommerce_add_to_cart', function ( $cart_item_key, $product_id, $quantity, $variation_id = 0 ) {
+/** AddToCart for a cart line that just got $quantity more, from the server and for the browser. */
+function nowera_capi_added( int $product_id, int $quantity, int $variation_id = 0 ): void {
 	$product = wc_get_product( $variation_id ?: $product_id );
 	if ( ! $product ) {
 		return;
@@ -2743,14 +2750,113 @@ add_action( 'woocommerce_add_to_cart', function ( $cart_item_key, $product_id, $
 	nowera_capi_send( 'AddToCart', $event_id, nowera_capi_current_user(), $custom_data, get_permalink( $product_id ) );
 
 	// The browser half: an AJAX add to cart hands it over in the cart fragments;
-	// a plain form post shows it on the next page this visitor loads.
+	// a plain form post shows it on the next page this visitor loads; a Store API
+	// add (block buttons, custom buy boxes) parks it for px.js to fetch.
 	nowera_capi_atc_leg( array( 'event_id' => $event_id, 'data' => $custom_data ) );
-	if ( ! wp_doing_ajax() && ! ( defined( 'REST_REQUEST' ) && REST_REQUEST ) && WC()->session ) {
+	if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+		nowera_capi_park_leg( array( 'AddToCart', $event_id, $custom_data ) );
+	} elseif ( ! wp_doing_ajax() && WC()->session ) {
 		$pending   = (array) WC()->session->get( 'nowera_capi_legs', array() );
 		$pending[] = array( 'AddToCart', $event_id, $custom_data );
 		WC()->session->set( 'nowera_capi_legs', array_slice( $pending, -5 ) );
 	}
+}
+
+/**
+ * Cart lines whose added quantity the Store API hook below has reported in this
+ * request. Should a plugin then add the same line the classic way, its
+ * woocommerce_add_to_cart (which follows the quantity change) is that same add.
+ */
+function nowera_capi_reported_line( string $key, ?bool $mark = null ): bool {
+	static $lines = array();
+	if ( '' === $key ) {
+		$lines = array(); // a new REST request (or the next one in a batch)
+		return false;
+	}
+	$was = isset( $lines[ $key ] );
+	if ( true === $mark ) {
+		$lines[ $key ] = true;
+	} elseif ( false === $mark ) {
+		unset( $lines[ $key ] );
+	}
+	return $was;
+}
+
+add_action( 'woocommerce_add_to_cart', function ( $cart_item_key, $product_id, $quantity, $variation_id = 0 ) {
+	if ( nowera_capi_reported_line( (string) $cart_item_key, false ) ) {
+		return;
+	}
+	nowera_capi_added( (int) $product_id, (int) $quantity, (int) $variation_id );
 }, 10, 4 );
+
+/** The REST route being handled, each request of a Store API batch included. */
+function nowera_capi_rest_route( ?string $route = null ): string {
+	static $current = '';
+	if ( null !== $route ) {
+		$current = $route;
+	}
+	return $current;
+}
+add_filter( 'rest_request_before_callbacks', function ( $response, $handler, $request ) {
+	nowera_capi_rest_route( $request instanceof \WP_REST_Request ? (string) $request->get_route() : '' );
+	nowera_capi_reported_line( '' );
+	return $response;
+}, 10, 3 );
+
+// The Store API adds a product already in the cart by raising that line's
+// quantity, without woocommerce_add_to_cart. Raising it on the cart page is no
+// add to cart (nor is it in the classic cart), so only cart/add-item counts.
+add_action( 'woocommerce_after_cart_item_quantity_update', function ( $key, $quantity, $old_quantity, $cart ) {
+	if ( (int) $quantity <= (int) $old_quantity || ! preg_match( '#^/wc/store(/v\d+)?/cart/add-item$#', nowera_capi_rest_route() ) ) {
+		return;
+	}
+	$line = $cart->get_cart_item( $key );
+	if ( ! empty( $line['product_id'] ) ) {
+		nowera_capi_reported_line( (string) $key, true );
+		nowera_capi_added( (int) $line['product_id'], (int) $quantity - (int) $old_quantity, (int) ( $line['variation_id'] ?? 0 ) );
+	}
+}, 10, 4 );
+
+/**
+ * Where a Store API add to cart parks its browser leg: beside the visitor's
+ * WooCommerce session, not in it. Taking it out of the session would save the
+ * whole session again, and a request that read it before a cart change
+ * running at the same time would put the old cart back.
+ */
+function nowera_capi_parked_key(): ?string {
+	if ( ! function_exists( 'WC' ) || ! WC()->session ) {
+		return null;
+	}
+	$customer = (string) WC()->session->get_customer_id();
+	return '' === $customer ? null : 'nowera_capi_legs_' . md5( $customer );
+}
+
+function nowera_capi_park_leg( array $leg ): void {
+	$key = nowera_capi_parked_key();
+	if ( ! $key ) {
+		return;
+	}
+	$parked   = get_transient( $key );
+	$parked   = is_array( $parked ) ? $parked : array();
+	$parked[] = $leg;
+	set_transient( $key, array_slice( $parked, -5 ), HOUR_IN_SECONDS );
+	// So later pages know to look (and pages of everyone else need not): this
+	// request saves the session anyway, with the cart it has just changed.
+	if ( ! WC()->session->get( 'nowera_capi_parked' ) ) {
+		WC()->session->set( 'nowera_capi_parked', 1 );
+	}
+}
+
+/** The parked legs, handed out once. */
+function nowera_capi_take_parked(): array {
+	$key    = nowera_capi_parked_key();
+	$parked = $key ? get_transient( $key ) : false;
+	if ( ! is_array( $parked ) || ! $parked ) {
+		return array();
+	}
+	delete_transient( $key );
+	return $parked;
+}
 
 // A string, not an object: themes loop over fragments expecting HTML strings.
 add_filter( 'woocommerce_add_to_cart_fragments', function ( $fragments ) {
@@ -2761,16 +2867,29 @@ add_filter( 'woocommerce_add_to_cart_fragments', function ( $fragments ) {
 	return $fragments;
 } );
 
-/** Browser legs waiting since a plain add-to-cart form post. Such a page belongs to one visitor: never cached. */
+/** Browser legs waiting since a plain add-to-cart form post or a Store API add. Such a page belongs to one visitor: never cached. */
 function nowera_capi_pending_legs(): void {
 	if ( ! function_exists( 'WC' ) || ! WC()->session || wp_doing_ajax() ) {
 		return;
 	}
 	$pending = WC()->session->get( 'nowera_capi_legs' );
-	if ( ! $pending || ! is_array( $pending ) ) {
+	$parked  = WC()->session->get( 'nowera_capi_parked' );
+	if ( ! $pending && ! $parked ) {
 		return;
 	}
-	WC()->session->set( 'nowera_capi_legs', null );
+	$pending = is_array( $pending ) ? $pending : array();
+	if ( $pending ) {
+		WC()->session->set( 'nowera_capi_legs', null );
+	}
+	if ( $parked ) {
+		// A Store API add px.js did not pick up (it never asked, or the visitor left
+		// first). The flag stays: clearing it would write the session (see
+		// nowera_capi_parked_key), and looking costs one transient read.
+		$pending = array_merge( $pending, nowera_capi_take_parked() );
+	}
+	if ( ! $pending ) {
+		return;
+	}
 	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
 		define( 'DONOTCACHEPAGE', true );
 	}
@@ -2786,6 +2905,34 @@ add_action( 'template_redirect', 'nowera_capi_pending_legs', 6 );
 
 // The AJAX half is picked up by px.js, which WooCommerce's added_to_cart hands the
 // fragments to; px.js comes fresh from the gateway even on pages cached long ago.
+
+/**
+ * ?wc-ajax=nwr_legs: hands px.js the legs a Store API add to cart parked for this
+ * visitor and forgets them, so each fires once, from here or from the next page.
+ * POST only (prefetchers and caches never take them), never cached, a request
+ * another site's page makes is answered with nothing, and the session itself is
+ * never written (see nowera_capi_parked_key).
+ */
+function nowera_capi_legs_endpoint(): void {
+	if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+		define( 'DONOTCACHEPAGE', true );
+	}
+	do_action( 'litespeed_control_set_nocache', 'nowera-capi: browser events for this visitor' );
+	nocache_headers();
+	header( 'X-Robots-Tag: noindex' );
+
+	$legs = array();
+	$site = strtolower( (string) ( $_SERVER['HTTP_SEC_FETCH_SITE'] ?? '' ) );
+	if ( 'POST' === ( $_SERVER['REQUEST_METHOD'] ?? '' ) && 'cross-site' !== $site ) {
+		foreach ( nowera_capi_take_parked() as $leg ) {
+			if ( is_array( $leg ) && 3 === count( $leg ) ) {
+				$legs[] = array( 'event' => (string) $leg[0], 'event_id' => (string) $leg[1], 'data' => (array) $leg[2] );
+			}
+		}
+	}
+	wp_send_json( array( 'legs' => $legs ) );
+}
+add_action( 'wc_ajax_nwr_legs', 'nowera_capi_legs_endpoint' );
 
 /**
  * InitiateCheckout when the checkout page opens, classic or built from blocks.

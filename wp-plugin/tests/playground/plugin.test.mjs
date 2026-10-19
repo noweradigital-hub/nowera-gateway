@@ -1144,6 +1144,141 @@ test('a plain add-to-cart post shows the browser leg on the next page, which is 
   assert.equal(purchase.left, null, 'shown once');
 });
 
+// A real Store API add to cart, as block buttons and custom buy boxes make it:
+// no fragments, so px.js asks ?wc-ajax=nwr_legs for the browser leg.
+async function storeApiAdd(cookie = '') {
+  const res = await fetch(`${BASE}/?rest_route=/wc/store/v1/cart/add-item`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(cookie ? { cookie } : {}) },
+    body: JSON.stringify({ id: ids.simple, quantity: 2 }),
+  });
+  const jar = new Map(cookie.split('; ').filter(Boolean).map((c) => c.split(/=(.*)/s).slice(0, 2)));
+  for (const c of res.headers.getSetCookie()) {
+    const [pair] = c.split(';');
+    const [k, v] = pair.split(/=(.*)/s);
+    jar.set(k, v);
+  }
+  return { res, body: await res.json(), cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; ') };
+}
+const legs = (cookie, opts = {}) => fetch(`${BASE}/?wc-ajax=nwr_legs`, { method: 'POST', ...opts, headers: { cookie, ...(opts.headers || {}) } });
+async function serverAtc(count = 1) {
+  let sent = [];
+  for (let i = 0; i < 80 && sent.length < count; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 250)); // sent after the response, by a worker that may be cold
+    sent = (await json('/nwr-test/http.php')).sent.filter((s) => s.body?.event_name === 'AddToCart');
+  }
+  return sent;
+}
+
+test('a Store API add to cart hands px.js the browser leg under the server id, once', async (t) => {
+  await setConsent('none');
+  await json('/nwr-test/http.php?capture=1');
+  t.after(() => json('/nwr-test/http.php?capture=0'));
+
+  const page = await html('/');
+  assert.match(page, /window\.nwrLegs="[^"]*\?wc-ajax=nwr_legs"/, 'the page tells px.js where to ask');
+
+  const add = await storeApiAdd();
+  assert.equal(add.res.status, 201, JSON.stringify(add.body).slice(0, 300));
+  assert.equal(add.body.items_count, 2);
+  const sent = await serverAtc();
+  assert.equal(sent.length, 1, 'the server leg went out');
+  const eventId = sent[0].body.event_id;
+
+  // Nothing for a GET (prefetchers, caches) or for another site's page.
+  const get = await fetch(`${BASE}/?wc-ajax=nwr_legs`, { headers: { cookie: add.cookie } });
+  assert.deepEqual((await get.json()).legs, []);
+  const foreign = await legs(add.cookie, { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+  assert.deepEqual((await foreign.json()).legs, []);
+  assert.deepEqual((await (await legs('')).json()).legs, [], 'another visitor gets nothing');
+
+  const res = await legs(add.cookie);
+  assert.match(res.headers.get('cache-control') || '', /no-store|no-cache/, 'never cached');
+  const body = await res.json();
+  assert.equal(body.legs.length, 1);
+  assert.equal(body.legs[0].event, 'AddToCart');
+  assert.equal(body.legs[0].event_id, eventId, 'one id with the server leg, so Meta counts one');
+  assert.deepEqual(body.legs[0].data, sent[0].body.custom_data);
+  assert.equal(body.legs[0].data.value, 49.8);
+
+  assert.deepEqual((await (await legs(add.cookie)).json()).legs, [], 'handed out once');
+  const later = await html('/', add.cookie);
+  assert.doesNotMatch(later, /window\.nwr\("track","AddToCart"/, 'and not again on the next page');
+});
+
+test('a Store API add to cart px.js never asked about shows on the next page instead', async (t) => {
+  await setConsent('none');
+  await json('/nwr-test/http.php?capture=1');
+  t.after(() => json('/nwr-test/http.php?capture=0'));
+
+  const add = await storeApiAdd();
+  assert.equal(add.res.status, 201);
+  const [sent] = await serverAtc();
+  const page = await html('/', add.cookie);
+  const shown = [...page.matchAll(/window\.nwr\("track","AddToCart",(.*?),\{eventID:(".*?")\}\);<\/script>/g)];
+  assert.equal(shown.length, 1);
+  assert.equal(JSON.parse(shown[0][2]), sent.body.event_id);
+  assert.deepEqual((await (await legs(add.cookie)).json()).legs, [], 'shown once');
+});
+
+test('adding a product already in the cart through the Store API is an add to cart too; raising it on the cart page is not', async (t) => {
+  await setConsent('none');
+  await json('/nwr-test/http.php?capture=1');
+  t.after(() => json('/nwr-test/http.php?capture=0'));
+
+  const first = await storeApiAdd();
+  assert.equal(first.res.status, 201);
+  await serverAtc(1);
+  // Again, the way atrium-studio.sk's buy box does it: one add-item inside a batch.
+  const again = await fetch(`${BASE}/?rest_route=/wc/store/v1/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', cookie: first.cookie },
+    body: JSON.stringify({ requests: [{ method: 'POST', path: '/wc/store/v1/cart/add-item', body: { id: ids.simple, quantity: 1 } }] }),
+  });
+  const batch = await again.json();
+  assert.equal(batch.responses[0].status, 201);
+  assert.equal(batch.responses[0].body.items_count, 3);
+  const sent = await serverAtc(2);
+  assert.equal(sent.length, 2, 'the second add reached the server too');
+  assert.equal(sent[1].body.custom_data.value, 24.9, 'worth what was added, not the whole line');
+  assert.equal(sent[1].body.custom_data.contents[0].quantity, 1);
+
+  const key = batch.responses[0].body.items[0].key;
+  const update = await fetch(`${BASE}/?rest_route=/wc/store/v1/cart/update-item`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', cookie: first.cookie },
+    body: JSON.stringify({ key, quantity: 5 }),
+  });
+  assert.equal((await update.json()).items_count, 5);
+  await new Promise((r) => setTimeout(r, 3000)); // what it would send goes after the response
+  const after = (await json('/nwr-test/http.php')).sent.filter((s) => s.body?.event_name === 'AddToCart');
+  assert.equal(after.length, 2, 'a quantity raised on the cart page is no add to cart');
+
+  const handed = (await (await legs(first.cookie)).json()).legs;
+  assert.deepEqual(handed.map((l) => l.event_id), sent.map((s) => s.body.event_id), 'both browser legs, under the server ids');
+});
+
+test('picking up the legs never puts back a cart that changed meanwhile', async (t) => {
+  await setConsent('none');
+  await json('/nwr-test/http.php?capture=1&slow=1');
+  t.after(() => json('/nwr-test/http.php?capture=0&slow=0'));
+
+  const first = await storeApiAdd();
+  const pickup = legs(first.cookie).then((r) => r.json()); // reads the session, then waits 2 s
+  await new Promise((r) => setTimeout(r, 600));
+  const second = await storeApiAdd(first.cookie);
+  assert.equal(second.body.items_count, 4);
+  const picked = (await pickup).legs;
+
+  const cart = await (await fetch(`${BASE}/?rest_route=/wc/store/v1/cart`, { headers: { cookie: second.cookie } })).json();
+  assert.equal(cart.items_count, 4, 'the second add survives the pickup');
+  await json('/nwr-test/http.php?slow=0');
+  const rest = (await (await legs(second.cookie)).json()).legs;
+  const sentIds = (await serverAtc(2)).map((s) => s.body.event_id).sort();
+  assert.equal(sentIds.length, 2);
+  assert.deepEqual([...picked, ...rest].map((l) => l.event_id).sort(), sentIds, 'both legs, each once');
+});
+
 test('a gateway outage pauses sending, and the purchase is retried from the order', async () => {
   const { sent, purchase } = await fire('purchase_gateway_down');
   assert.equal(purchase.attempts, 1, 'after the first timeout the next event is not even tried');

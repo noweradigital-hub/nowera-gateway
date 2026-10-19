@@ -739,6 +739,48 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     if (w.addEventListener) w.addEventListener('load', hookCart);
   }
 
+  // An add to cart through the Store API (block buttons, custom buy boxes) has no
+  // fragments. The plugin keeps its leg in the visitor's session instead, and the
+  // site's own ?wc-ajax=nwr_legs hands it over once; WooCommerce announces such
+  // an add with wc-blocks_added_to_cart. Pages cached before the plugin printed
+  // nwrLegs fall back to WooCommerce's own AJAX address.
+  function legsUrl() {
+    if (typeof w.nwrLegs === 'string') return w.nwrLegs;
+    var p = w.wc_add_to_cart_params || w.woocommerce_params;
+    if (p && typeof p.wc_ajax_url === 'string') return p.wc_ajax_url.replace('%%endpoint%%', 'nwr_legs');
+    return w.location.origin ? w.location.origin + '/?wc-ajax=nwr_legs' : null;
+  }
+  var legsBusy = false;
+  var legsAgain = false;
+  function fetchLegs() {
+    var url = legsUrl();
+    if (!url || !w.fetch) return;
+    if (legsBusy) { legsAgain = true; return; }
+    legsBusy = true;
+    var done = function () {
+      legsBusy = false;
+      if (legsAgain) { legsAgain = false; fetchLegs(); }
+    };
+    try {
+      w.fetch(url, { method: 'POST', credentials: 'same-origin', cache: 'no-store' })
+        .then(function (r) { return r && r.ok ? r.json() : null; })
+        .then(function (body) {
+          var legs = body && body.legs;
+          if (Object.prototype.toString.call(legs) === '[object Array]') {
+            legs.forEach(function (leg) {
+              if (leg && typeof leg.event === 'string' && /^[A-Za-z]{1,40}$/.test(leg.event) && leg.event_id) {
+                track(leg.event, leg.data || {}, { eventID: String(leg.event_id) });
+              }
+            });
+          }
+        })
+        .then(done, done);
+    } catch (e) { done(); }
+  }
+  // Capture phase on the document: WooCommerce dispatches it on body, and not
+  // every buy box lets it bubble.
+  d.addEventListener('wc-blocks_added_to_cart', fetchLegs, true);
+
   var queued = (w.nwr && w.nwr.q) || [];
   w.nwr = function (cmd) {
     var args = Array.prototype.slice.call(arguments, 1);

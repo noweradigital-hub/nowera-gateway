@@ -639,6 +639,109 @@ test('an AJAX add to cart is reported under the id the server already used', () 
   assert.equal(b.posts.length, before, 'other themes and plugins adding to cart send nothing extra');
 });
 
+/** Answers the site's ?wc-ajax=nwr_legs with the given bodies in turn; everything else as before. */
+function legsEndpoint(b, ...answers) {
+  const calls = [];
+  const original = b.window.fetch;
+  b.window.fetch = (url, opts = {}) => {
+    if (!String(url).includes('nwr_legs')) return original(url, opts);
+    calls.push({ url, opts });
+    const answer = answers.length ? answers.shift() : { legs: [] };
+    if (answer instanceof Error) return Promise.reject(answer);
+    if (answer && answer.status) return Promise.resolve({ ok: false, json: () => Promise.reject(new Error('no')) });
+    return Promise.resolve({ ok: true, json: () => (typeof answer === 'string' ? Promise.reject(new SyntaxError(answer)) : Promise.resolve(answer)) });
+  };
+  return calls;
+}
+
+test('a Store API add to cart (wc-blocks_added_to_cart) fetches the waiting leg and reports it under the server id', async () => {
+  const b = browser();
+  b.window.nwrLegs = 'https://klient.sk/?wc-ajax=nwr_legs';
+  const data = { content_ids: ['10'], value: 49.8, currency: 'EUR', content_type: 'product' };
+  const calls = legsEndpoint(b, { legs: [{ event: 'AddToCart', event_id: 'srv-store-1', data }] });
+  b.run();
+  assert.ok(b.listeners['wc-blocks_added_to_cart'], 'listens for the Store API add');
+  assert.equal(calls.length, 0, 'nothing is asked before something is added');
+
+  b.fire('wc-blocks_added_to_cart');
+  await settle();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://klient.sk/?wc-ajax=nwr_legs');
+  assert.equal(calls[0].opts.method, 'POST', 'POST: no cache or prefetcher takes the leg');
+  assert.equal(calls[0].opts.credentials, 'same-origin', 'the session cookie goes along');
+  const atc = b.posts.find((p) => p.body.event_name === 'AddToCart');
+  assert.equal(atc.body.event_id, 'srv-store-1', 'one id with the server leg, so Meta counts one');
+  assert.deepEqual(atc.body.custom_data, data);
+  const pixel = tracked(b.fbq).find((c) => c[1] === 'AddToCart');
+  assert.equal(pixel[3].eventID, 'srv-store-1');
+
+  // The endpoint hands each leg out once; a second add with nothing waiting sends nothing.
+  const before = b.posts.length;
+  b.fire('wc-blocks_added_to_cart');
+  await settle();
+  assert.equal(calls.length, 2);
+  assert.equal(b.posts.length, before);
+});
+
+test('the legs address falls back to WooCommerce\'s own AJAX address, then to the site root', async () => {
+  const withParams = browser();
+  withParams.window.wc_add_to_cart_params = { wc_ajax_url: '/shop/?wc-ajax=%%endpoint%%' };
+  const a = legsEndpoint(withParams);
+  withParams.run();
+  withParams.fire('wc-blocks_added_to_cart');
+  await settle();
+  assert.equal(a[0].url, '/shop/?wc-ajax=nwr_legs');
+
+  const bare = browser();
+  const c = legsEndpoint(bare);
+  bare.run();
+  bare.fire('wc-blocks_added_to_cart');
+  await settle();
+  assert.equal(c[0].url, 'https://klient.sk/?wc-ajax=nwr_legs');
+});
+
+test('a broken or foreign answer from the legs endpoint sends nothing', async () => {
+  const b = browser();
+  const calls = legsEndpoint(b,
+    'not json', { status: 500 }, new Error('offline'), null, { legs: 'x' },
+    { legs: [{ event: 'AddToCart' }, { event: 'Add To<Cart>', event_id: 'x' }, null, { event_id: 'y' }]});
+  b.run();
+  const before = b.posts.length;
+  for (let i = 0; i < 6; i++) {
+    b.fire('wc-blocks_added_to_cart');
+    await settle();
+  }
+  assert.equal(calls.length, 6, 'each failure still leaves the next add free to ask');
+  assert.equal(b.posts.length, before);
+  assert.equal(tracked(b.fbq).filter((c) => c[1] !== 'PageView').length, 0);
+});
+
+test('adds announced while the legs are being fetched are asked about once more afterwards', async () => {
+  const b = browser();
+  const data = { content_ids: ['11'], value: 5, currency: 'EUR' };
+  const calls = legsEndpoint(b,
+    { legs: [{ event: 'AddToCart', event_id: 'first', data }] },
+    { legs: [{ event: 'AddToCart', event_id: 'second', data }] });
+  b.run();
+  b.fire('wc-blocks_added_to_cart');
+  b.fire('wc-blocks_added_to_cart');
+  b.fire('wc-blocks_added_to_cart');
+  await settle();
+  await settle();
+  assert.equal(calls.length, 2, 'one request in flight at a time, one more for what came meanwhile');
+  assert.deepEqual(b.posts.filter((p) => p.body.event_name === 'AddToCart').map((p) => p.body.event_id), ['first', 'second']);
+});
+
+test('a Store API add to cart waits for consent like every other browser leg', async () => {
+  const b = browser({ consent: { mode: 'cookiescript' } });
+  legsEndpoint(b, { legs: [{ event: 'AddToCart', event_id: 'srv-c', data: { value: 1, currency: 'EUR' } }] });
+  b.run();
+  b.fire('wc-blocks_added_to_cart');
+  await settle();
+  assert.equal(b.posts.filter((p) => p.body.event_name === 'AddToCart').length, 0, 'nothing before the visitor decides');
+  assert.equal(tracked(b.fbq).filter((c) => c[1] === 'AddToCart').length, 0);
+});
+
 test('without jQuery yet, the cart listener waits for the page to load', () => {
   const b = browser();
   b.run();

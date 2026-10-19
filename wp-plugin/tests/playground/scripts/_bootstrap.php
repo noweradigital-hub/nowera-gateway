@@ -1,6 +1,7 @@
 <?php
 // Shared bootstrap for the Playground test scripts. Never deploy these.
 define( 'WP_DISABLE_FATAL_ERROR_HANDLER', true );
+define( 'NWR_TEST_SCRIPT', true ); // these scripts capture on their own (below), not through the mu-plugin
 ini_set( 'display_errors', '1' );
 error_reporting( E_ALL );
 register_shutdown_function( function () {
