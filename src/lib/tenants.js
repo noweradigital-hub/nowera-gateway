@@ -20,7 +20,8 @@ export async function tenantByHost(hostHeader) {
   const tenant = await one(
     `SELECT id, slug, name, collector_host, allowed_origins, cookie_domain,
             consent_mode, consent_prefix, keep_path,
-            ingest_secret, ingest_secret_prev, legacy_ingest, server_only_events
+            ingest_secret, ingest_secret_prev, legacy_ingest, server_only_events,
+            stripe_webhook_secret
        FROM tenants
       WHERE lower(collector_host) = $1 AND active = TRUE`,
     [host],
@@ -29,6 +30,7 @@ export async function tenantByHost(hostHeader) {
   if (tenant) {
     tenant.ingest_secret = open(tenant.ingest_secret);
     tenant.ingest_secret_prev = open(tenant.ingest_secret_prev);
+    tenant.stripe_webhook_secret = open(tenant.stripe_webhook_secret);
     tenant.destinations = await many(
       `SELECT id, kind, settings FROM destinations
         WHERE tenant_id = $1 AND active = TRUE`,

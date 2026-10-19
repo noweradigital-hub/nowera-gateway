@@ -34,10 +34,31 @@ const GA_ONLY = {
   destinations: [{ id: 30, kind: 'ga4', settings: { measurement_id: 'G-TEST', api_secret: 's' } }],
 };
 
+// A site without a plugin that sends its Stripe webhooks here.
+const STRIPE = {
+  ...TENANT, id: 4, slug: 'stripe', collector_host: 't.stripe-klient.sk', allowed_origins: 'https://stripe-klient.sk',
+  cookie_domain: '.stripe-klient.sk', consent_mode: 'cookiebot', stripe_webhook_secret: 'whsec_test_0123456789abcdef',
+};
+const contexts = [];
+const payments = [];
+let failStore = false;
+let failContext = false;
+
 const stubs = {
   tenantByHost: async (host) => {
     const h = String(host).split(':')[0];
-    return h === TENANT.collector_host ? TENANT : h === STRICT.collector_host ? STRICT : h === GA_ONLY.collector_host ? GA_ONLY : null;
+    return [TENANT, STRICT, GA_ONLY, STRIPE].find((t) => t.collector_host === h) || null;
+  },
+  recordContext: async (tenantId, event) => {
+    if (failContext) throw new Error('context insert failed');
+    contexts.push({ tenantId, event });
+    return true;
+  },
+  transaction: async (fn) => fn(undefined),
+  storePayment: async (tenantId, checkout) => {
+    if (failStore) throw new Error('db down');
+    payments.push({ tenantId, checkout });
+    return true;
   },
   enqueue: async (tenantId, event, destinations) => {
     inserted.push({ tenantId, event, destinations });
@@ -461,4 +482,111 @@ test('/r takes the shop\'s signed order list and nothing unsigned', async () => 
   const badRes = await postAudit('t.prisny.sk', bad, { 'x-nwr-timestamp': String(ts), 'x-nwr-signature': signed('tenant-key', bad, ts) });
   assert.equal(badRes.statusCode, 400);
   assert.equal(audits.length, 1);
+});
+
+
+// ------------------------------------------------------------------ Stripe
+
+const stripeSign = (body, secret = STRIPE.stripe_webhook_secret, t = Math.floor(Date.now() / 1000)) =>
+  `t=${t},v1=${createHmac('sha256', secret).update(`${t}.${body}`).digest('hex')}`;
+const paidSession = JSON.stringify({
+  id: 'evt_1', type: 'checkout.session.completed', created: Math.floor(Date.now() / 1000), livemode: true,
+  data: { object: { id: 'cs_live_1', object: 'checkout.session', mode: 'payment', payment_status: 'paid',
+    amount_total: 1299, currency: 'eur', customer_details: { email: 'jana@example.sk' }, metadata: { order_id: '481' } } },
+});
+const postStripe = (body, headers = {}) => app.inject({
+  method: 'POST', url: '/stripe',
+  headers: { host: STRIPE.collector_host, 'content-type': 'application/json; charset=utf-8', 'stripe-signature': stripeSign(body), ...headers },
+  payload: body,
+});
+
+test('stripe: a signed paid Checkout is stored for the matcher', async () => {
+  payments.length = 0;
+  const res = await postStripe(paidSession);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { ok: true, stored: true });
+  assert.equal(payments.length, 1);
+  assert.equal(payments[0].tenantId, STRIPE.id);
+  assert.equal(payments[0].checkout.sessionId, 'cs_live_1');
+  assert.equal(payments[0].checkout.value, 12.99);
+});
+
+test('stripe: a forged or tampered body is refused and nothing is stored', async () => {
+  payments.length = 0;
+  const forged = await postStripe(paidSession, { 'stripe-signature': stripeSign(paidSession, 'whsec_someone_else_secret') });
+  assert.equal(forged.statusCode, 400);
+  const tampered = await postStripe(paidSession.replace('1299', '999999'), { 'stripe-signature': stripeSign(paidSession) });
+  assert.equal(tampered.statusCode, 400);
+  const unsigned = await postStripe(paidSession, { 'stripe-signature': '' });
+  assert.equal(unsigned.statusCode, 400);
+  assert.equal(payments.length, 0);
+});
+
+test('stripe: a tenant without a signing secret has no Stripe endpoint', async () => {
+  const res = await app.inject({
+    method: 'POST', url: '/stripe',
+    headers: { host: HOST, 'content-type': 'application/json', 'stripe-signature': stripeSign(paidSession) },
+    payload: paidSession,
+  });
+  assert.equal(res.statusCode, 404);
+});
+
+test('stripe: other event types are acknowledged and ignored', async () => {
+  payments.length = 0;
+  const body = JSON.stringify({ id: 'evt_2', type: 'charge.refunded', data: { object: { object: 'charge' } } });
+  const res = await postStripe(body);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.json().ignored, 'charge.refunded');
+  assert.equal(payments.length, 0);
+});
+
+test('stripe: a storage failure answers 500, so Stripe retries', async () => {
+  failStore = true;
+  try {
+    const res = await postStripe(paidSession);
+    assert.equal(res.statusCode, 500);
+  } finally {
+    failStore = false;
+  }
+});
+
+test('stripe: browser events with an email are kept for the matcher, only where Stripe is on', async () => {
+  contexts.length = 0;
+  const em = sha('jana@example.sk');
+  const send = (host, origin) => app.inject({
+    method: 'POST', url: '/e',
+    headers: { host, origin, 'content-type': 'application/json' },
+    payload: { event_name: 'Purchase', event_id: 'ord-1', user_data: { em }, consent: { marketing: true, statistics: true },
+      custom_data: { value: 12.99, currency: 'EUR' } },
+  });
+  assert.equal((await send(STRIPE.collector_host, 'https://stripe-klient.sk')).statusCode, 200);
+  assert.equal((await send(HOST, 'https://klient.sk')).statusCode, 200);
+  assert.equal(contexts.length, 1, 'only the Stripe tenant records browser contexts');
+  assert.equal(contexts[0].tenantId, STRIPE.id);
+  assert.equal(contexts[0].event.user.em, em);
+});
+
+test('stripe: an oversized body is cut off while reading, before any signature check', async () => {
+  const big = JSON.stringify({ pad: 'x'.repeat(1200 * 1024) }); // over the app's body limit
+  const res = await app.inject({
+    method: 'POST', url: '/stripe',
+    headers: { host: STRIPE.collector_host, 'content-type': 'application/json', 'stripe-signature': 't=1,v1=00' },
+    payload: big,
+  });
+  assert.equal(res.statusCode, 413);
+});
+
+test('stripe: a browser Purchase whose record fails is not acknowledged as queued', async () => {
+  failContext = true;
+  try {
+    const res = await app.inject({
+      method: 'POST', url: '/e',
+      headers: { host: STRIPE.collector_host, origin: 'https://stripe-klient.sk', 'content-type': 'application/json' },
+      payload: { event_name: 'Purchase', event_id: 'ord-2', user_data: { em: sha('x@y.sk') }, consent: { marketing: true },
+        custom_data: { value: 1, currency: 'EUR' } },
+    });
+    assert.equal(res.statusCode, 500);
+  } finally {
+    failContext = false;
+  }
 });

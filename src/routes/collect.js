@@ -11,6 +11,9 @@ import { isBot } from '../lib/bots.js';
 import { clientIp } from '../lib/client-ip.js';
 import { createLimiter } from '../lib/ratelimit.js';
 import * as defaultStats from '../lib/stats-writer.js';
+import { transaction as defaultTransaction } from '../db.js';
+import { paidCheckout, verifyStripeSignature } from '../lib/stripe.js';
+import { recordBrowserContext as defaultRecordContext, storePayment as defaultStorePayment } from '../lib/stripe-purchases.js';
 
 const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
 
@@ -122,12 +125,26 @@ export default async function collectRoutes(app, opts = {}) {
   const browserLimit = createLimiter(opts.browserLimit || BROWSER_LIMIT);
   const stats = opts.stats || defaultStats;
   const saveAudit = opts.saveSnapshot || saveSnapshot;
+  const recordContext = opts.recordContext || defaultRecordContext;
+  const storePayment = opts.storePayment || defaultStorePayment;
+  const transaction = opts.transaction || defaultTransaction;
 
   // Keep the raw body around so the HMAC is computed over exactly what was sent.
+  // These routes are open to anyone until the signature is checked, so the body
+  // is cut off at the server's own limit while it is read, not after.
+  const SIGNED = new Set(['/s', '/r', '/stripe']);
   app.addHook('preParsing', async (req, _reply, payload) => {
-    if (req.routeOptions?.url !== '/s' && req.routeOptions?.url !== '/r') return payload;
+    if (!SIGNED.has(req.routeOptions?.url)) return payload;
+    const limit = req.routeOptions?.config?.bodyLimit || app.initialConfig.bodyLimit || 1024 * 1024;
+    const tooLarge = () => Object.assign(new Error('request body too large'), { statusCode: 413 });
+    if (Number(req.headers['content-length']) > limit) throw tooLarge();
     const chunks = [];
-    for await (const chunk of payload) chunks.push(chunk);
+    let size = 0;
+    for await (const chunk of payload) {
+      size += chunk.length;
+      if (size > limit) throw tooLarge();
+      chunks.push(chunk);
+    }
     const raw = Buffer.concat(chunks);
     req.rawBody = raw.toString('utf8');
     const stream = (await import('node:stream')).Readable.from(raw);
@@ -230,9 +247,41 @@ export default async function collectRoutes(app, opts = {}) {
     }
 
     event.source = 'browser';
+    // With Stripe on, the matcher needs what this visit allowed (see
+    // stripe-purchases.js). Queued and recorded together: a browser Purchase that
+    // went out with no record of it would let the matcher send it a second time.
+    const queued = tenant.stripe_webhook_secret
+      ? await transaction(async (run) => {
+        const n = await enqueue(tenant.id, event, tenant.destinations, run);
+        await recordContext(tenant.id, event, run);
+        return n;
+      })
+      : await enqueue(tenant.id, event, tenant.destinations);
+    // Counted once it is stored, so a rolled-back event never shows in the dashboard.
     stats.recordReceived(tenant.id, event, 'browser');
-    const queued = await enqueue(tenant.id, event, tenant.destinations);
     return reply.send({ ok: true, event_id: event.event_id, queued });
+  });
+
+  /**
+   * Stripe webhooks: paid Checkout sessions of a site that has no plugin. Stored
+   * and answered at once; the matcher decides later whether a server Purchase is
+   * needed. A storage failure answers 500, so Stripe retries.
+   */
+  app.post('/stripe', async (req, reply) => {
+    const tenant = await tenantByHost(req.headers.host);
+    if (!tenant) return reply.code(404).send({ error: 'unknown host' });
+    const refused = verifyStripeSignature(req.rawBody || '', req.headers['stripe-signature'], tenant.stripe_webhook_secret);
+    if (refused) return reply.code(refused === 'stripe not configured' ? 404 : 400).send({ error: refused });
+
+    const checkout = paidCheckout(req.body);
+    if (!checkout) return reply.send({ ok: true, ignored: String(req.body?.type || 'unknown').slice(0, 60) });
+    try {
+      const stored = await storePayment(tenant.id, checkout);
+      return reply.send({ ok: true, stored });
+    } catch (err) {
+      req.log.error({ err }, 'stripe payment not stored');
+      return reply.code(500).send({ error: 'not stored' });
+    }
   });
 
   /**

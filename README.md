@@ -140,6 +140,38 @@ by label using the existing `mytlschallenge` ACME resolver.
 6. Turn on Meta test mode, press **Poslať testovací event**, confirm it in Events
    Manager under Test Events.
 
+## A site without the plugin: GTM and Stripe
+
+A site we cannot change (another agency's app) can still be measured: px.js is
+loaded from its own Google Tag Manager (a Custom HTML tag with
+`<script async src="https://t.<domain>/px.js">`, consent mode set on the tenant,
+e.g. Cookiebot), and GTM tags call `nwr('track', name, props, { eventID, user })`
+on the steps that matter. An email passed as `user.em` is hashed by px.js before
+it leaves the page, so a thank-you tag can pass the address the page shows.
+
+For Stripe Checkout payments, **Nastavenia → Stripe** takes the webhook's signing
+secret; in Stripe add the endpoint `https://t.<domain>/stripe` with
+`checkout.session.completed` and `checkout.session.async_payment_succeeded`.
+Every paid session is stored and decided 30 minutes after the payment
+(`src/lib/stripe-purchases.js`):
+
+| Status | When | Sent |
+|---|---|---|
+| `matched` | the browser's own Purchase arrived (same hashed email, currency and amount) | nothing more |
+| `sent` | no browser Purchase, but the buyer's visit in the two hours before paying allowed it | a server Purchase `stripe-<session>`, with that visit's consent, fbp/fbc, IP, user agent and GA ids |
+| `no_visit` | no visit with consent and the same email | nothing |
+| `ambiguous` | more than one browser Purchase fits | nothing |
+| `test` | a Stripe test-mode event | nothing |
+
+The join needs the email on both sides: Stripe's `customer_email` (set by the
+site and locked in Checkout) and the hashed email the browser carries, either
+from a form px.js saw or passed by the thank-you tag. GA4 gets a Stripe Purchase
+only when the visit had a GA client id. A buyer whose browser Purchase arrives
+after the 30 minutes would be counted twice; this is meant for sites whose
+thank-you page appears once, straight after Stripe's redirect. Consent comes from
+the newest visit before the payment: px.js sends nothing once a visitor refuses,
+so a withdrawal in the two hours before paying cannot be seen.
+
 ## Orders that are not plain goods, and the report API
 
 From plugin 1.3 every order line has a kind. Adapters in

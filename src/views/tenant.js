@@ -305,6 +305,35 @@ export function settingsTab(t) {
           <button class="btn sm danger" type="submit">Zrušiť kľúč</button></form>` : ''}
       </div>
     </div>
+  </div>
+  ${stripeCard(t)}`;
+}
+
+/** Stripe webhook: the endpoint to give Stripe, its signing secret, and what came of the payments. */
+export function stripeCard(t, counts = t.stripe_counts) {
+  const url = `https://${t.collector_host}/stripe`;
+  const on = Boolean(t.stripe_webhook_secret);
+  const names = { matched: 'spárované s nákupom z webu', sent: 'poslané zo servera', no_consent: 'návšteva bez súhlasu', no_visit: 'bez návštevy so súhlasom', ambiguous: 'nejednoznačné', waiting: 'čakajú', test: 'testovacie' };
+  const tally = counts && Object.keys(counts).length
+    ? Object.entries(counts).map(([k, n]) => `${esc(names[k] || k)}: <b>${n}</b>`).join(' · ')
+    : 'Zatiaľ žiadna platba.';
+  return `
+  <div class="card" id="stripe">
+    <div class="card-h"><h2>Stripe (web bez pluginu)</h2>${state(on ? 'ok' : 'off', on ? 'zapnuté' : 'vypnuté')}</div>
+    <div class="card-b" style="display:grid;gap:10px">
+      <p style="margin:0">Zaplatená Stripe Checkout objednávka príde ako serverový Purchase aj vtedy, keď sa zákazník po platbe nevráti na web.
+        Ak nákup z webu (px.js) prišiel, platba sa s ním len spáruje a nič sa neposiela dvakrát. Bez súhlasu z predošlej návštevy sa nepošle nič.</p>
+      <p class="dim" style="margin:0;font-size:13px">V Stripe: Developers → Webhooks → Add endpoint <code>${esc(url)}</code>,
+        udalosti <code>checkout.session.completed</code> a <code>checkout.session.async_payment_succeeded</code>. Signing secret (whsec_…) vložte sem.</p>
+      <p class="dim" style="margin:0;font-size:13px">Posledných 30 dní: ${tally}</p>
+      <form method="post" action="/admin/tenants/${t.id}/stripe" class="actions" autocomplete="off">
+        <input type="password" name="stripe_webhook_secret" placeholder="${on ? 'nastavené — nový whsec_… ho nahradí' : 'whsec_…'}" style="min-width:280px" autocomplete="new-password">
+        <button class="btn sm" type="submit">Uložiť</button>
+      </form>
+      ${on ? `<form class="inline" method="post" action="/admin/tenants/${t.id}/stripe/remove"
+            onsubmit="return confirm('Vypnúť Stripe? Webhooky budú odmietnuté, kým nevložíte nový signing secret.')">
+        <button class="btn sm danger" type="submit">Vypnúť</button></form>` : ''}
+    </div>
   </div>`;
 }
 

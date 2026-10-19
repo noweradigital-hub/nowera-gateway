@@ -10,6 +10,7 @@ import { startAlerts } from './lib/alerts.js';
 import { sealStoredSecrets } from './lib/seal-stored.js';
 import { startBackups } from './lib/backup.js';
 import { startSiteCron } from './lib/site-cron.js';
+import { startStripeMatcher } from './lib/stripe-purchases.js';
 import { polls, traefikConfig } from './lib/routing.js';
 import collectRoutes from './routes/collect.js';
 import adminRoutes from './routes/admin.js';
@@ -44,6 +45,7 @@ const stopStats = startStatsWriter(app.log);
 const stopAlerts = startAlerts(app.log);
 const stopBackups = startBackups(app.log);
 const stopSiteCron = startSiteCron(app.log);
+const stopStripe = startStripeMatcher(app.log);
 let internal = null;
 
 async function shutdown(signal) {
@@ -52,6 +54,7 @@ async function shutdown(signal) {
   stopAlerts();
   stopBackups();
   stopSiteCron();
+  stopStripe();
   internal?.close();
   await stopStats();
   await app.close();

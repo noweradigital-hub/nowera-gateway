@@ -619,6 +619,19 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     waiting.forEach(send);
   }
 
+  // A tag may pass the buyer's email as the page shows it (a thank-you page that
+  // prints it, read by GTM). It is hashed here, so the address never leaves the
+  // page in the clear and the pixel can use it too.
+  function hashUser(user) {
+    var out = merge({}, user || {});
+    if (typeof out.em === 'string' && !HASHED.test(out.em)) {
+      var email = out.em.replace(/^\\s+|\\s+$/g, '').toLowerCase();
+      if (EMAIL.test(email)) out.em = sha256(email);
+      else delete out.em;
+    }
+    return out;
+  }
+
   function track(name, props, opts) {
     opts = opts || {};
     var ev = {
@@ -627,7 +640,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       time: Math.floor(Date.now() / 1000),
       url: w.location.href,
       props: props || {},
-      user: opts.user || {}
+      user: hashUser(opts.user)
     };
     send(ev);
     return ev.id;

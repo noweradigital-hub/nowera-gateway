@@ -244,6 +244,61 @@ ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN NOT NULL D
 ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS totp_last_step BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
 
+-- Stripe webhooks, for a site we cannot change: its Checkout payments reach us
+-- even when the buyer never returns to the thank-you page. The endpoint's
+-- signing secret, sealed like every other secret.
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS stripe_webhook_secret TEXT;
+
+-- One row per paid Checkout session. It waits until the browser's own Purchase
+-- had time to arrive, then is either matched to it (nothing is sent) or sent as
+-- a server Purchase with the consent and identifiers of the buyer's earlier
+-- visit. No plaintext contact data: the email is kept hashed, for that match.
+CREATE TABLE IF NOT EXISTS stripe_payments (
+  id               BIGSERIAL PRIMARY KEY,
+  tenant_id        INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  session_id       TEXT NOT NULL,
+  stripe_event_id  TEXT,
+  livemode         BOOLEAN NOT NULL DEFAULT TRUE,
+  email_hash       TEXT,
+  value            NUMERIC NOT NULL,
+  currency         TEXT NOT NULL,
+  order_ref        TEXT,
+  paid_at          TIMESTAMPTZ NOT NULL,
+  received_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  due_at           TIMESTAMPTZ NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'waiting'
+                   CHECK (status IN ('waiting','matched','sent','no_consent','no_visit','ambiguous','test')),
+  matched_event_id TEXT,
+  sent_event_id    TEXT,
+  decided_at       TIMESTAMPTZ,
+  UNIQUE (tenant_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS stripe_payments_due_idx ON stripe_payments(due_at) WHERE status = 'waiting';
+CREATE INDEX IF NOT EXISTS stripe_payments_tenant_idx ON stripe_payments(tenant_id, received_at DESC);
+-- A browser Purchase stands for one payment only.
+CREATE UNIQUE INDEX IF NOT EXISTS stripe_payments_matched_idx
+  ON stripe_payments(tenant_id, matched_event_id) WHERE matched_event_id IS NOT NULL;
+
+-- What the buyer's browser said during the visit, for tenants with Stripe on:
+-- one row per browser event that carried a hashed email. The Stripe matcher
+-- reads it to find the browser's own Purchase (then nothing is sent) or, when the
+-- buyer never came back, the consent and identifiers to send one with. Only
+-- hashed contact data; kept 7 days.
+CREATE TABLE IF NOT EXISTS browser_contexts (
+  id          BIGSERIAL PRIMARY KEY,
+  tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  email_hash  TEXT NOT NULL,
+  event_name  TEXT NOT NULL,
+  event_id    TEXT NOT NULL,
+  value       NUMERIC,
+  currency    TEXT,
+  consent     JSONB,
+  snapshot    JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS browser_contexts_lookup_idx ON browser_contexts(tenant_id, email_hash, created_at DESC);
+CREATE INDEX IF NOT EXISTS browser_contexts_time_idx ON browser_contexts(created_at);
+
 -- Who changed what in the dashboard.
 CREATE TABLE IF NOT EXISTS admin_audit (
   id      BIGSERIAL PRIMARY KEY,

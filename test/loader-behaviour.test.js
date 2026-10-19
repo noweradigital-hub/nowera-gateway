@@ -429,6 +429,29 @@ test('Cookiebot: a broken Cookiebot object counts as no consent, not as an error
   assert.equal(b.posts.length, 0);
 });
 
+// ------------------------------------------------ email passed by a tag
+
+test('an email a tag passes to track() leaves the page hashed only', () => {
+  const b = browser();
+  b.run();
+  b.window.nwr('track', 'Purchase', { value: 12.99, currency: 'EUR' },
+    { eventID: 'ord-7', user: { em: '  Jana@Example.SK ' } });
+  const p = b.posts.find((x) => x.body.event_name === 'Purchase');
+  assert.equal(p.body.event_id, 'ord-7');
+  assert.equal(p.body.user_data.em, sha('jana@example.sk'));
+  assert.ok(!JSON.stringify(p.body).includes('Example'), 'no plaintext address in the request');
+});
+
+test('a value that is no email is dropped, a hash passes unchanged', () => {
+  const b = browser();
+  b.run();
+  b.window.nwr('track', 'Lead', {}, { user: { em: 'not an email' } });
+  b.window.nwr('track', 'Lead', {}, { user: { em: sha('a@b.sk') } });
+  const leads = b.posts.filter((x) => x.body.event_name === 'Lead');
+  assert.equal(leads[0].body.user_data.em, undefined);
+  assert.equal(leads[1].body.user_data.em, sha('a@b.sk'));
+});
+
 // --------------------------------------------- consent set on the gateway
 
 test('a page served from cache is still gated when the gateway knows the consent tool', () => {

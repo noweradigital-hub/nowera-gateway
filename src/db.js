@@ -29,3 +29,19 @@ export async function many(text, params) {
   const { rows } = await pool.query(text, params);
   return rows;
 }
+
+/** Run `fn(run)` in one transaction; `run(text, params)` queries inside it. */
+export async function transaction(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn((text, params) => client.query(text, params));
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}

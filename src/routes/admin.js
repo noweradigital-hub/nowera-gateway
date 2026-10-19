@@ -47,6 +47,7 @@ import { keySource, recoveryKey } from '../lib/secrets.js';
 import { deriveFromSite, detectConsent, gatewayIp, pairingCode } from '../lib/onboarding.js';
 import { backupsPage, recoveryKeyPage } from '../views/backups.js';
 import { auditRows, summarise } from '../lib/order-audit.js';
+import { stripeCounts } from '../lib/stripe-purchases.js';
 import { dropTenantReportKey, newReportKey, newTenantReportKey, reportKeyInfo } from '../lib/report.js';
 
 /** A tenant's signing key: 256 random bits, shown once and pasted into the plugin. */
@@ -432,6 +433,7 @@ export default async function adminRoutes(app) {
       const detail = e ? await eventDetail(e, id) : null;
       body = eventBrowser({ base: tabUrl(id, 'eventy'), rows, names: await eventNames(id), filters, detail });
     } else {
+      tenant.stripe_counts = tenant.stripe_webhook_secret ? await stripeCounts(id) : null;
       body = settingsTab(tenant);
     }
     return reply.type('text/html').send(page({
@@ -527,6 +529,33 @@ export default async function adminRoutes(app) {
     await dropTenantReportKey(id);
     await audit(req, 'tenant.report_key_revoke', `klient ${id}`);
     return redirect(reply, tabUrl(id, 'nastavenia'), 'Kľúč pre reporty zrušený.');
+  });
+
+  /**
+   * The Stripe webhook's signing secret (whsec_…). Write-only: the page never shows
+   * it back, a new one replaces it, removing it makes /stripe refuse every call.
+   */
+  app.post('/admin/tenants/:id/stripe', async (req, reply) => {
+    const id = idOf(req.params.id);
+    if (!id) return reply.code(404).send('not found');
+    const secret = String(req.body?.stripe_webhook_secret || '').trim();
+    if (!/^whsec_[A-Za-z0-9+/=_-]{16,200}$/.test(secret)) {
+      return redirect(reply, tabUrl(id, 'nastavenia'), 'Signing secret musí začínať whsec_ (Stripe → Webhooks → endpoint → Signing secret).', 'err');
+    }
+    const row = await one('UPDATE tenants SET stripe_webhook_secret = $2 WHERE id = $1 RETURNING name', [id, seal(secret)]);
+    if (!row) return reply.code(404).send('not found');
+    invalidateTenantCache();
+    await audit(req, 'tenant.stripe', row.name);
+    return redirect(reply, tabUrl(id, 'nastavenia'), 'Stripe zapnutý.');
+  });
+
+  app.post('/admin/tenants/:id/stripe/remove', async (req, reply) => {
+    const id = idOf(req.params.id);
+    if (!id) return reply.code(404).send('not found');
+    await query('UPDATE tenants SET stripe_webhook_secret = NULL WHERE id = $1', [id]);
+    invalidateTenantCache();
+    await audit(req, 'tenant.stripe_off', `klient ${id}`);
+    return redirect(reply, tabUrl(id, 'nastavenia'), 'Stripe vypnutý.');
   });
 
   app.post('/admin/tenants/:id/key/revoke-previous', async (req, reply) => {

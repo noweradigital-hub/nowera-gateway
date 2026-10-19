@@ -53,6 +53,14 @@ export async function sealStoredSecrets(log) {
       changed += 1;
     }
 
+    const stripe = await client.query('SELECT id, stripe_webhook_secret FROM tenants WHERE stripe_webhook_secret IS NOT NULL');
+    for (const t of stripe.rows) {
+      if (!needsWork(t.stripe_webhook_secret)) continue;
+      await client.query('UPDATE tenants SET stripe_webhook_secret = $2 WHERE id = $1', [t.id,
+        trySeal(t.stripe_webhook_secret, problems, `klient ${t.id} Stripe`)]);
+      changed += 1;
+    }
+
     const users = await client.query('SELECT id, totp_secret, totp_pending FROM admin_users');
     for (const u of users.rows) {
       if (!needsWork(u.totp_secret) && !needsWork(u.totp_pending)) continue;
