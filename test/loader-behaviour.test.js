@@ -328,6 +328,107 @@ test('CookieScript: a garbled cookie counts as no consent, not as an error', () 
   assert.equal(b.posts.length, 0);
 });
 
+// --------------------------------------------------------------- Cookiebot
+
+// Exactly how Cookiebot stores its decision: a JS-object literal, not JSON,
+// URL-encoded. The loader must not trust it on its own.
+const cbCookie = ({ marketing, statistics }) =>
+  'CookieConsent=' + encodeURIComponent(
+    `{stamp:'abc==',necessary:true,preferences:true,statistics:${statistics},marketing:${marketing},method:'explicit',ver:1,utc:1760000000000,region:'sk'}`,
+  );
+
+// Cookiebot announces on window, which the fake browser shares with document.
+function cookiebotBrowser(opts = {}) {
+  const b = browser({ consent: { mode: 'cookiebot' }, ...opts });
+  b.window.addEventListener = b.document.addEventListener;
+  return b;
+}
+const answered = (consent) => ({ hasResponse: true, consent });
+
+test('Cookiebot: nothing is sent before the visitor decides', () => {
+  const b = cookiebotBrowser({ page: { type: 'product', data: {} } });
+  b.run();
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.fbq.length, 0);
+  for (const e of ['CookiebotOnConsentReady', 'CookiebotOnAccept', 'CookiebotOnDecline']) {
+    assert.ok(b.listeners[e], `listens for ${e}`);
+  }
+});
+
+test('Cookiebot: a returning visitor who accepted is tracked once Cookiebot confirms it', () => {
+  const b = cookiebotBrowser({ cookie: cbCookie({ marketing: true, statistics: true }) });
+  b.run();
+  assert.equal(b.posts.length, 0, 'the cookie alone is not consent');
+  b.window.Cookiebot = answered({ marketing: true, statistics: true });
+  b.fire('CookiebotOnConsentReady');
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: true });
+  assert.ok(isInit(b.fbq[0]));
+});
+
+test('Cookiebot: already loaded and answered when px.js runs', () => {
+  const b = cookiebotBrowser();
+  b.window.Cookiebot = answered({ marketing: true, statistics: true });
+  b.run();
+  assert.equal(b.posts.length, 1);
+});
+
+test('Cookiebot: an accepting cookie is ignored while Cookiebot has not validated it', () => {
+  const b = cookiebotBrowser({ cookie: cbCookie({ marketing: true, statistics: true }) });
+  b.window.Cookiebot = { hasResponse: false, consent: { marketing: false, statistics: false } };
+  b.run();
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.fbq.length, 0);
+});
+
+test('Cookiebot: a stored acceptance that Cookiebot then renews to a refusal sends nothing', () => {
+  const b = cookiebotBrowser({ cookie: cbCookie({ marketing: true, statistics: true }) });
+  b.run();
+  b.window.Cookiebot = answered({ marketing: false, statistics: false });
+  b.fire('CookiebotOnConsentReady');
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.fbq.length, 0);
+});
+
+test('Cookiebot: accepting in the banner releases waiting events at once', () => {
+  const b = cookiebotBrowser({ page: { type: 'product', data: {} } });
+  b.run();
+  assert.equal(b.posts.length, 0);
+  b.window.Cookiebot = answered({ marketing: true, statistics: false });
+  b.fire('CookiebotOnAccept');
+  assert.deepEqual(b.posts.map((p) => p.body.event_name), ['PageView', 'ViewContent']);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: true, statistics: false });
+  assert.equal(tracked(b.fbq)[0][3].eventID, b.posts[0].body.event_id);
+});
+
+test('Cookiebot: statistics only sends no pixel and no marketing identifiers', () => {
+  const b = cookiebotBrowser({ cookie: '_fbp=fb.1.1.2' });
+  b.run();
+  b.window.Cookiebot = answered({ marketing: false, statistics: true });
+  b.fire('CookiebotOnAccept');
+  assert.equal(b.posts.length, 1);
+  assert.deepEqual(b.posts[0].body.consent, { marketing: false, statistics: true });
+  assert.equal(b.posts[0].body.fbp, undefined);
+  assert.equal(b.fbq.length, 0);
+});
+
+test('Cookiebot: declining drops our identifiers', () => {
+  const b = cookiebotBrowser({ cookie: '_nwr_id=abcdefgh1234; _nwr_ud=%7B%7D' });
+  b.run();
+  b.window.Cookiebot = answered({ marketing: false, statistics: false });
+  b.fire('CookiebotOnDecline');
+  assert.equal(b.posts.length, 0);
+  assert.equal(b.jar.value('_nwr_id'), undefined);
+  assert.equal(b.jar.value('_nwr_ud'), undefined);
+});
+
+test('Cookiebot: a broken Cookiebot object counts as no consent, not as an error', () => {
+  const b = cookiebotBrowser();
+  Object.defineProperty(b.window, 'Cookiebot', { get() { throw new Error('boom'); } });
+  assert.doesNotThrow(() => b.run());
+  assert.equal(b.posts.length, 0);
+});
+
 // --------------------------------------------- consent set on the gateway
 
 test('a page served from cache is still gated when the gateway knows the consent tool', () => {

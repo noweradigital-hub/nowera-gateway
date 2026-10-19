@@ -209,8 +209,29 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       ? ready.accepted : null;
   }
 
+  // Cookiebot's decision as {marketing, statistics}, or null while it has not
+  // confirmed one. Only its live object counts, never its CookieConsent cookie:
+  // Cookiebot may still discard a stored decision (a renewed consent, another
+  // banner version), so the cookie alone proves nothing. Until Cookiebot has
+  // loaded, events wait; CookiebotOnConsentReady releases them on every page.
+  // A visitor outside the regions where it asks gets consent from it as well.
+  function cookiebotState() {
+    try {
+      var cb = w.Cookiebot;
+      if (cb && cb.hasResponse && cb.consent) {
+        return { marketing: cb.consent.marketing === true, statistics: cb.consent.statistics === true };
+      }
+    } catch (e) {}
+    return null;
+  }
+
   function hasConsent(category) {
     if (!consentActive()) return true;
+
+    if (CONSENT.mode === 'cookiebot') {
+      var st = cookiebotState();
+      return !!st && st[category] === true;
+    }
 
     if (CONSENT.mode === 'cookiescript') {
       return cookieScriptCategories().indexOf(CS_CATEGORY[category]) !== -1;
@@ -238,6 +259,10 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   // An explicit "no" to marketing, as opposed to no decision yet.
   function marketingRefused() {
     if (!consentActive()) return false;
+    if (CONSENT.mode === 'cookiebot') {
+      var cbState = cookiebotState();
+      return !!cbState && cbState.marketing === false;
+    }
     if (CONSENT.mode === 'cookiescript') {
       var cats = cookieScriptCategories();
       return cats.length > 0 && cats.indexOf(CS_CATEGORY.marketing) === -1;
@@ -632,6 +657,15 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     };
     d.addEventListener('fazcookie_consent_ready', fazListen);
     d.addEventListener('fazcookie_consent_update', fazListen);
+  }
+
+  if (CONSENT.mode === 'cookiebot') {
+    // Cookiebot announces on window: OnConsentReady on every page once the state
+    // is known (a returning visitor's included), OnAccept/OnDecline on a choice.
+    var cbTarget = w.addEventListener ? w : d;
+    cbTarget.addEventListener('CookiebotOnConsentReady', onConsentChange);
+    cbTarget.addEventListener('CookiebotOnAccept', onConsentChange);
+    cbTarget.addEventListener('CookiebotOnDecline', onConsentChange);
   }
 
   if (CONSENT.mode === 'cookiescript') {
