@@ -58,7 +58,7 @@ export function spark(values, color = 'var(--accent)') {
     + `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.6" fill="${color}"/></svg>`;
 }
 
-const SERIES_COLORS = ['var(--c3)', 'var(--c2)', 'var(--c1)', 'var(--c4)', 'var(--c6)', 'var(--c5)', 'var(--c7)', 'var(--c8)'];
+const SERIES_COLORS = ['var(--c1)', 'var(--c2)', 'var(--c3)', 'var(--c4)', 'var(--c6)', 'var(--c5)', 'var(--c7)', 'var(--c8)', 'var(--c9)', 'var(--c10)'];
 
 /** A "nice" top for an axis: 1, 2 or 5 times a power of ten, at least `max`. */
 export function niceMax(max) {
