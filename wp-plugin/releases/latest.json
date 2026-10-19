@@ -1,11 +1,11 @@
 {
-  "version": "1.3.0",
-  "file": "nowera-capi-1.3.0.zip",
-  "sha256": "58d7c64c547d4a46176fc92274ad7b2451eaa7726f97a40b0890c9b6299863a4",
-  "signature": "3xGCp4qvVCFOVn6tBv0x86gJ4M8FBSYADIMzYTqhmnhRhsmN13JuRihk79lvY0HCodqa27adgccPxTC6JXPDCw==",
-  "released_at": "2026-10-12T15:52:05.402Z",
+  "version": "1.3.1",
+  "file": "nowera-capi-1.3.1.zip",
+  "sha256": "251bcccacc0c6186ebd80e8e3fe77b558a60682d708be21afe054d36ba6057f5",
+  "signature": "tLD3pAh4fI2fRyr0xZqVlh5fS1DQeYVwvVVmzQ0EEGBu/p4r76sktxzfNc/H0vZZtPc8JWd1Bu7UyZpGKb2LBQ==",
+  "released_at": "2026-10-19T11:53:22.634Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Rezervácie (Amelia) ako Lead, darčekové poukazy a predplatné ako vlastné druhy, objednávky za 0 € a obnovenia len v evidencii. Zoznam objednávok každú hodinu, s druhmi, sumami a rezerváciami."
+  "notes": "Pridanie do košíka cez Store API (blokové tlačidlá, vlastné nákupné boxy): AddToCart aj z prehliadača pod rovnakým ID ako zo servera; opakované pridanie produktu, ktorý už je v košíku, sa tiež počíta."
 }
