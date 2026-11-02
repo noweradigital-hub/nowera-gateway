@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.3.1
+ * Version:      1.3.2
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.3.1';
+const NOWERA_CAPI_VERSION = '1.3.2';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -1787,16 +1787,20 @@ function nowera_capi_order_plan( \WC_Order $order ): array {
 		$parts['other'] = $rest;
 	}
 
-	$lead_kinds     = array_values( array_intersect( array_keys( $gross ), $leads ) );
-	$purchase_kinds = array_values( array_diff( array_keys( $gross ), $leads ) );
-	$lead_value     = 0.0;
+	$lead_kinds = array_values( array_intersect( array_keys( $gross ), $leads ) );
+	$lead_value = 0.0;
 	foreach ( $lead_kinds as $kind ) {
 		$lead_value += $parts[ $kind ];
 	}
-	$lead_value     = round( $lead_value, $dp );
+	$lead_value = round( $lead_value, $dp );
+	// A paid booking counts twice, as a Lead and as part of the order's Purchase,
+	// so a campaign or a report can go by either. A site that wants bookings as
+	// leads only says so through this filter.
+	$also_sale      = (bool) apply_filters( 'nowera_capi_lead_is_purchase', true, $order );
+	$purchase_kinds = $also_sale ? array_keys( $gross ) : array_values( array_diff( array_keys( $gross ), $leads ) );
 	// An order without a single product line (fees only) is still a sale.
 	$purchase       = $purchase_kinds || ! $lead_kinds;
-	$purchase_value = $purchase ? round( max( 0, $total - $lead_value ), $dp ) : 0.0;
+	$purchase_value = $purchase ? round( max( 0, $also_sale ? $total : $total - $lead_value ), $dp ) : 0.0;
 
 	$expect = array();
 	if ( ! $renewal ) {
@@ -1820,7 +1824,8 @@ function nowera_capi_order_plan( \WC_Order $order ): array {
 		'goods'   => round( $base, $dp ),
 		'parts'   => $parts,
 		'cash'    => $cash,
-		'split'   => (bool) $lead_kinds || $tender > 0, // the Purchase is not simply the whole order
+		// The Purchase is not simply the whole order.
+		'split'   => ( $lead_kinds && ! $also_sale ) || $tender > 0,
 		'lead'    => null,
 		'purchase' => null,
 		'subscribe' => null,
@@ -1892,17 +1897,24 @@ function nowera_capi_refund_plan( \WC_Order $order ): ?array {
 		'net'    => $now['split'] ? ( $now['purchase']['value_net'] ?? 0.0 ) : nowera_capi_order_net( $order ),
 		'split'  => $now['split'],
 		'cash'   => $now['cash'],
+		'sold'   => $now['purchase']['kinds'] ?? array(),
 	);
 }
 
 function nowera_capi_purchase_data( \WC_Order $order, ?array $plan = null ): array {
 	$plan     = $plan ?? nowera_capi_order_plan( $order );
 	$leads    = nowera_capi_lead_kinds();
+	$sold     = $plan['purchase']['kinds'] ?? array();
 	$contents = array();
 	foreach ( $order->get_items() as $line ) {
-		// A booking on the same order is its own Lead, not part of the purchase.
-		if ( $line instanceof \WC_Order_Item_Product && ! in_array( nowera_capi_line_kind( $line, $order ), $leads, true ) ) {
+		$kind = $line instanceof \WC_Order_Item_Product ? nowera_capi_line_kind( $line, $order ) : null;
+		// Only what the Purchase covers (a booking too, unless the site counts bookings as leads only).
+		if ( $kind && in_array( $kind, $sold, true ) ) {
 			$item = nowera_capi_order_item( $line, $order );
+			// A booking's line is the booking plugin's one product: name it after what was booked.
+			if ( in_array( $kind, $leads, true ) ) {
+				$item['item_name'] = (string) apply_filters( 'nowera_capi_line_name', $item['item_name'], $line, $order );
+			}
 			// Part paid with a gift card: each item at the share paid in money, so the
 			// items add up to the purchase's value.
 			if ( $plan['tender'] > 0 ) {
@@ -1977,6 +1989,8 @@ function nowera_capi_report_order( \WC_Order $order, array $user, ?array $ctx = 
 		'net'    => $plan['split'] ? ( $plan['purchase']['value_net'] ?? 0.0 ) : nowera_capi_order_net( $order ),
 		'split'  => $plan['split'],
 		'cash'   => $plan['cash'],
+		// What the Purchase covered: since 1.3.2 a paid booking too.
+		'sold'   => $plan['purchase']['kinds'] ?? array(),
 	) );
 	if ( ! $plan['expect'] ) {
 		return 'ledger';
@@ -2582,7 +2596,43 @@ function nowera_capi_audit_line( \WC_Order $order, ?\DateTimeZone $tz = null ): 
  * WooCommerce events
  * ---------------------------------------------------------------------- */
 
-add_action( 'woocommerce_thankyou', function ( $order_id ) {
+add_action( 'woocommerce_thankyou', 'nowera_capi_thankyou', 10, 1 );
+
+/**
+ * A thank-you page built by a page builder from its own parts may never run
+ * WooCommerce's woocommerce_thankyou hook, and then the purchase left only 30
+ * minutes after the payment, from the server alone. On the order-received page
+ * the plugin checks before the footer whether the hook ran, and if not, does
+ * its part itself — for the order the address names and only with its key,
+ * exactly as WooCommerce itself decides whose thank-you page it is.
+ */
+add_action( 'wp_footer', function () {
+	if ( did_action( 'woocommerce_thankyou' ) || ! function_exists( 'is_order_received_page' ) || ! is_order_received_page() ) {
+		return;
+	}
+	global $wp;
+	$order_id = absint( $wp->query_vars['order-received'] ?? 0 );
+	$key      = isset( $_GET['key'] ) && is_string( $_GET['key'] ) ? wc_clean( wp_unslash( $_GET['key'] ) ) : '';
+	$order    = $order_id ? wc_get_order( $order_id ) : null;
+	if ( ! $order instanceof \WC_Order || '' === $key || ! hash_equals( $order->get_order_key(), $key ) ) {
+		return;
+	}
+	// WooCommerce shows the order only to its own customer, logged in, and asks
+	// anyone it cannot recognise to confirm the e-mail first. Someone else holding
+	// the link sees a login or e-mail form, and that is no thank-you page.
+	$customer = $order->get_customer_id();
+	if ( $customer && apply_filters( 'woocommerce_order_received_verify_known_shoppers', true ) && get_current_user_id() !== $customer ) {
+		return;
+	}
+	$users = '\\Automattic\\WooCommerce\\Internal\\Utilities\\Users';
+	if ( class_exists( $users ) && method_exists( $users, 'should_user_verify_order_email' )
+		&& $users::should_user_verify_order_email( $order_id, null, 'order-received' ) ) {
+		return;
+	}
+	nowera_capi_thankyou( $order_id );
+}, 1 );
+
+function nowera_capi_thankyou( $order_id ): void {
 	$order = wc_get_order( $order_id );
 	if ( ! $order ) {
 		return;
@@ -2624,7 +2674,7 @@ add_action( 'woocommerce_thankyou', function ( $order_id ) {
 		}
 	}
 	$order->save();
-}, 10, 1 );
+}
 
 /**
  * The thank-you page's address without its query string: the order key in it
@@ -3036,7 +3086,10 @@ function nowera_capi_refund( $order_id, $refund_id ): void {
 		foreach ( $refund->get_items( array( 'line_item', 'shipping', 'fee' ) ) as $item ) {
 			$lines = true;
 			if ( $item instanceof \WC_Order_Item_Product ) {
-				if ( in_array( nowera_capi_line_kind( $item, $order ), $leads, true ) ) {
+				// A line the Purchase did not cover (a booking reported as a lead only;
+				// plans from before 1.3.2 do not say, and covered no booking) gives nothing back.
+				$kind = nowera_capi_line_kind( $item, $order );
+				if ( isset( $plan['sold'] ) ? ! in_array( $kind, (array) $plan['sold'], true ) : in_array( $kind, $leads, true ) ) {
 					continue;
 				}
 				$net += abs( (float) $item->get_total() );

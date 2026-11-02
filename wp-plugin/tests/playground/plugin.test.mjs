@@ -561,9 +561,9 @@ test('the order list for the completeness check: signed, paged, no contact data,
 const kindOrder = (lines, extra = '', cookies = '') => fire('kind_order', cookies, `&lines=${lines}${extra}`);
 const names = (sent) => sent.map((e) => e.body.event_name);
 
-test('a booking is a Lead, not a Purchase: named after the service, worth what was paid, once', async () => {
+test('a paid booking is a Lead and a Purchase: named after the service, worth what was paid, once each', async () => {
   const { sent, footer, purchase } = await kindOrder('booking');
-  assert.deepEqual(names(sent), ['Lead']);
+  assert.deepEqual(names(sent), ['Lead', 'Purchase']);
   const b = sent[0].body;
   assert.equal(b.event_id, `book-${purchase.order}`);
   assert.equal(b.custom_data.content_category, 'booking');
@@ -572,52 +572,72 @@ test('a booking is a Lead, not a Purchase: named after the service, worth what w
   assert.equal(b.custom_data.currency, 'EUR');
   assert.equal(b.custom_data.num_items, 1);
   assert.equal(b.user_data.em, sha('jan.novak@example.com'), 'the buyer is matched like on a purchase');
-  assert.doesNotMatch(JSON.stringify(b), /secret@example\.com|ameliabooking/, 'nothing of the booking plugin\u2019s own data travels');
-  // The browser half under the same id, so Meta keeps one Lead.
+  assert.doesNotMatch(JSON.stringify(sent), /secret@example\.com|ameliabooking/, 'nothing of the booking plugin’s own data travels');
+  // The same booking as a sale: the whole order, its line named after the service.
+  const buy = sent[1].body;
+  assert.equal(buy.event_id, `ord-${purchase.order}`);
+  assert.equal(buy.custom_data.value, purchase.total);
+  assert.equal(buy.custom_data.content_category, 'booking', 'a conversion of its own can pick bookings out');
+  assert.equal(buy.custom_data.contents[0].item_name, 'Masáž 60 min');
+  // The browser halves under the same ids, so Meta keeps one of each.
   const legs = [...footer.matchAll(/window\.nwr\("track","(\w+)",(.*?),\{eventID:(".*?")\}\);<\/script>/g)];
-  assert.deepEqual(legs.map((l) => [l[1], JSON.parse(l[3])]), [['Lead', b.event_id]]);
+  assert.deepEqual(legs.map((l) => [l[1], JSON.parse(l[3])]), [['Lead', b.event_id], ['Purchase', buy.event_id]]);
   assert.equal(purchase.sent, true);
-  assert.match(purchase.notes.join(' '), /Nowera CAPI: Lead odoslaný do Mety/);
-  assert.deepEqual(purchase.line.expect, ['Lead']);
+  assert.match(purchase.notes.join(' '), /Nowera CAPI: Lead \+ Purchase odoslaný do Mety/);
+  assert.deepEqual(purchase.line.expect, ['Lead', 'Purchase']);
   assert.equal(purchase.line.kind, 'booking');
   assert.equal(purchase.line.bookings, 1);
   assert.deepEqual(purchase.line.parts, { booking: purchase.total });
 });
 
-test('a free booking is still a Lead, worth nothing; several bookings on one order are one Lead', async () => {
+test('a free booking is a Lead only (nothing was sold); several bookings on one order are one Lead and one Purchase', async () => {
   const free = await kindOrder('booking', '&free=1');
   assert.deepEqual(names(free.sent), ['Lead']);
   assert.equal(free.sent[0].body.custom_data.value, 0);
   assert.equal(free.purchase.total, 0);
+  assert.deepEqual(free.purchase.line.expect, ['Lead']);
 
   const two = await kindOrder('booking,booking2');
-  assert.deepEqual(names(two.sent), ['Lead']);
+  assert.deepEqual(names(two.sent), ['Lead', 'Purchase']);
   assert.equal(two.sent[0].body.custom_data.content_name, 'Masáž 60 min + Konzultácia');
   assert.equal(two.sent[0].body.custom_data.num_items, 2);
   assert.equal(two.sent[0].body.custom_data.value, two.purchase.total);
+  assert.equal(two.sent[1].body.custom_data.value, two.purchase.total);
 });
 
-test('a booking paid with a gift card: a Lead worth only the money added on top', async () => {
+test('a booking paid with a gift card: Lead and Purchase worth only the money added on top', async () => {
   const { sent, purchase } = await kindOrder('booking', '&tender=10');
-  assert.deepEqual(names(sent), ['Lead']);
+  assert.deepEqual(names(sent), ['Lead', 'Purchase']);
   assert.equal(purchase.total, Math.round((purchase.goods - 10) * 100) / 100);
   assert.equal(sent[0].body.custom_data.value, purchase.total);
+  assert.equal(sent[1].body.custom_data.value, purchase.total);
   assert.equal(purchase.line.tender, 10);
   assert.equal(purchase.line.goods, purchase.goods);
 });
 
-test('goods and a booking on one order: a Purchase of the goods and a Lead of the booking, adding up to the total', async () => {
+test('goods and a booking on one order: one Purchase of all of it, and a Lead of the booking', async () => {
   const { sent, purchase } = await kindOrder('booking,product');
-  assert.deepEqual(names(sent).sort(), ['Lead', 'Purchase']);
+  assert.deepEqual(names(sent), ['Lead', 'Purchase']);
   const lead = sent.find((e) => e.body.event_name === 'Lead').body;
   const buy = sent.find((e) => e.body.event_name === 'Purchase').body;
   assert.equal(buy.event_id, `ord-${purchase.order}`);
-  assert.deepEqual(buy.custom_data.content_ids, [String(ids.simple)], 'the booking is not among the purchased items');
-  assert.equal(buy.custom_data.num_items, 2);
-  assert.equal(Math.round((lead.custom_data.value + buy.custom_data.value) * 100) / 100, purchase.total);
-  assert.equal(buy.custom_data.content_category, undefined, 'plain goods carry no category of their own');
+  assert.deepEqual(buy.custom_data.content_ids, [String(ids.variations[1]), String(ids.simple)], 'the booking is among the purchased items');
+  assert.equal(buy.custom_data.num_items, 3);
+  assert.equal(buy.custom_data.value, purchase.total);
+  assert.ok(lead.custom_data.value > 0 && lead.custom_data.value < purchase.total, 'the Lead is worth the booking alone');
+  assert.equal(buy.custom_data.content_category, 'mixed');
   assert.equal(purchase.line.kind, 'mixed');
   assert.deepEqual(purchase.line.expect, ['Lead', 'Purchase']);
+});
+
+test('a site that counts bookings as leads only: no Purchase for them, the goods’ share for the rest', async () => {
+  const one = await kindOrder('booking', '&leads_only=1');
+  assert.deepEqual(names(one.sent), ['Lead']);
+  const mixed = await kindOrder('booking,product', '&leads_only=1');
+  const lead = mixed.sent.find((e) => e.body.event_name === 'Lead').body;
+  const buy = mixed.sent.find((e) => e.body.event_name === 'Purchase').body;
+  assert.deepEqual(buy.custom_data.content_ids, [String(ids.simple)]);
+  assert.equal(Math.round((lead.custom_data.value + buy.custom_data.value) * 100) / 100, mixed.purchase.total);
 });
 
 test('an order that cost nothing is reported to nobody and kept in the order list', async () => {
@@ -673,49 +693,44 @@ test('a new subscription is a Purchase and a Subscribe; its renewal is reported 
   assert.deepEqual(renewal.purchase.line.parts, { subscription: 7.5 }, 'its money is still in the list');
 });
 
-test('a booking paid without a return to the site is still a Lead, from checkout data', async () => {
+test('a booking paid without a return to the site is still a Lead and a Purchase, from checkout data', async () => {
   const { sent, purchase } = await kindOrder('booking', '&noreturn=1');
-  assert.deepEqual(names(sent), ['Lead']);
+  assert.deepEqual(names(sent), ['Lead', 'Purchase']);
   assert.equal(sent[0].body.browserless, true);
   assert.equal(purchase.sent, true);
-  assert.match(purchase.notes.join(' '), /Po potvrdení platby.*Lead odoslaný/);
+  assert.match(purchase.notes.join(' '), /Po potvrdení platby.*Lead \+ Purchase odoslaný/);
 });
 
-test('refunding or cancelling a booking takes nothing back from GA4: no purchase was counted', async () => {
+test('refunds of a booking take its money back from GA4, as for any purchase; a leads-only booking gives nothing back', async () => {
   for (const then of ['refund', 'cancel']) {
-    const { sent } = await kindOrder('booking', `&then=${then}`);
+    const { sent, purchase } = await kindOrder('booking', `&then=${then}`);
+    assert.deepEqual(names(sent), ['Lead', 'Purchase', 'Refund'], then);
+    const back = sent[2].body.custom_data;
+    assert.equal(back.value, then === 'refund' ? Math.round((purchase.total / 2) * 100) / 100 : purchase.total);
+  }
+  // Line by line on a mixed order: the booking's line and the goods' lines each take back their own money.
+  const onlyBooking = await kindOrder('booking,product', '&then=refund_booking');
+  assert.deepEqual(names(onlyBooking.sent), ['Lead', 'Purchase', 'Refund']);
+  assert.equal(onlyBooking.sent[2].body.custom_data.contents.length, 1);
+  const onlyGoods = await kindOrder('booking,product', '&then=refund_goods');
+  assert.equal(onlyGoods.sent[2].body.custom_data.contents[0].id, String(ids.simple));
+  // Part paid with a gift card: the booking's line still takes back its share of the money.
+  const card = await kindOrder('booking,product', '&tender=10&then=refund_booking');
+  const cardBack = card.sent.find((e) => e.body.event_name === 'Refund');
+  assert.ok(cardBack && cardBack.body.custom_data.value > 0, 'a refunded booking is taken back');
+
+  // Bookings as leads only: nothing of a booking was a purchase, so nothing comes back.
+  for (const then of ['refund', 'cancel']) {
+    const { sent } = await kindOrder('booking', `&leads_only=1&then=${then}`);
     assert.deepEqual(names(sent), ['Lead'], then);
   }
-  // Goods with a booking: only the goods' share of the money returned.
-  const mixed = await kindOrder('booking,product', '&then=refund');
-  const refund = mixed.sent.find((e) => e.body.event_name === 'Refund').body;
-  const buy = mixed.sent.find((e) => e.body.event_name === 'Purchase').body;
-  assert.equal(refund.custom_data.contents, undefined);
-  const share = buy.custom_data.value / mixed.purchase.total;
-  assert.ok(Math.abs(refund.custom_data.value - (mixed.purchase.total / 2) * share) < 0.02);
-  assert.ok(refund.custom_data.value_net <= buy.custom_data.value_net);
-
-  // Given back line by line: the booking's line takes nothing, the goods' lines all of theirs.
-  const onlyBooking = await kindOrder('booking,product', '&then=refund_booking');
-  assert.deepEqual(names(onlyBooking.sent).sort(), ['Lead', 'Purchase']);
-  const onlyGoods = await kindOrder('booking,product', '&then=refund_goods');
-  const back = onlyGoods.sent.find((e) => e.body.event_name === 'Refund').body.custom_data;
-  const bought = onlyGoods.sent.find((e) => e.body.event_name === 'Purchase').body.custom_data;
-  assert.equal(back.value, bought.value);
-  assert.equal(back.value_net, bought.value_net);
-
-  // An amount first and the goods' line after it: never more than the purchase was worth.
-  const twice = await kindOrder('booking,product', '&then=refund_small,refund_goods');
+  const twice = await kindOrder('booking,product', '&leads_only=1&then=refund_small,refund_goods');
   const backs = twice.sent.filter((e) => e.body.event_name === 'Refund').map((e) => e.body.custom_data);
   const worth = twice.sent.find((e) => e.body.event_name === 'Purchase').body.custom_data;
   assert.equal(backs.length, 2);
-  assert.ok(Math.abs(backs[0].value + backs[1].value - worth.value) < 0.02);
-  assert.ok(backs[0].value_net + backs[1].value_net <= worth.value_net + 0.01);
-
-  // Refunded before anything was reported: a booking still has no purchase to take back.
-  const early = await kindOrder('booking', '&unreported=1&then=refund');
+  assert.ok(Math.abs(backs[0].value + backs[1].value - worth.value) < 0.02, 'never more than the purchase was worth');
+  const early = await kindOrder('booking', '&leads_only=1&unreported=1&then=refund');
   assert.equal(early.sent.length, 0);
-  // Goods refunded that early are taken back as before: the page's own tags may have counted them.
   const earlyGoods = await kindOrder('product', '&unreported=1&then=refund');
   assert.deepEqual(names(earlyGoods.sent), ['Refund']);
 });
@@ -726,11 +741,38 @@ test('without consent a booking is not reported, and stays open for a later yes'
     const { sent, purchase } = await kindOrder('booking');
     assert.equal(sent.length, 0);
     assert.equal(purchase.consent, 'none');
-    assert.match(purchase.notes.join(' '), /Lead neodoslaný — návštevník nedal súhlas/);
-    assert.deepEqual(purchase.line.expect, ['Lead']);
+    assert.match(purchase.notes.join(' '), /Lead \+ Purchase neodoslaný — návštevník nedal súhlas/);
+    assert.deepEqual(purchase.line.expect, ['Lead', 'Purchase']);
   } finally {
     await setConsent('none');
   }
+});
+
+test('a thank-you page that never runs WooCommerce’s hook still reports the order, once, with its browser half', async () => {
+  const { sent, footer, purchase } = await fire('thankyou_nohook');
+  assert.deepEqual(names(sent), ['Purchase']);
+  assert.equal(sent[0].body.event_id, `ord-${purchase.order}`);
+  assert.equal(sent[0].body.browserless, undefined, 'a page showed it');
+  assert.match(footer, new RegExp(`window\\.nwr\\("track","Purchase",.*?\\{eventID:"ord-${purchase.order}"\\}`));
+  assert.equal(purchase.thankyou, true);
+  assert.equal(purchase.waited, true, 'the payment had scheduled its own report');
+  assert.equal(purchase.scheduled, false, 'nothing left for the payment confirmation to do');
+
+  // Another order's key, or none: the page belongs to nobody, nothing is reported.
+  const wrong = await fire('thankyou_nohook', '', '&key=wc_order_wrong');
+  assert.equal(wrong.sent.length, 0);
+  const malformed = await fire('thankyou_nohook', '', '&key[]=x');
+  assert.equal(malformed.sent.length, 0, 'an odd key is no key, and no crash');
+  // WooCommerce shows a customer's order only to that customer, logged in, and
+  // asks for the e-mail on an older guest order: then it is no thank-you page.
+  const notTheirs = await fire('thankyou_nohook', '', '&as_customer=1');
+  assert.equal(notTheirs.sent.length, 0);
+  assert.equal(notTheirs.purchase.thankyou, false);
+  const oldGuest = await fire('thankyou_nohook', '', '&old=1');
+  assert.equal(oldGuest.sent.length, 0);
+  // A theme that does run the hook: reported by it, not twice.
+  const both = await fire('thankyou_nohook', '', '&with_hook=1');
+  assert.deepEqual(names(both.sent), ['Purchase']);
 });
 
 test('taking things out of the cart reports the removed quantity', async () => {

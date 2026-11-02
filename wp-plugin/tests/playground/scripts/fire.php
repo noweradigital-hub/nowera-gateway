@@ -452,6 +452,9 @@ switch ( $event ) {
 				return $t + (float) $o->get_meta( '_nwr_test_tender' );
 			}, 10, 2 );
 		}
+		if ( ! empty( $_GET['leads_only'] ) ) {
+			add_filter( 'nowera_capi_lead_is_purchase', '__return_false' );
+		}
 		if ( ! empty( $_GET['renewal'] ) ) {
 			$order->set_created_via( '' );
 			add_filter( 'nowera_capi_order_renewal', '__return_true' );
@@ -519,6 +522,43 @@ switch ( $event ) {
 				function ( $n ) { return $n->content; },
 				wc_get_order_notes( array( 'order_id' => $fresh->get_id(), 'limit' => 5 ) )
 			),
+		);
+		break;
+	case 'thankyou_nohook':
+		// A paid order whose thank-you page is built from parts that never run
+		// woocommerce_thankyou (a page builder's own template).
+		$order = nwr_order( $ids );
+		if ( ! empty( $_GET['as_customer'] ) ) {
+			$order->set_customer_id( $ids['user'] ); // a customer's order, while nobody is logged in
+		}
+		if ( ! empty( $_GET['old'] ) ) {
+			$order->set_date_created( time() - HOUR_IN_SECONDS ); // a guest's order, past WooCommerce's grace period
+		}
+		$order->save();
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		$order = wc_get_order( $order->get_id() );
+		$order->set_status( 'processing' );
+		$order->save();
+		$waiting = (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		$GLOBALS['wp']->query_vars['order-received'] = (string) $order->get_id();
+		if ( ! isset( $_GET['key'] ) ) {
+			$_GET['key'] = $order->get_order_key();
+		}
+		add_filter( 'woocommerce_is_order_received_page', '__return_true' );
+		ob_start();
+		if ( ! empty( $_GET['with_hook'] ) ) {
+			do_action( 'woocommerce_thankyou', $order->get_id() );
+		}
+		do_action( 'wp_footer' );
+		$footer = ob_get_clean();
+		$fresh    = wc_get_order( $order->get_id() );
+		$purchase = array(
+			'order'     => $fresh->get_id(),
+			'thankyou'  => (bool) $fresh->get_meta( '_nowera_capi_thankyou' ),
+			'waited'    => $waiting,
+			'scheduled' => (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $fresh->get_id() ), 'nowera-capi' ),
 		);
 		break;
 	case 'remove_from_cart':

@@ -182,8 +182,9 @@ subscription (WPSubscription). What is sent follows from it:
 | Order | Sent |
 |---|---|
 | Goods | `Purchase` (`ord-<id>`) of the money paid for them |
-| A booking, paid or free | one `Lead` per order (`book-<id>`), kind `booking`, named after the service |
-| Goods and a booking | both, adding up to the order's total |
+| A paid booking | one `Lead` per order (`book-<id>`, kind `booking`, named after the service) and the order's `Purchase` with `content_category: booking` |
+| A free booking | the `Lead` only |
+| Goods and a booking | the `Lead` of the booking and one `Purchase` of the whole order |
 | A gift card sold | `Purchase` with `content_category: gift_card` |
 | Paid with a gift card | only the money added on top counts (the card was counted when sold) |
 | Nothing left to pay | nothing; the order is in the order list only |
@@ -191,6 +192,12 @@ subscription (WPSubscription). What is sent follows from it:
 | A subscription's renewal | nothing; in the order list only |
 
 A refund or a cancellation takes back from GA4 only what a `Purchase` reported.
+A site that wants bookings as leads only returns false from the filter
+`nowera_capi_lead_is_purchase`.
+
+A theme's own thank-you template may never run WooCommerce's
+`woocommerce_thankyou`; on the order-received page the plugin then reports the
+order itself, for the order's own customer only, as WooCommerce would show it.
 
 The plugin sends its order list every hour (`POST /r`, no contact data): each
 order's kind, the events that stand for it, what it was worth, what was paid
