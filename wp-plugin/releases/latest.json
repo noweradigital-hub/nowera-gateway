@@ -1,11 +1,11 @@
 {
-  "version": "1.3.1",
-  "file": "nowera-capi-1.3.1.zip",
-  "sha256": "251bcccacc0c6186ebd80e8e3fe77b558a60682d708be21afe054d36ba6057f5",
-  "signature": "tLD3pAh4fI2fRyr0xZqVlh5fS1DQeYVwvVVmzQ0EEGBu/p4r76sktxzfNc/H0vZZtPc8JWd1Bu7UyZpGKb2LBQ==",
-  "released_at": "2026-10-19T11:53:22.634Z",
+  "version": "1.3.2",
+  "file": "nowera-capi-1.3.2.zip",
+  "sha256": "e327eb1fcda80545ae8aa086c58f9199cca3227fb290b9909b96c17af62bdff9",
+  "signature": "h6MqjGsOViP753ucJs7NvyXxXmqLyFIREithn6YS2xUY0JLy/re8eJoBRO5Tdr+Ow0qAmu0t59vpW/dfohc9BQ==",
+  "released_at": "2026-11-02T21:44:35.783Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Pridanie do košíka cez Store API (blokové tlačidlá, vlastné nákupné boxy): AddToCart aj z prehliadača pod rovnakým ID ako zo servera; opakované pridanie produktu, ktorý už je v košíku, sa tiež počíta."
+  "notes": "Platená rezervácia ide ako Lead aj Purchase. Stránka „ďakujeme“ z vlastnej šablóny (Bricks) odosiela nákup hneď, nie až 30 minút po platbe."
 }
