@@ -54,7 +54,6 @@ box-shadow:inset -.5px 0 0 var(--sep)}
 .brand{display:flex;align-items:center;gap:10px;padding:4px 8px;font:600 15px/1.2 var(--display);letter-spacing:-.01em;color:var(--text)}
 .brand:hover{text-decoration:none}
 .brand img{width:28px;height:28px;border-radius:7px;flex:none;display:block;box-shadow:0 0 0 .5px rgba(0,0,0,.08)}
-.brand small{display:block;font:400 12px/1.3 var(--sans);color:var(--dim)}
 .nav{display:flex;flex-direction:column;gap:1px}
 .nav a{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;color:var(--text);font-size:14px;font-weight:400}
 .nav a svg.i{color:var(--accent)}
@@ -236,11 +235,11 @@ export function page({ title, user, body, flash, nav = 'prehlad', alerts = 0, ba
 <meta name="robots" content="noindex,nofollow">
 <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)"><meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <link rel="icon" type="image/png" sizes="32x32" href="/icon-32.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<title>${esc(title)} · Nowera Gateway</title><script>${THEME_JS}</script><style>${CSS}</style></head><body>`;
+<title>${esc(title)} · nowera signals</title><script>${THEME_JS}</script><style>${CSS}</style></head><body>`;
   if (!user) return `${head}<main class="login">${flashHtml}${body}</main></body></html>`;
   return `${head}<div class="app">
 <aside class="side" aria-label="Navigácia">
-  <a class="brand" href="/admin"><img src="/icon-64.png" alt="" width="28" height="28"><span>Nowera Gateway<small>${esc(process.env.ADMIN_HOST || 'signals')}</small></span></a>
+  <a class="brand" href="/admin"><img src="/icon-64.png" alt="" width="28" height="28"><span>nowera signals</span></a>
   <nav class="nav"><div class="nav-label">Prevádzka</div>
     ${NAV.map((n) => `<a href="${n.href}"${n.key === nav ? ' class="on" aria-current="page"' : ''}>${icon(n.key)}<span>${n.label}</span>${n.count && counts[n.count] ? `<span class="count">${counts[n.count]}</span>` : ''}</a>`).join('')}
     <div class="nav-label" style="margin-top:10px">Správa</div>

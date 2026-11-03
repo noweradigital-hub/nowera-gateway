@@ -70,7 +70,7 @@ export function verifyTotp(secret, code, { now = Date.now(), lastStep = -1 } = {
   return null;
 }
 
-export function otpauthUrl(secret, account, issuer = 'Nowera Gateway') {
+export function otpauthUrl(secret, account, issuer = 'nowera signals') {
   const label = `${encodeURIComponent(issuer)}:${encodeURIComponent(account)}`;
   return `otpauth://totp/${label}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=${STEP_SECONDS}`;
 }

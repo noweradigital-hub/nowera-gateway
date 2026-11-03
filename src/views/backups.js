@@ -133,7 +133,7 @@ export function recoveryKeyPage(key) {
   <div class="card" style="max-width:640px"><div class="card-b form">
     <div><label for="recovery_key">Kľúč</label>
       <input id="recovery_key" type="text" class="mono" readonly value="${esc(key)}" onclick="this.select()">
-      <div class="hint">Uložte ho do správcu hesiel (napr. 1Password) pod názvom „Nowera Gateway — kľúč na obnovu“.
+      <div class="hint">Uložte ho do správcu hesiel (napr. 1Password) pod názvom „nowera signals — kľúč na obnovu“.
         Na novom serveri ho nastavte do prostredia ako <span class="mono">SECRETS_KEY</span>, potom nahrajte zálohu.
         Nikomu ho neposielajte e-mailom ani chatom.</div></div>
     <div class="actions"><a class="btn primary" href="/admin/zalohy">Hotovo</a></div>

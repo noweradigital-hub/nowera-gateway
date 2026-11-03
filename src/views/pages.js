@@ -4,7 +4,7 @@ import { CONSENT_MODES } from '../lib/consent.js';
 
 export const loginPage = () => `
 <div class="card"><div class="card-b form" style="padding:22px">
-  <div><h1 style="font-size:20px;margin:0 0 4px">Nowera Gateway</h1>
+  <div><h1 style="font-size:20px;margin:0 0 4px;display:flex;align-items:center;gap:10px"><img src="/icon-64.png" alt="" width="32" height="32" style="border-radius:8px">nowera signals</h1>
     <p class="dim" style="margin:0">Prihláste sa do administrácie.</p></div>
   <form method="post" action="/admin/login" class="form">
     <div><label for="email">E-mail</label>

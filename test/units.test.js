@@ -377,7 +377,7 @@ test('TOTP matches the RFC 6238 test vector and refuses a replayed code', async 
   assert.equal(step, stepAt(now));
   assert.equal(verifyTotp(secret, code, { now, lastStep: step }), null, 'the same code twice is refused');
   assert.equal(verifyTotp(secret, '000000', { now }) === null || totpCode(secret, stepAt(now)) === '000000', true);
-  assert.match(otpauthUrl(secret, 'a@b.sk'), /^otpauth:\/\/totp\/Nowera%20Gateway:a%40b\.sk\?secret=GEZD/);
+  assert.match(otpauthUrl(secret, 'a@b.sk'), /^otpauth:\/\/totp\/nowera%20signals:a%40b\.sk\?secret=GEZD/);
 });
 
 // ------------------------------------------------- the richer ecommerce contract

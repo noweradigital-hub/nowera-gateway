@@ -283,7 +283,7 @@ export async function syncAlerts({ conditions, settings, fetchImpl = fetch, log 
 
 export async function testWebhook(url, fetchImpl = fetch) {
   await sendWebhook(url, payload('alert.test', {
-    rule: 'test', message: 'Upozornenia z Nowera Gateway fungujú.', opened_at: new Date().toISOString(),
+    rule: 'test', message: 'Upozornenia z nowera signals fungujú.', opened_at: new Date().toISOString(),
   }, null), fetchImpl);
 }
 

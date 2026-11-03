@@ -88,7 +88,7 @@ export function encryptBackup(data) {
 }
 
 export function decryptBackup(file) {
-  if (file.length < 41 || !file.subarray(0, 4).equals(MAGIC)) throw new Error('Toto nie je záloha Nowera Gateway.');
+  if (file.length < 41 || !file.subarray(0, 4).equals(MAGIC)) throw new Error('Toto nie je záloha nowera signals.');
   if (file[4] !== FORMAT) throw new Error(`Neznámy formát zálohy (${file[4]}).`);
   const kid = file.subarray(5, 13).toString('ascii');
   const entry = keyring().find((k) => k.kid === kid);
