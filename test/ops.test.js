@@ -567,3 +567,27 @@ test('reports API: only on the administration\'s host with a key; a client\'s ow
     await app.close();
   }
 });
+
+test('the administration\'s icon: PNG on its own host, nothing on a collector host', async () => {
+  process.env.SESSION_SECRET ||= 'x'.repeat(40);
+  process.env.INGEST_SECRET ||= 'ingest-secret';
+  process.env.DATABASE_URL ||= 'postgres://stub';
+  process.env.ADMIN_HOST ||= 'gw.example.com';
+  const { config } = await import('../src/config.js');
+  const Fastify = (await import('fastify')).default;
+  const assetRoutes = (await import('../src/routes/assets.js')).default;
+  const app = Fastify({ logger: false });
+  await app.register(assetRoutes);
+  await app.ready();
+  try {
+    for (const path of ['/favicon.ico', '/icon-32.png', '/icon-64.png', '/apple-touch-icon.png']) {
+      const res = await app.inject({ method: 'GET', url: path, headers: { host: config.adminHost } });
+      assert.equal(res.statusCode, 200, path);
+      assert.equal(res.headers['content-type'], 'image/png');
+      assert.deepEqual([...res.rawPayload.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], 'a PNG');
+    }
+    assert.equal((await app.inject({ method: 'GET', url: '/favicon.ico', headers: { host: 't.klient.sk' } })).statusCode, 404);
+  } finally {
+    await app.close();
+  }
+});

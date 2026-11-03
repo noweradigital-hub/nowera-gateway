@@ -16,6 +16,7 @@ import collectRoutes from './routes/collect.js';
 import adminRoutes from './routes/admin.js';
 import updateRoutes from './routes/updates.js';
 import reportRoutes from './routes/report.js';
+import assetRoutes from './routes/assets.js';
 
 assertConfig();
 
@@ -34,6 +35,7 @@ await app.register(collectRoutes);
 await app.register(adminRoutes);
 await app.register(updateRoutes);
 await app.register(reportRoutes);
+await app.register(assetRoutes);
 
 app.setNotFoundHandler((req, reply) => reply.code(404).type('text/plain').send('not found'));
 
