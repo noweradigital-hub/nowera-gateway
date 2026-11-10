@@ -92,6 +92,81 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     if (domain) writeCookie(name, '', 0, domain);
   }
 
+  // ---- Meta click id --------------------------------------------------------
+
+  // Meta accepts an fbc for 90 days after the click. Cookies outlive that (the
+  // pixel and the site's keeper keep extending them), and Meta then reports an
+  // expired fbclid. An expired _fbc is removed before the pixel reads it, at
+  // every level of the host it may have been written for.
+  var FBC_MAX_AGE_MS = 90 * 86400000;
+  function fbcFresh(value) {
+    var m = /^fb\\.\\d\\.(\\d{10,13})\\.[A-Za-z0-9._-]{1,700}$/.exec(String(value || ''));
+    if (!m) return false;
+    var ts = Number(m[1]) * (m[1].length <= 10 ? 1000 : 1);
+    var now = Date.now();
+    return ts <= now + 86400000 && now - ts < FBC_MAX_AGE_MS;
+  }
+
+  // Every _fbc the page sees: a host-only leftover can sit next to the shared one.
+  function fbcCookies() {
+    var out = [];
+    String(d.cookie || '').split(';').forEach(function (part) {
+      var eq = part.indexOf('=');
+      if (eq > -1 && part.slice(0, eq).replace(/^\\s+|\\s+$/g, '') === '_fbc') {
+        try { out.push(decodeURIComponent(part.slice(eq + 1))); } catch (e) { out.push(part.slice(eq + 1)); }
+      }
+    });
+    return out;
+  }
+
+  function fbcTime(value) {
+    var m = /^fb\\.\\d\\.(\\d{10,13})\\./.exec(String(value || ''));
+    return m ? Number(m[1]) * (m[1].length <= 10 ? 1000 : 1) : 0;
+  }
+
+  // The click id to send: the latest click Meta still accepts, or none. The
+  // latest, because a copy left on another level may be an earlier click.
+  function currentFbc() {
+    var all = fbcCookies();
+    var best = null;
+    for (var i = 0; i < all.length; i++) {
+      if (fbcFresh(all[i]) && (best === null || fbcTime(all[i]) > fbcTime(best))) best = all[i];
+    }
+    return best;
+  }
+
+  // Every level of this host a cookie may have been written for.
+  function hostLevels() {
+    var parts = String(w.location.hostname || '').split('.');
+    var out = [null];
+    for (var i = 0; i < parts.length - 1; i++) out.push('.' + parts.slice(i).join('.'));
+    return out;
+  }
+
+  // A cookie cannot be deleted by value. With no valid copy left, every level is
+  // cleared (any time: removing is not tracking). With a valid copy next to an
+  // expired one, the valid value is written over every level, so the pixel,
+  // which reads the first copy it finds, gets the valid one too; that write is
+  // a marketing use and waits for marketing consent (allowWrite).
+  function tidyFbc(allowWrite) {
+    var all = fbcCookies();
+    if (!all.length) return;
+    var fresh = currentFbc();
+    var levels = hostLevels();
+    var i;
+    if (fresh === null) {
+      for (i = 0; i < levels.length; i++) writeCookie('_fbc', '', 0, levels[i]);
+      return;
+    }
+    if (!allowWrite) return;
+    for (i = 0; i < all.length; i++) {
+      if (all[i] !== fresh) break;
+    }
+    if (i === all.length) return;
+    var left = Math.floor((fbcTime(fresh) + FBC_MAX_AGE_MS - Date.now()) / 1000);
+    for (i = 0; i < levels.length; i++) writeCookie('_fbc', fresh, left, levels[i]);
+  }
+
   // Synchronous SHA-256. The pixel needs the hashed visitor id before its first
   // event, and crypto.subtle only offers an async digest.
   var SHA_K = [];
@@ -470,6 +545,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
         s = b.getElementsByTagName(e)[0]; s.parentNode.insertBefore(t, s);
       }(w, d, 'script', 'https://connect.facebook.net/en_US/fbevents.js');
     }
+    tidyFbc(true);
     // Advanced matching: only hashed values, identical to what the server leg sends.
     w.fbq('init', PIXEL_ID, pixelMatching());
   }
@@ -592,7 +668,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     if (c.marketing) {
       body.visitor_id = visitorId();
       body.fbp = cookie('_fbp');
-      body.fbc = cookie('_fbc');
+      body.fbc = currentFbc();
       body.fbclid = new URLSearchParams(w.location.search).get('fbclid');
     }
     if (consentActive()) body.consent = c;
@@ -839,6 +915,7 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   w.nwr.loaded = true;
 
   forgetIfRefused();
+  tidyFbc(false);
   startGoogleTag();
   track('PageView');
 

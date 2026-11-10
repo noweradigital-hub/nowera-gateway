@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { buildUserData } from '../lib/hash.js';
+import { fbcFresh } from '../lib/ids.js';
 import { testModeActive } from './test-mode.js';
 
 /**
@@ -63,6 +64,9 @@ export function buildPayload(event, settings) {
     action_source: event.action_source || 'website',
     user_data: buildUserData(event.user, event.context),
   };
+  // A queued, retried or Stripe-recovered event may carry a click id that has
+  // expired since it was stored; Meta flags those, so it goes without one.
+  if (data.user_data.fbc && !fbcFresh(data.user_data.fbc)) delete data.user_data.fbc;
   // event_id is what lets Meta collapse the browser pixel hit and this server hit
   // into one conversion. Without it every event is counted twice.
   if (event.event_id) data.event_id = event.event_id;

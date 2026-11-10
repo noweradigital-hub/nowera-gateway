@@ -30,13 +30,26 @@ $expires = time() + 90 * 86400;
 
 $shared = array(
 	'_fbp'    => '/^fb\.\d\.\d{10,13}\.\d{1,20}$/',
-	'_fbc'    => '/^fb\.\d\.\d{10,13}\.[A-Za-z0-9._-]{1,500}$/',
+	'_fbc'    => '/^fb\.\d\.\d{10,13}\.[A-Za-z0-9._-]{1,700}$/',
 	'_nwr_id' => '/^[A-Za-z0-9_-]{8,64}$/',
 );
 foreach ( $shared as $name => $pattern ) {
 	if ( isset( $_COOKIE[ $name ] ) && is_string( $_COOKIE[ $name ] ) && preg_match( $pattern, $_COOKIE[ $name ] ) ) {
+		$until = $expires;
+		// Meta accepts a click id for 90 days after the click, so _fbc lives exactly
+		// that long and no longer: renewed from today it would never expire, and
+		// Meta reports such a value as an expired fbclid. An expired one is left to
+		// lapse, not deleted here: PHP sees only one of several same-named cookies,
+		// and a deletion on the shared domain could take a valid copy with it.
+		if ( '_fbc' === $name ) {
+			$ms    = (int) explode( '.', $_COOKIE[ $name ] )[2];
+			$until = (int) ( strlen( (string) $ms ) <= 10 ? $ms : intdiv( $ms, 1000 ) ) + 90 * 86400;
+			if ( $until <= time() ) {
+				continue;
+			}
+		}
 		setcookie( $name, $_COOKIE[ $name ], array(
-			'expires'  => $expires,
+			'expires'  => $until,
 			'path'     => '/',
 			'domain'   => $domain,
 			'secure'   => $secure,

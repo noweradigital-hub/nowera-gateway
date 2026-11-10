@@ -488,6 +488,48 @@ test('with neither setting nothing is gated', () => {
   assert.equal(b.posts.length, 1);
 });
 
+test('an expired _fbc is removed before the pixel starts and never sent', () => {
+  const stale = `fb.1.${Date.now() - 100 * 86400000}.OLD`;
+  const b = browser({ cookie: `_fbc=${stale}`, hostname: 'www.klient.sk' });
+  b.run();
+  assert.equal(b.jar.value('_fbc'), undefined);
+  const domains = b.jar.writes.filter((w) => w.name === '_fbc').map((w) => w.domain || '(host)');
+  assert.deepEqual(domains, ['(host)', '.www.klient.sk', '.klient.sk'], 'dropped wherever the pixel or the site may have set it');
+  assert.equal(b.posts[0].body.fbc, null);
+});
+
+test('a fresh _fbc stays and travels', () => {
+  const fresh = `fb.1.${Date.now() - 3 * 86400000}.NEW`;
+  const b = browser({ cookie: `_fbc=${fresh}` });
+  b.run();
+  assert.equal(b.posts[0].body.fbc, fresh);
+  assert.equal(b.jar.writes.filter((w) => w.name === '_fbc').length, 0);
+});
+
+test('an expired _fbc next to a valid one: the valid one travels and nothing is deleted', () => {
+  const stale = `fb.1.${Date.now() - 100 * 86400000}.OLD`;
+  const fresh = `fb.1.${Date.now() - 86400000}.NEW`;
+  const b = browser({ hostname: 'www.klient.sk' });
+  // Two cookies of one name at different levels, as a browser lists them.
+  Object.defineProperty(b.document, 'cookie', { get: () => `_fbc=${stale}; _fbc=${fresh}`, set: (t) => b.jar.set(t) });
+  b.run();
+  const writes = b.jar.writes.filter((w) => w.name === '_fbc');
+  assert.ok(writes.length && writes.every((w) => w.value === fresh && w['max-age'] !== '0'),
+    'the valid value is written over every level, nothing is deleted');
+  assert.deepEqual(writes.map((w) => w.domain || '(host)'), ['(host)', '.www.klient.sk', '.klient.sk']);
+  assert.equal(b.posts[0].body.fbc, fresh);
+});
+
+test('of two valid _fbc copies the later click wins, on both legs and every level', () => {
+  const older = `fb.1.${Date.now() - 5 * 86400000}.CLICK_A`;
+  const newer = `fb.1.${Date.now() - 86400000}.CLICK_B`;
+  const b = browser({ hostname: 'www.klient.sk' });
+  Object.defineProperty(b.document, 'cookie', { get: () => `_fbc=${older}; _fbc=${newer}`, set: (t) => b.jar.set(t) });
+  b.run();
+  assert.equal(b.posts[0].body.fbc, newer);
+  assert.ok(b.jar.writes.filter((w) => w.name === '_fbc').every((w) => w.value === newer));
+});
+
 // ------------------------------------------- external_id and stored identity
 
 const HASH = (c) => c.repeat(64);

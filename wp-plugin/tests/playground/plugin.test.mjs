@@ -152,8 +152,13 @@ test('an ad click without the loader still leaves the click id behind', async ()
   assert.match(set, /Max-Age=7776000/i);
   assert.doesNotMatch(set, /HttpOnly/i, 'the Meta pixel reads it too');
 
-  assert.equal(await cookieFor('/?fbclid=CLICK2', { cookie: '_fbc=fb.1.1.EARLIER' }), undefined,
-    'an existing click id is never overwritten');
+  const recent = `_fbc=fb.1.${Date.now() - 86400_000}.CLICK2`;
+  assert.equal(await cookieFor('/?fbclid=CLICK2', { cookie: recent }), undefined,
+    'the same click keeps the time it happened');
+  assert.match(await cookieFor('/?fbclid=CLICK5', { cookie: recent }), /^_fbc=fb\.1\.\d{13}\.CLICK5/,
+    'a new ad click replaces the earlier one');
+  assert.equal(await cookieFor('/?fbclid=CLICK2', { cookie: `_fbc=fb.1.${Date.now() - 100 * 86400_000}.CLICK2` }),
+    undefined, 'reopening an old ad link does not make its click new');
   assert.equal(await cookieFor('/'), undefined);
   assert.equal(await cookieFor('/?fbclid=%3Cscript%3E'), undefined, 'only a plausible click id');
 
@@ -880,18 +885,29 @@ test('pages publish where px.js can refresh the identifiers', async () => {
 test('the cookie keeper writes the visitor\u2019s own identifiers back for 90 days', async () => {
   const ud = encodeURIComponent(JSON.stringify({ em: 'a'.repeat(64) }));
   const res = await fetch(`${BASE}/wp-content/plugins/nowera-capi/keep.php`, {
-    headers: { cookie: `_fbp=fb.1.1700000000000.1234567890; _fbc=fb.1.1700000000000.IwAR-abc_1; _nwr_id=visitor-abcdef12; _nwr_ud=${ud}; other=1` },
+    headers: { cookie: `_fbp=fb.1.1700000000000.1234567890; _fbc=fb.1.${Date.now() - 30 * 86400_000}.IwAR-abc_1; _nwr_id=visitor-abcdef12; _nwr_ud=${ud}; other=1` },
   });
   assert.equal(res.status, 204);
   assert.match(res.headers.get('cache-control') || '', /no-store/);
   const set = res.headers.getSetCookie();
   assert.deepEqual(set.map((c) => c.split('=')[0]).sort(), ['_fbc', '_fbp', '_nwr_id', '_nwr_ud'], 'nothing else is touched');
   for (const c of set) {
-    assert.match(c, /Max-Age=7776000/i);
+    // The click id lives only as long as Meta accepts it: 90 days from the click.
+    if (c.startsWith('_fbc=')) {
+      const age = Number(/Max-Age=(\d+)/i.exec(c)[1]);
+      assert.ok(age > 59 * 86400 && age <= 60 * 86400, `fbc max-age ${age}`);
+    } else assert.match(c, /Max-Age=7776000/i);
     assert.doesNotMatch(c, /HttpOnly/i, 'the pixel and px.js must still read them');
     assert.doesNotMatch(c, /Domain=/i, 'an IP host gets host-only cookies');
   }
   assert.ok(set.find((c) => c.startsWith('_fbp=fb.1.1700000000000.1234567890;')), 'value unchanged');
+});
+
+test('the cookie keeper never renews a click id Meta no longer accepts', async () => {
+  const res = await fetch(`${BASE}/wp-content/plugins/nowera-capi/keep.php`, {
+    headers: { cookie: `_fbc=fb.1.${Date.now() - 100 * 86400_000}.OLD` },
+  });
+  assert.deepEqual(res.headers.getSetCookie(), [], 'left to lapse; px.js removes it');
 });
 
 test('the cookie keeper ignores anything that is not an identifier', async () => {

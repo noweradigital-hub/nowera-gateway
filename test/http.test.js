@@ -150,6 +150,41 @@ test('_fbc is derived from fbclid on the landing url', async () => {
   assert.match(fbc.value, /^fb\.1\.\d+\.ABC123$/);
 });
 
+test('an expired _fbc is neither forwarded nor kept; a new click replaces it with its real lifetime', async () => {
+  const stale = `fb.1.${Date.now() - 120 * 86400_000}.OLD`;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json', cookie: `_fbc=${stale}` },
+    payload: { event_name: 'PageView', event_source_url: 'https://klient.sk/' },
+  });
+  const cleared = res.cookies.find((c) => c.name === '_fbc');
+  assert.equal(cleared.value, '');
+  assert.equal(cleared.maxAge, 0);
+
+  const fresh = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json', cookie: `_fbc=${stale}` },
+    payload: { event_name: 'PageView', event_source_url: 'https://klient.sk/?fbclid=NEWCLICK' },
+  });
+  const set = fresh.cookies.find((c) => c.name === '_fbc');
+  assert.match(set.value, /^fb\.1\.\d+\.NEWCLICK$/);
+  assert.ok(set.maxAge <= 90 * 86400 && set.maxAge > 89 * 86400);
+});
+
+test('a valid fbc from the page wins over an expired collector cookie, and nothing valid is deleted', async () => {
+  const stale = `fb.1.${Date.now() - 120 * 86400_000}.OLD`;
+  const fresh = `fb.1.${Date.now() - 2 * 86400_000}.FRESH`;
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json', cookie: `_fbc=${stale}` },
+    payload: { event_name: 'PageView', event_source_url: 'https://klient.sk/', fbc: fresh },
+  });
+  assert.equal(res.statusCode, 200);
+  const written = res.cookies.find((c) => c.name === '_fbc');
+  assert.equal(written.value, fresh, 'the valid copy is kept, not deleted');
+  assert.equal(inserted.at(-1).event.context.fbc, fresh);
+});
+
 test('browser events from a foreign origin, or with none at all, are rejected', async () => {
   for (const origin of ['https://evil.sk', null]) {
     const headers = { host: HOST, 'content-type': 'application/json' };

@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { normalizeEvent } from '../lib/event.js';
 import { enqueue as defaultEnqueue } from '../lib/queue.js';
-import { newEventId, newFbp, resolveFbc } from '../lib/ids.js';
+import { fbcFresh, fbcRemainingMs, newEventId, newFbp, resolveFbc } from '../lib/ids.js';
 import { originAllowed, tenantByHost as defaultTenantByHost } from '../lib/tenants.js';
 import { loaderScript } from '../lib/loader.js';
 import { normalizeConsent } from '../lib/consent.js';
@@ -24,11 +24,11 @@ const COOKIE_MAX_AGE = 90 * 86400; // Meta treats _fbp/_fbc as valid for 90 days
  * They are deliberately NOT HttpOnly: the Meta browser pixel has to read _fbp so
  * both legs of the same visit share one browser id.
  */
-function persistCookie(reply, tenant, name, value) {
+function persistCookie(reply, tenant, name, value, maxAge = COOKIE_MAX_AGE) {
   reply.setCookie(name, value, {
     path: '/',
     domain: tenant.cookie_domain || undefined,
-    maxAge: COOKIE_MAX_AGE,
+    maxAge,
     sameSite: 'lax',
     secure: true,
     httpOnly: false,
@@ -59,12 +59,20 @@ function ensureIdentity(req, reply, tenant, body = {}) {
     fbp = newFbp();
     persistCookie(reply, tenant, '_fbp', fbp);
   }
+  // The collector's own cookie and the page's copy may differ (a host-only
+  // leftover next to the shared one); the one Meta still accepts counts.
+  const candidates = [cookies._fbc, body.fbc].filter(Boolean);
+  const stored = candidates.find((v) => fbcFresh(v)) || candidates[0] || null;
   const fbc = resolveFbc({
-    cookie: cookies._fbc || body.fbc || null,
+    cookie: stored,
     fbclid: body.fbclid,
     url: body.event_source_url || body.url || req.headers.referer,
   });
-  if (fbc && fbc !== cookies._fbc) persistCookie(reply, tenant, '_fbc', fbc);
+  // The cookie lives exactly as long as Meta accepts the click, not 90 days from
+  // today: refreshed on every visit it would otherwise never expire. It is
+  // cleared only when no copy at all is still valid.
+  if (fbc && fbc !== cookies._fbc) persistCookie(reply, tenant, '_fbc', fbc, Math.floor(fbcRemainingMs(fbc) / 1000));
+  else if (!fbc && cookies._fbc && !candidates.some((v) => fbcFresh(v))) persistCookie(reply, tenant, '_fbc', '', 0);
   return { fbp, fbc, visitorId };
 }
 

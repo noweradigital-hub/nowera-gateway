@@ -1138,7 +1138,7 @@ function nowera_capi_remember_user( array $raw ): void {
  * click id is what ties the later purchase back to the ad.
  */
 function nowera_capi_capture_fbclid(): void {
-	if ( empty( $_GET['fbclid'] ) || isset( $_COOKIE['_fbc'] ) || headers_sent() ) {
+	if ( empty( $_GET['fbclid'] ) || headers_sent() ) {
 		return;
 	}
 	if ( ! nowera_capi_has_consent( 'marketing' ) ) {
@@ -1147,6 +1147,16 @@ function nowera_capi_capture_fbclid(): void {
 	$fbclid = sanitize_text_field( wp_unslash( $_GET['fbclid'] ) );
 	if ( ! preg_match( '/^[A-Za-z0-9._-]{1,500}$/', $fbclid ) ) {
 		return;
+	}
+	// A new ad click replaces the stored click id; the same click keeps it.
+	$stored = isset( $_COOKIE['_fbc'] ) && is_string( $_COOKIE['_fbc'] ) ? wp_unslash( $_COOKIE['_fbc'] ) : '';
+	if ( preg_match( '/^fb\.\d\.(\d{10,13})\.([A-Za-z0-9._-]{1,700})$/', $stored, $m ) ) {
+		$same = $m[2] === $fbclid || 0 === strpos( $m[2], $fbclid . '.' );
+		// The same click keeps its time, expired or not: reopening an old ad link
+		// is not a new click (the gateway leaves an expired one out).
+		if ( $same ) {
+			return;
+		}
 	}
 
 	// Meta's own shape: fb.<subdomain index>.<created at, ms>.<click id>.

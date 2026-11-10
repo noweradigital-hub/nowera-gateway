@@ -9,7 +9,7 @@ import { buildPayload as ga4Payload } from '../src/destinations/ga4.js';
 import { isBot } from '../src/lib/bots.js';
 import { normalizeKeepPath } from '../src/lib/consent.js';
 import { loaderScript } from '../src/lib/loader.js';
-import { newFbp, resolveFbc } from '../src/lib/ids.js';
+import { fbcFresh, fbcRemainingMs, newFbp, resolveFbc } from '../src/lib/ids.js';
 import { clientIp, fromCloudflare } from '../src/lib/client-ip.js';
 
 const sha = (v) => createHash('sha256').update(v, 'utf8').digest('hex');
@@ -167,12 +167,48 @@ test('ga4 maps a category view to view_item_list', () => {
   assert.equal(ga4Payload(e, {}).events[0].name, 'view_item_list');
 });
 
+const DAY = 86400_000;
+const NOW = 1_800_000_000_000;
+
 test('fbp and fbc follow Meta cookie formats', () => {
   assert.match(newFbp(1700000000000), /^fb\.1\.1700000000000\.\d+$/);
-  assert.equal(resolveFbc({ cookie: 'existing' }), 'existing');
+  const fresh = `fb.1.${NOW - 5 * DAY}.OLDCLICK`;
+  assert.equal(resolveFbc({ cookie: fresh, now: NOW }), fresh);
   assert.match(resolveFbc({ url: 'https://klient.sk/?fbclid=ABC' }), /^fb\.1\.\d+\.ABC$/);
   assert.equal(resolveFbc({ url: 'https://klient.sk/' }), null);
   assert.equal(resolveFbc({ url: 'not a url' }), null);
+});
+
+test('fbc: an expired click id is never sent again', () => {
+  const old = `fb.1.${NOW - 91 * DAY}.OLDCLICK`;
+  assert.equal(fbcFresh(old, NOW), false);
+  assert.equal(resolveFbc({ cookie: old, now: NOW }), null);
+  // Seconds instead of milliseconds are read as seconds.
+  assert.equal(fbcFresh(`fb.1.${Math.floor((NOW - 10 * DAY) / 1000)}.X`, NOW), true);
+  // Garbage, or a time in the future, is not a click id Meta takes.
+  assert.equal(resolveFbc({ cookie: 'existing', now: NOW }), null);
+  assert.equal(fbcFresh(`fb.1.${NOW + 5 * DAY}.X`, NOW), false);
+  assert.equal(fbcRemainingMs(`fb.1.${NOW - 30 * DAY}.X`, NOW), 60 * DAY);
+});
+
+test('fbc: a new ad click replaces the stored one, the same click keeps its time', () => {
+  const stored = `fb.1.${NOW - 3 * DAY}.FIRST`;
+  assert.equal(resolveFbc({ cookie: stored, fbclid: 'SECOND', now: NOW }), `fb.1.${NOW}.SECOND`);
+  assert.equal(resolveFbc({ cookie: stored, url: 'https://klient.sk/?fbclid=FIRST', now: NOW }), stored);
+  // The pixel may add its own suffix behind the click id.
+  const suffixed = `fb.1.${NOW - DAY}.FIRST.AbC`;
+  assert.equal(resolveFbc({ cookie: suffixed, fbclid: 'FIRST', now: NOW }), suffixed);
+  // The same click, but expired: reopening an old ad link is not a new click.
+  assert.equal(resolveFbc({ cookie: `fb.1.${NOW - 95 * DAY}.FIRST`, fbclid: 'FIRST', now: NOW }), null);
+  // A click id at Meta's maximum length, plus the suffix its builder appends.
+  assert.equal(fbcFresh(`fb.1.${NOW}.${'A'.repeat(500)}.AQYCAQED`, NOW), true);
+});
+
+test('meta: a stored fbc that has expired since is left out of the payload', () => {
+  const e = normalizeEvent({ event_name: 'Purchase' }, { fbc: `fb.1.${Date.now() - 100 * DAY}.OLD`, fbp: 'fb.1.1700000000000.1' });
+  assert.equal(metaPayload(e, {}).data[0].user_data.fbc, undefined);
+  const ok = normalizeEvent({ event_name: 'Purchase' }, { fbc: `fb.1.${Date.now() - DAY}.NEW` });
+  assert.match(metaPayload(ok, {}).data[0].user_data.fbc, /\.NEW$/);
 });
 
 test('generated loader is syntactically valid javascript', () => {
