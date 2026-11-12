@@ -124,3 +124,12 @@ test('openai: without marketing consent the ad click ids leave the page address 
   const ok = normalizeEvent({ event_name: 'PageView', event_source_url: 'https://x.sk/?oppref=AD', consent: { marketing: true, statistics: true } }, {});
   assert.equal(ok.event_source_url, 'https://x.sk/?oppref=AD');
 });
+
+test('openai: with only a pixel id the browser pixel measures and nothing is queued for the server', async () => {
+  const pixelOnly = { kind: 'openai', settings: { pixel_id: 'PX' } };
+  assert.equal(wants(pixelOnly, purchase()), false);
+  assert.equal(wants(DEST, purchase()), true);
+  const v = await verify({ pixel_id: 'PX' }, async () => { throw new Error('must not call OpenAI'); });
+  assert.equal(v.ok, false);
+  assert.match(v.error, /meria len pixel/);
+});

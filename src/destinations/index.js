@@ -53,6 +53,9 @@ export function wants(dest, event) {
   if (SKIP[dest.kind]?.has(event.event_name)) return false;
   // OpenAI has a fixed list of events; anything else would be refused.
   if (dest.kind === 'openai' && !Object.hasOwn(OPENAI_EVENTS, event.event_name)) return false;
+  // Without a Conversions API key OpenAI is measured by its pixel alone (px.js);
+  // nothing is queued for the server until the key is added.
+  if (dest.kind === 'openai' && !dest.settings?.api_key) return false;
   if (dest.settings?.scope === 'browserless' && event.browserless !== true) return false;
   // The Google tag on the page already counts page views and starts the session
   // our events join; a second page_view from here would double them.
@@ -101,7 +104,7 @@ export const SCHEMAS = {
   ],
   openai: [
     { key: 'pixel_id', label: 'Pixel ID (OpenAI Ads Manager → Conversions)', required: true },
-    { key: 'api_key', label: 'Conversions API key', required: true, secret: true },
+    { key: 'api_key', label: 'Conversions API key (voliteľné: bez neho meria len pixel v prehliadači)', required: false, secret: true },
   ],
 };
 

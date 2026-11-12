@@ -123,6 +123,7 @@ export async function runChecks(tenant, destinations, { force = false, fetchImpl
   const ga4Check = ga4 ? { state: 'ok', text: 'Pridaná.' } : { state: 'todo', text: 'Nepridaná. Voliteľné.' };
   const openai = destinations.find((d) => d.kind === 'openai');
   const openaiCheck = !openai ? null
+    : !openai.settings?.api_key ? { state: 'ok', text: 'Meria pixel v prehliadači. Conversions API kľúč nie je vyplnený (voliteľné).' }
     : openai.settings?.verify_error ? { state: 'bad', text: `Overenie zlyhalo: ${openai.settings.verify_error}` }
       : openai.settings?.verified_at ? { state: 'ok', text: `Kľúč overený ${formatAgo(openai.settings.verified_at)}.` }
         : { state: 'warn', text: 'Kľúč ešte nebol overený.' };

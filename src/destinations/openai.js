@@ -166,7 +166,8 @@ export async function send(event, settings, fetchImpl = fetch) {
 /** Whether the stored pixel and key are accepted: one validate-only event, nothing recorded. */
 export async function verify(settings, fetchImpl = fetch) {
   const { pixel_id: pixelId, api_key: apiKey } = settings || {};
-  if (!pixelId || !apiKey) return { ok: false, error: 'chýba pixel ID alebo API kľúč' };
+  if (!pixelId) return { ok: false, error: 'chýba pixel ID' };
+  if (!apiKey) return { ok: false, error: 'API kľúč nie je vyplnený, meria len pixel v prehliadači' };
   const now = Date.now();
   const body = {
     validate_only: true,
