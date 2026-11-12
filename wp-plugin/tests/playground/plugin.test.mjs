@@ -177,6 +177,25 @@ test('the click id in the landing url travels with server events too', async () 
   assert.equal(sent[0].body.fbclid, 'CLICK-in-url');
 });
 
+test('OpenAI Ads references travel with server events, under marketing consent only', async () => {
+  const { sent } = await fire('checkout', '__oppref:opp_cookie,__obref:b-123', '&oppref=opp_url');
+  assert.equal(sent[0].body.oppref, 'opp_url', 'the landing url wins over the cookie');
+  assert.equal(sent[0].body.obref, 'b-123');
+  const later = await fire('checkout', '__oppref:opp_A%2Fz');
+  assert.equal(later.sent[0].body.oppref, 'opp_A%2Fz', 'passed on byte for byte, not cleaned');
+  await setConsent('cookiescript');
+  try {
+    const refused = await fireCs('checkout', 'performance', '__oppref:opp_cookie,__obref:b-123', '&oppref=opp_url');
+    assert.ok(refused.sent.length, 'statistics still reports the event');
+    for (const ev of refused.sent) {
+      assert.equal(ev.body.oppref, null);
+      assert.equal(ev.body.obref, null);
+    }
+  } finally {
+    await setConsent('none');
+  }
+});
+
 test('InitiateCheckout lists what is in the cart', async () => {
   const { sent } = await fire('checkout');
   assert.equal(sent.length, 1);

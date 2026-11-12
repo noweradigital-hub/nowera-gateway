@@ -243,7 +243,8 @@ export function classifyOrder(o, { received, deliveries = {}, evidence = null, d
     const sent = known[name]?.deliveries || {};
     for (const d of destinations) {
       const key = names.length === 1 ? d.kind : `${name}:${d.kind}`;
-      const needs = d.kind === 'meta' ? o.consent === 'marketing' : true;
+      // Advertising destinations need marketing consent.
+      const needs = d.kind === 'meta' || d.kind === 'openai' ? o.consent === 'marketing' : true;
       if (!needs) { per[key] = 'skip'; continue; }
       // A GA4 fed by GTM takes only what no page reported.
       if (d.kind === 'ga4' && d.scope === 'browserless' && o.thankyou) { per[key] = 'gtm'; continue; }
@@ -251,7 +252,7 @@ export function classifyOrder(o, { received, deliveries = {}, evidence = null, d
       per[key] = status || 'none';
       if (status === 'sent') continue;
       if (status === 'pending' || status === 'sending') pending = true;
-      else missing = missing || `${names.length === 1 && name === 'Purchase' ? '' : `${name} → `}${d.kind === 'meta' ? 'Meta' : 'GA4'}: ${status === 'dead' ? 'nedoručené' : 'nezaradené'}`;
+      else missing = missing || `${names.length === 1 && name === 'Purchase' ? '' : `${name} → `}${({ meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' })[d.kind] || d.kind}: ${status === 'dead' ? 'nedoručené' : 'nezaradené'}`;
     }
   }
   if (missing) return { state: 'missing', reason: missing, per };

@@ -129,7 +129,7 @@ export function parseQuietHours(value) {
 const hoursText = (h) => `${String(Math.round(h * 2) / 2).replace('.', ',')} h`;
 
 const bratislavaHour = (now) => Number(new Date(now).toLocaleString('en-GB', { hour: '2-digit', hour12: false, timeZone: 'Europe/Bratislava' }));
-const KIND = { meta: 'Meta', ga4: 'GA4' };
+const KIND = { meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' };
 
 /** Everything that is wrong right now, as { tenant_id, rule, subject, message }. */
 export async function currentConditions({ now = Date.now(), siteChecks = true } = {}) {

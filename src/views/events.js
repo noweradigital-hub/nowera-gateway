@@ -6,7 +6,7 @@ const STATUS = {
 };
 const statusPill = (s) => pill(...(STATUS[s] || ['off', s]));
 const SOURCE = { browser: 'prehliadač', server: 'server' };
-const KIND = { meta: 'Meta', ga4: 'GA4' };
+const KIND = { meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' };
 
 /** Keep the current filters when linking to one row. */
 function withParams(base, params, extra) {

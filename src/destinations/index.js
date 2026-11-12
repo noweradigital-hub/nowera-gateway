@@ -1,9 +1,13 @@
 import * as meta from './meta.js';
 import * as ga4 from './ga4.js';
+import * as openai from './openai.js';
 import { open, seal } from '../lib/secrets.js';
-import { NOT_FOR_META } from '../lib/event-policy.js';
+import { NOT_FOR_META, OPENAI_EVENTS } from '../lib/event-policy.js';
 
-export const drivers = { meta, ga4 };
+export const drivers = { meta, ga4, openai };
+
+/** How each kind is named in the dashboard, alerts and reports. */
+export const KIND_LABEL = { meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' };
 
 /**
  * Per-destination delivery rules.
@@ -20,6 +24,10 @@ export const DELIVERY = {
   // GA4 is analytics. Google Ads use of those hits is signalled separately in the
   // payload (ad_user_data / ad_personalization), driven by marketing consent.
   ga4: { dedupe: true, consent: 'statistics' },
+  // OpenAI Ads is advertising too. It keeps only the first copy of an event id
+  // anyway, so one copy is sent: the first leg to arrive (the site's server
+  // usually), which carries the click reference the plugin forwards.
+  openai: { dedupe: true, consent: 'marketing' },
 };
 
 /**
@@ -43,6 +51,8 @@ export const SCOPES = {
  */
 export function wants(dest, event) {
   if (SKIP[dest.kind]?.has(event.event_name)) return false;
+  // OpenAI has a fixed list of events; anything else would be refused.
+  if (dest.kind === 'openai' && !Object.hasOwn(OPENAI_EVENTS, event.event_name)) return false;
   if (dest.settings?.scope === 'browserless' && event.browserless !== true) return false;
   // The Google tag on the page already counts page views and starts the session
   // our events join; a second page_view from here would double them.
@@ -88,6 +98,10 @@ export const SCHEMAS = {
     { key: 'api_secret', label: 'API secret', required: true, secret: true },
     { key: 'scope', label: 'Čo posielať', options: SCOPES, default: 'no_page_view', unset: 'all',
       hint: 'Štandard: web má len Google tag (config) a e-commerce posiela signals → „Všetky okrem page_view“. Ak e-commerce do GA4 posiela aj GTM alebo plugin, zvoľte „Len udalosti bez prehliadača“.' },
+  ],
+  openai: [
+    { key: 'pixel_id', label: 'Pixel ID (OpenAI Ads Manager → Conversions)', required: true },
+    { key: 'api_key', label: 'Conversions API key', required: true, secret: true },
   ],
 };
 

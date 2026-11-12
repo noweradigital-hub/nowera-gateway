@@ -13,8 +13,8 @@ export const TABS = [
 ];
 
 const tabHref = (t, tab) => (tab === 'prehlad' ? `/admin/tenants/${t.id}` : `/admin/tenants/${t.id}/${tab}`);
-const KIND_NAME = { meta: 'Meta Conversions API', ga4: 'GA4 Measurement Protocol' };
-const SHORT = { meta: 'Meta', ga4: 'GA4' };
+const KIND_NAME = { meta: 'Meta Conversions API', ga4: 'GA4 Measurement Protocol', openai: 'OpenAI Ads Conversions API' };
+const SHORT = { meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' };
 
 /** Name, health, key facts and the tab row; the same on every tab. */
 export function tenantHeader(t, destinations, health, active) {
@@ -162,7 +162,13 @@ function destinationCard(t, d, metaVersion) {
   const level = !d.active ? 'off' : d.tokenError || d.dead ? 'bad' : d.retrying ? 'warn' : 'ok';
   const label = { off: 'vypnutá', bad: 'chyba', warn: 'opakuje', ok: 'doručuje' }[level];
   const testing = testModeActive(s);
-  const rows = d.kind === 'meta' ? `
+  const verified = s.verify_error ? `<span class="err">overenie zlyhalo: ${esc(s.verify_error)}</span>`
+    : s.verified_at ? `overený ${esc(formatAgo(s.verified_at))}${s.verified_name ? ` · ${esc(s.verified_name)}` : ''}` : 'uložený, zatiaľ neoverený';
+  const rows = d.kind === 'openai' ? `
+      <dt>Pixel ID</dt><dd class="mono">${esc(s.pixel_id)}</dd>
+      <dt>API kľúč</dt><dd>${verified}</dd>
+      <dt>Posiela</dt><dd>nákupy, košík, pokladňa, zobrazenia, leady (s marketingovým súhlasom)</dd>`
+    : d.kind === 'meta' ? `
       <dt>Dataset</dt><dd class="mono">${esc(s.dataset_id)}</dd>
       <dt>Verzia API</dt><dd class="mono">${esc(metaVersion)}</dd>
       <dt>Token</dt><dd>${s.verify_error ? `<span class="err">overenie zlyhalo: ${esc(s.verify_error)}</span>`
@@ -189,7 +195,7 @@ function destinationCard(t, d, metaVersion) {
       </dl>
       ${testBox}
       <div class="actions">
-        ${d.kind === 'meta' ? `<form class="inline" method="post" action="/admin/destinations/${d.id}/verify"><button class="btn sm" type="submit">Overiť token</button></form>` : ''}
+        ${d.kind === 'meta' || d.kind === 'openai' ? `<form class="inline" method="post" action="/admin/destinations/${d.id}/verify"><button class="btn sm" type="submit">${d.kind === 'openai' ? 'Overiť kľúč' : 'Overiť token'}</button></form>` : ''}
         <a class="btn sm" href="/admin/destinations/${d.id}/edit">Upraviť</a>
         <form class="inline" method="post" action="/admin/destinations/${d.id}/toggle"><button class="btn sm" type="submit">${d.active ? 'Vypnúť' : 'Zapnúť'}</button></form>
         <form class="inline" method="post" action="/admin/destinations/${d.id}/delete"

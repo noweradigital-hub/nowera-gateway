@@ -3,7 +3,7 @@ import { LEVEL_COLOR, num, pctFloor, pill, seconds, spark, state, trend } from '
 import { formatAgo } from '../lib/checks.js';
 
 const destLabel = (d) => {
-  const name = d.kind === 'meta' ? 'Meta' : d.kind === 'ga4' ? 'GA4' : d.kind;
+  const name = { meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' }[d.kind] || d.kind;
   if (!d.active) return `${name} vypnutá`;
   if (d.tokenError) return `${name} ✗ token`;
   if (d.dead) return `${name} ✗`;

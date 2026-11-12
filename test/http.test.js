@@ -34,6 +34,12 @@ const GA_ONLY = {
   destinations: [{ id: 30, kind: 'ga4', settings: { measurement_id: 'G-TEST', api_secret: 's' } }],
 };
 
+// A client that also sends to OpenAI Ads.
+const OPENAI = {
+  ...TENANT, id: 5, slug: 'openai', collector_host: 't.oai-klient.sk', allowed_origins: 'https://oai-klient.sk', cookie_domain: '.oai-klient.sk',
+  destinations: [...TENANT.destinations, { id: 50, kind: 'openai', settings: { pixel_id: 'PX-OAI', api_key: 'k' } }],
+};
+
 // A site without a plugin that sends its Stripe webhooks here.
 const STRIPE = {
   ...TENANT, id: 4, slug: 'stripe', collector_host: 't.stripe-klient.sk', allowed_origins: 'https://stripe-klient.sk',
@@ -47,7 +53,7 @@ let failContext = false;
 const stubs = {
   tenantByHost: async (host) => {
     const h = String(host).split(':')[0];
-    return [TENANT, STRICT, GA_ONLY, STRIPE].find((t) => t.collector_host === h) || null;
+    return [TENANT, STRICT, GA_ONLY, STRIPE, OPENAI].find((t) => t.collector_host === h) || null;
   },
   recordContext: async (tenantId, event) => {
     if (failContext) throw new Error('context insert failed');
@@ -97,6 +103,38 @@ test('px.js is served for a known host and carries the pixel id', async () => {
   assert.match(res.headers['content-type'], /javascript/);
   assert.match(res.body, /"https:\/\/t\.klient\.sk\/e"/);
   assert.match(res.body, /PIXEL_ID = "1"/);
+});
+
+test('OpenAI: px.js carries its pixel, and the click and browser references reach the event', async () => {
+  const px = await app.inject({ method: 'GET', url: '/px.js', headers: { host: 't.oai-klient.sk' } });
+  assert.match(px.body, /var OAI_PIXEL = "PX-OAI"/);
+  const plain = await app.inject({ method: 'GET', url: '/px.js', headers: { host: HOST } });
+  assert.match(plain.body, /var OAI_PIXEL = null/);
+
+  const res = await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: 't.oai-klient.sk', origin: 'https://oai-klient.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'PageView', event_source_url: 'https://oai-klient.sk/', oppref: 'opp_123', obref: 'b-456', consent: { marketing: true, statistics: true } },
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(inserted.at(-1).event.context.oppref, 'opp_123');
+  assert.equal(inserted.at(-1).event.context.obref, 'b-456');
+
+  // Without marketing consent neither travels.
+  await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: 't.oai-klient.sk', origin: 'https://oai-klient.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'PageView', event_source_url: 'https://oai-klient.sk/', oppref: 'opp_123', consent: { marketing: false, statistics: true } },
+  });
+  assert.equal(inserted.at(-1).event.context.oppref, null);
+
+  // A client without OpenAI keeps none of it.
+  await app.inject({
+    method: 'POST', url: '/e',
+    headers: { host: HOST, origin: 'https://klient.sk', 'content-type': 'application/json' },
+    payload: { event_name: 'PageView', event_source_url: 'https://klient.sk/', oppref: 'opp_123' },
+  });
+  assert.equal(inserted.at(-1).event.context.oppref, null);
 });
 
 test('browser events from an allowed origin are accepted and queued', async () => {

@@ -45,8 +45,9 @@ function cookieJar(initial) {
  * every POST to the gateway and every fbq() call. Asserting behaviour rather than
  * source text is what catches a broken dedupe or a consent leak.
  */
-function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk', referrer = '', keep, storage, tenantKeep } = {}) {
+function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantConsent, cookieDomain, hostname = 'klient.sk', referrer = '', keep, storage, tenantKeep, openai, search: query } = {}) {
   const posts = [];
+  const oaiq = [];
   const gets = [];
   const fbq = [];
   const listeners = {};
@@ -61,8 +62,8 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
   };
   const window = {
     location: {
-      href: `https://${hostname}/produkt/x/` + (fbclid ? `?fbclid=${fbclid}` : ''),
-      search: fbclid ? `?fbclid=${fbclid}` : '',
+      href: `https://${hostname}/produkt/x/` + (query || (fbclid ? `?fbclid=${fbclid}` : '')),
+      search: query || (fbclid ? `?fbclid=${fbclid}` : ''),
       hostname,
       origin: `https://${hostname}`,
       protocol: 'https:',
@@ -80,6 +81,8 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
     // A pre-existing fbq makes the loader skip injecting fbevents.js, so we can
     // record exactly which pixel calls it makes.
     fbq: (...args) => fbq.push(args),
+    // Likewise a pre-existing oaiq: no script is injected, every call recorded.
+    oaiq: (...args) => oaiq.push(args),
     nwrPage: page,
     nwrUser: user,
     nwrConsent: consent,
@@ -87,11 +90,11 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
   if (hasConsent) window.cmplz_has_consent = hasConsent;
 
   const run = () => new Function('window', 'document', 'navigator',
-    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC', consent: tenantConsent, cookieDomain, keepPath: tenantKeep }),
+    loaderScript({ endpoint: 'https://t.klient.sk/e', pixelId: 'PIX', measurementId: 'G-ABC', consent: tenantConsent, cookieDomain, keepPath: tenantKeep, openaiPixelId: openai }),
   )(window, document, {});
 
   const fire = (name, detail = {}) => (listeners[name] || []).forEach((fn) => fn({ detail }));
-  return { window, document, posts, gets, fbq, run, fire, listeners, jar };
+  return { window, document, posts, gets, fbq, oaiq, run, fire, listeners, jar };
 }
 
 const isInit = (call) => call[0] === 'init' && call[1] === 'PIX';
@@ -1209,4 +1212,83 @@ test('a click on a listed product reports SelectItem once, with its list and pos
   assert.equal(sel[0].body.custom_data.item_list_name, 'Deky');
   assert.deepEqual(sel[0].body.custom_data.contents, [{ id: '8', item_name: 'Osuška', index: 1, item_list_name: 'Deky', item_price: 20, price_net: 16.26 }]);
   assert.equal(tracked(b.fbq).filter((c) => c[1] === 'SelectItem').length, 0);
+});
+
+
+// ------------------------------------------------------------- OpenAI Ads
+
+test('OpenAI: without its pixel configured nothing is called', () => {
+  const b = browser();
+  b.run();
+  assert.equal(b.oaiq.length, 0);
+  assert.equal(b.posts[0].body.oppref, undefined);
+});
+
+test('OpenAI: consent, init with the hashed visitor, then each event under the shared id', () => {
+  const data = { content_ids: ['42'], content_type: 'product', value: 25.5, currency: 'EUR',
+    contents: [{ id: '42', quantity: 1, item_price: 25.5, item_name: 'Kocka' }] };
+  const b = browser({ openai: 'OAI1', page: { type: 'product', data }, search: '?oppref=opp_9',
+    cookie: '__obref=b-1; _nwr_id=9b1b2f0e-4c1d-4a57-9d0e-0b5a3c1f8e21' });
+  b.run();
+  assert.deepEqual(b.oaiq[0], ['consent', true]);
+  assert.deepEqual(b.oaiq[1], ['init', { pixelId: 'OAI1', user: { external_id_sha256: sha('9b1b2f0e-4c1d-4a57-9d0e-0b5a3c1f8e21') } }]);
+  const measures = b.oaiq.filter((c) => c[0] === 'measureSingle');
+  assert.deepEqual(measures.map((c) => c[2]), ['page_viewed', 'contents_viewed']);
+  const vc = measures[1];
+  assert.equal(vc[1], 'OAI1');
+  assert.deepEqual(vc[3], { type: 'contents', amount: 2550, currency: 'EUR',
+    contents: [{ id: '42', content_type: 'product', name: 'Kocka', quantity: 1, amount: 2550, currency: 'EUR' }] });
+  const post = b.posts.find((p) => p.body.event_name === 'ViewContent');
+  assert.equal(vc[4].event_id, post.body.event_id, 'one id: OpenAI keeps one of the two copies');
+  assert.equal(post.body.oppref, 'opp_9');
+  assert.equal(post.body.obref, 'b-1');
+  assert.equal(b.oaiq.filter((c) => c[0] === 'init').length, 1, 'initialised once while nothing new is known');
+});
+
+test('OpenAI: a buyer email on the event re-initialises the pixel before the purchase', () => {
+  const b = browser({ openai: 'OAI1' });
+  b.run();
+  b.window.nwr('track', 'Purchase', { value: 70.74, currency: 'EUR' }, { eventID: 'ord-7', user: { em: 'Jana@Shop.sk' } });
+  const inits = b.oaiq.filter((c) => c[0] === 'init');
+  assert.equal(inits.length, 2);
+  assert.equal(inits[1][1].user.email_sha256, sha('jana@shop.sk'));
+  const order = b.oaiq.filter((c) => c[0] === 'measureSingle').pop();
+  assert.deepEqual(order.slice(2), ['order_created', { type: 'contents', amount: 7074, currency: 'EUR' }, { event_id: 'ord-7' }]);
+  assert.ok(b.oaiq.indexOf(inits[1]) < b.oaiq.indexOf(order), 'user data first, then the order');
+});
+
+test('OpenAI: nothing before marketing consent, and a refusal tells its pixel', () => {
+  let marketing = 'deny';
+  const b = browser({ openai: 'OAI1', consent: { mode: 'complianz' }, cookie: 'cmplz_statistics=allow; cmplz_marketing=deny' });
+  b.window.cmplz_has_consent = (cat) => (cat === 'statistics' ? true : marketing === 'allow');
+  b.run();
+  assert.equal(b.oaiq.length, 0, 'statistics alone loads no advertising pixel');
+  assert.equal(b.posts[0].body.oppref, undefined);
+
+  marketing = 'allow';
+  b.window.nwr('track', 'Lead', {});
+  assert.deepEqual(b.oaiq.filter((c) => c[0] === 'measureSingle').map((c) => c[2]), ['lead_created']);
+
+  marketing = 'deny';
+  b.document.cookie = 'cmplz_marketing=deny';
+  b.fire('cmplz_status_change');
+  assert.deepEqual(b.oaiq.at(-1), ['consent', false]);
+});
+
+test('OpenAI: a returning visitor who refused loses its cookies without its pixel ever loading', () => {
+  const b = browser({ openai: 'OAI1', hostname: 'www.klient.sk', consent: { mode: 'complianz' },
+    cookie: 'cmplz_statistics=allow; cmplz_marketing=deny; __oppref=opp_1; __obref=b-1' });
+  b.window.cmplz_has_consent = (cat) => cat === 'statistics';
+  b.run();
+  assert.equal(b.oaiq.length, 0);
+  assert.equal(b.jar.value('__oppref'), undefined);
+  assert.equal(b.jar.value('__obref'), undefined);
+});
+
+test('OpenAI: the pixel reads money the same way the gateway does', () => {
+  const b = browser({ openai: 'OAI1' });
+  b.run();
+  b.window.nwr('track', 'Purchase', { value: ' 70.74 ', currency: ' eur ' }, { eventID: 'ord-8' });
+  const order = b.oaiq.filter((c) => c[0] === 'measureSingle').pop();
+  assert.deepEqual(order[3], { type: 'contents', amount: 7074, currency: 'EUR' });
 });

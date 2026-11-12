@@ -121,6 +121,11 @@ export async function runChecks(tenant, destinations, { force = false, fetchImpl
         ? { state: 'ok', text: `Token overený ${formatAgo(meta.settings.verified_at)}.` }
         : { state: 'warn', text: 'Token ešte nebol overený.' };
   const ga4Check = ga4 ? { state: 'ok', text: 'Pridaná.' } : { state: 'todo', text: 'Nepridaná. Voliteľné.' };
+  const openai = destinations.find((d) => d.kind === 'openai');
+  const openaiCheck = !openai ? null
+    : openai.settings?.verify_error ? { state: 'bad', text: `Overenie zlyhalo: ${openai.settings.verify_error}` }
+      : openai.settings?.verified_at ? { state: 'ok', text: `Kľúč overený ${formatAgo(openai.settings.verified_at)}.` }
+        : { state: 'warn', text: 'Kľúč ešte nebol overený.' };
 
   const value = {
     at: new Date(),
@@ -136,6 +141,7 @@ export async function runChecks(tenant, destinations, { force = false, fetchImpl
       { title: 'Eventy', ...events },
       { title: 'Meta', ...metaCheck },
       { title: 'GA4', ...ga4Check },
+      ...(openaiCheck ? [{ title: 'OpenAI Ads', ...openaiCheck }] : []),
     ],
   };
   cache.set(tenant.id, { at: Date.now(), value });

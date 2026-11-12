@@ -51,8 +51,14 @@ function ensureIdentity(req, reply, tenant, body = {}) {
   if (!visitorId) visitorId = newEventId();
   if (visitorId !== cookies._nwr_id) persistCookie(reply, tenant, '_nwr_id', visitorId);
 
+  // OpenAI's references are kept by its own pixel; px.js reads and forwards them.
+  const kinds = new Set((tenant.destinations || []).map((d) => d.kind));
+  const openaiIds = kinds.has('openai')
+    ? { oppref: body.oppref || null, obref: body.obref || null }
+    : { oppref: null, obref: null };
+
   // Meta's identifiers are only for a client that sends to Meta.
-  if (!(tenant.destinations || []).some((d) => d.kind === 'meta')) return { fbp: null, fbc: null, visitorId };
+  if (!kinds.has('meta')) return { fbp: null, fbc: null, visitorId, ...openaiIds };
 
   let fbp = cookies._fbp || body.fbp || null;
   if (!fbp) {
@@ -73,7 +79,7 @@ function ensureIdentity(req, reply, tenant, body = {}) {
   // cleared only when no copy at all is still valid.
   if (fbc && fbc !== cookies._fbc) persistCookie(reply, tenant, '_fbc', fbc, Math.floor(fbcRemainingMs(fbc) / 1000));
   else if (!fbc && cookies._fbc && !candidates.some((v) => fbcFresh(v))) persistCookie(reply, tenant, '_fbc', '', 0);
-  return { fbp, fbc, visitorId };
+  return { fbp, fbc, visitorId, ...openaiIds };
 }
 
 // A signed request older than this is refused, so one captured on the way cannot
@@ -168,6 +174,7 @@ export default async function collectRoutes(app, opts = {}) {
 
     const metaDest = tenant.destinations.find((d) => d.kind === 'meta');
     const ga4Dest = tenant.destinations.find((d) => d.kind === 'ga4');
+    const openaiDest = tenant.destinations.find((d) => d.kind === 'openai');
     reply
       .type('application/javascript; charset=utf-8')
       .header('cache-control', 'public, max-age=300')
@@ -175,6 +182,7 @@ export default async function collectRoutes(app, opts = {}) {
         endpoint: `https://${tenant.collector_host}/e`,
         pixelId: metaDest?.settings?.dataset_id || null,
         measurementId: ga4Dest?.settings?.measurement_id || null,
+        openaiPixelId: openaiDest?.settings?.pixel_id || null,
         consent: normalizeConsent(tenant.consent_mode, tenant.consent_prefix),
         cookieDomain: tenant.cookie_domain || null,
         keepPath: tenant.keep_path || null,
@@ -226,7 +234,7 @@ export default async function collectRoutes(app, opts = {}) {
     // marketing consent is missing, set none of them and forward none of them.
     const marketingDenied = body.consent && body.consent.marketing === false;
     const { visitorId, ...identity } = marketingDenied
-      ? { visitorId: null, fbp: null, fbc: null }
+      ? { visitorId: null, fbp: null, fbc: null, oppref: null, obref: null }
       : ensureIdentity(req, reply, tenant, body);
 
     // Only as a fallback: a real customer id from the site is always better.
@@ -328,6 +336,9 @@ export default async function collectRoutes(app, opts = {}) {
         }),
         gaClientId: body.ga_client_id || null,
         gaSessionId: body.ga_session_id || null,
+        // Forwarded by the plugin from the visitor's cookies, with marketing consent.
+        oppref: body.oppref || null,
+        obref: body.obref || null,
       });
     } catch (err) {
       return reply.code(400).send({ error: err.message });

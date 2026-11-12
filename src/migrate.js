@@ -299,6 +299,10 @@ CREATE TABLE IF NOT EXISTS browser_contexts (
 CREATE INDEX IF NOT EXISTS browser_contexts_lookup_idx ON browser_contexts(tenant_id, email_hash, created_at DESC);
 CREATE INDEX IF NOT EXISTS browser_contexts_time_idx ON browser_contexts(created_at);
 
+-- OpenAI Ads joins Meta and GA4 as a kind of destination.
+ALTER TABLE destinations DROP CONSTRAINT IF EXISTS destinations_kind_check;
+ALTER TABLE destinations ADD CONSTRAINT destinations_kind_check CHECK (kind IN ('meta','ga4','openai'));
+
 -- Who changed what in the dashboard.
 CREATE TABLE IF NOT EXISTS admin_audit (
   id      BIGSERIAL PRIMARY KEY,

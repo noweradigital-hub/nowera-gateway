@@ -10,15 +10,20 @@
  * cache: PHP either would not run at all or would bake one event_id into the
  * cached HTML and collapse every visitor's view into a single event.
  */
-import { NOT_FOR_META } from './event-policy.js';
+import { NOT_FOR_META, OPENAI_EVENTS } from './event-policy.js';
+import { ISO_DIGITS } from '../destinations/openai.js';
 
-export function loaderScript({ endpoint, pixelId, measurementId, consent, cookieDomain, keepPath }) {
+export function loaderScript({ endpoint, pixelId, measurementId, consent, cookieDomain, keepPath, openaiPixelId }) {
   return `(function (w, d) {
   'use strict';
   if (w.nwr && w.nwr.loaded) return;
 
   var ENDPOINT = ${JSON.stringify(endpoint)};
   var PIXEL_ID = ${JSON.stringify(pixelId)};
+  // OpenAI Ads pixel, when the client sends to OpenAI; its events and their data types.
+  var OAI_PIXEL = ${JSON.stringify(openaiPixelId || null)};
+  var OAI_EVENTS = ${JSON.stringify(OPENAI_EVENTS)};
+  var OAI_DIGITS = ${JSON.stringify(ISO_DIGITS)};
   // Where the gateway writes its own cookies, so both sides share one visitor id.
   var COOKIE_DOMAIN = ${JSON.stringify(cookieDomain || null)};
   var ID_MAX_AGE = 90 * 86400;
@@ -352,6 +357,16 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
   // Withdrawn consent also removes the identifiers we stored for advertising.
   function forgetIfRefused() {
     if (!marketingRefused()) return;
+    // OpenAI's pixel removes its own cookies when told there is no consent.
+    if (oaiStarted) { try { w.oaiq('consent', false); } catch (e) {} oaiStarted = false; oaiUserSent = null; }
+    // Its cookies go too, also when its pixel never started on this page.
+    if (OAI_PIXEL) {
+      var oaiLevels = hostLevels();
+      for (var oi = 0; oi < oaiLevels.length; oi++) {
+        if (cookie('__oppref') !== null) writeCookie('__oppref', '', 0, oaiLevels[oi]);
+        if (cookie('__obref') !== null) writeCookie('__obref', '', 0, oaiLevels[oi]);
+      }
+    }
     visitor = null;
     if (cookie('_nwr_ud') !== null) dropCookie('_nwr_ud');
     if (cookie('_nwr_id') !== null) dropCookie('_nwr_id');
@@ -550,6 +565,94 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     w.fbq('init', PIXEL_ID, pixelMatching());
   }
 
+  // ---- OpenAI Ads pixel ----------------------------------------------------
+
+  // Loaded only once marketing is allowed, like the Meta pixel; told about
+  // consent explicitly, because it would otherwise assume it.
+  var oaiStarted = false;
+  var oaiUserSent = null;
+
+  function oaiUser(extra) {
+    var m = hashedOnly(identity(extra));
+    if (!m.external_id) m.external_id = sha256(String(visitorId()).replace(/^\\s+|\\s+$/g, ''));
+    var map = { em: 'email_sha256', ph: 'phone_number_sha256', fn: 'first_name_sha256', ln: 'last_name_sha256', external_id: 'external_id_sha256' };
+    var out = {};
+    for (var k in map) if (m[k]) out[map[k]] = m[k];
+    return out;
+  }
+
+  function ensureOai(extra) {
+    if (!OAI_PIXEL) return false;
+    if (!oaiStarted) {
+      if (!w.oaiq) {
+        // OpenAI's own loader, verbatim apart from the names.
+        (function (q2, dd, tag, src) {
+          var q = function () { q.q.push(arguments); };
+          q.q = [];
+          q2.oaiq = q;
+          if (!dd.createElement) return;
+          var js = dd.createElement(tag); js.async = true; js.src = src;
+          var f = dd.getElementsByTagName(tag)[0];
+          if (f && f.parentNode) f.parentNode.insertBefore(js, f);
+          else (dd.head || dd.documentElement).appendChild(js);
+        })(w, d, 'script', 'https://bzrcdn.openai.com/sdk/oaiq.min.js');
+      }
+      oaiStarted = true;
+      w.oaiq('consent', true);
+    }
+    // init again whenever more is known about the visitor (a buyer's email on
+    // the thank-you page): OpenAI takes user data from init, not from events.
+    var user = oaiUser(extra);
+    var key = JSON.stringify(user);
+    if (key !== oaiUserSent) {
+      oaiUserSent = key;
+      w.oaiq('init', { pixelId: OAI_PIXEL, user: user });
+    }
+    return true;
+  }
+
+  function oaiMinor(value, currency) {
+    if (value === null || value === undefined || value === '') return null;
+    var text = String(value).replace(/^\\s+|\\s+$/g, '');
+    var n = typeof value === 'number' ? value : (/^-?\\d+(\\.\\d+)?$/.test(text) ? Number(text) : NaN);
+    if (!isFinite(n) || n < 0 || !/^[A-Z]{3}$/.test(String(currency || ''))) return null;
+    var digits = Object.prototype.hasOwnProperty.call(OAI_DIGITS, currency) ? OAI_DIGITS[currency] : 2;
+    return Math.round(n * Math.pow(10, digits));
+  }
+
+  // The same data the gateway's OpenAI destination builds for this event.
+  function oaiData(name, props) {
+    props = props || {};
+    var type = OAI_EVENTS[name][1];
+    var currency = typeof props.currency === 'string' ? props.currency.replace(/^\\s+|\\s+$/g, '').toUpperCase() : null;
+    var data = { type: type };
+    var amount = oaiMinor(props.value, currency);
+    if (amount !== null) { data.amount = amount; data.currency = currency; }
+    if (type === 'contents' && Object.prototype.toString.call(props.contents) === '[object Array]') {
+      var items = [];
+      for (var i = 0; i < props.contents.length && i < 100; i++) {
+        var c = props.contents[i] || {};
+        var id = c.id !== undefined ? c.id : c.item_id;
+        if (id === undefined || id === null || id === '') continue;
+        var item = { id: String(id), content_type: props.content_type === 'home_listing' ? 'home_listing' : 'product' };
+        var title = c.title || c.item_name || c.name;
+        if (title) item.name = String(title).slice(0, 500);
+        var qty = Number(c.quantity === undefined ? 1 : c.quantity);
+        if (qty > 0 && Math.floor(qty) === qty) item.quantity = qty;
+        var price = oaiMinor(c.item_price !== undefined ? c.item_price : c.price, currency);
+        if (price !== null) { item.amount = price; item.currency = currency; }
+        items.push(item);
+      }
+      if (items.length) data.contents = items;
+    }
+    if (type === 'plan_enrollment' && props.plan_id) data.plan_id = String(props.plan_id).slice(0, 200);
+    return data;
+  }
+
+  function oaiParam(name) {
+    try { return new URLSearchParams(w.location.search).get(name); } catch (e) { return null; }
+  }
+
   // ---- tracking ----------------------------------------------------------
 
   // Events wait here while the visitor has not decided. Under opt-in nothing is
@@ -584,6 +687,12 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
     if (!c.marketing && !c.statistics) {
       pending.push(ev);
       return;
+    }
+
+    if (c.marketing && OAI_PIXEL && OAI_EVENTS[ev.name]) {
+      try {
+        if (ensureOai(ev.user)) w.oaiq('measureSingle', OAI_PIXEL, OAI_EVENTS[ev.name][0], oaiData(ev.name, ev.props), { event_id: ev.id });
+      } catch (e) {}
     }
 
     if (c.marketing && PIXEL_ID && !NOT_FOR_META[ev.name]) {
@@ -670,6 +779,11 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
       body.fbp = cookie('_fbp');
       body.fbc = currentFbc();
       body.fbclid = new URLSearchParams(w.location.search).get('fbclid');
+      if (OAI_PIXEL) {
+        // The ad click reference: on the landing URL, later in OpenAI's own cookie.
+        body.oppref = oaiParam('oppref') || cookie('__oppref') || undefined;
+        body.obref = cookie('__obref') || undefined;
+      }
     }
     if (consentActive()) body.consent = c;
     // Refreshing identifiers is a marketing use, like the identifiers themselves.

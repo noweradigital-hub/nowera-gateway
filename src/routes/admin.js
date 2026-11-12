@@ -26,6 +26,7 @@ import {
 } from '../lib/stats.js';
 import { forgetChecks, runChecks } from '../lib/checks.js';
 import { verifyMeta } from '../destinations/verify.js';
+import { verify as verifyOpenAI } from '../destinations/openai.js';
 import { overviewPage } from '../views/overview.js';
 import {
   TABS, completenessCard, destinationsTab, installTab, overviewTab, qualityTab, reportKeyPage, settingsTab, tenantHeader,
@@ -631,7 +632,9 @@ export default async function adminRoutes(app) {
       }
     }
     // A changed token has not been checked yet.
-    if (b.access_token) { delete settings.verified_at; delete settings.verify_error; delete settings.verified_name; }
+    if (b.access_token || b.api_key || b.pixel_id !== undefined && b.pixel_id !== dest.settings?.pixel_id) {
+      delete settings.verified_at; delete settings.verify_error; delete settings.verified_name;
+    }
 
     await query('UPDATE destinations SET settings = $2 WHERE id = $1', [dest.id, JSON.stringify(sealSettings(dest.kind, withTestWindow(dest.kind, settings)))]);
     invalidateTenantCache();
@@ -645,8 +648,9 @@ export default async function adminRoutes(app) {
     const id = idOf(req.params.id);
     const dest = id && await one('SELECT * FROM destinations WHERE id = $1', [id]);
     if (!dest) return reply.code(404).send('not found');
-    if (dest.kind !== 'meta') return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Overiť sa dá len token Mety.', 'err');
-    const result = await verifyMeta(openSettings('meta', dest.settings));
+    const verifiers = { meta: verifyMeta, openai: verifyOpenAI };
+    if (!verifiers[dest.kind]) return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'), 'Overiť sa dá len Meta a OpenAI.', 'err');
+    const result = await verifiers[dest.kind](openSettings(dest.kind, dest.settings));
     const patch = result.ok
       ? { verified_at: new Date().toISOString(), verified_name: result.name || null, verify_error: null }
       : { verify_error: result.error, verified_at: null };
@@ -654,7 +658,7 @@ export default async function adminRoutes(app) {
     forgetChecks(dest.tenant_id);
     await audit(req, 'destination.verify', `${result.ok ? 'ok' : result.error} · klient ${dest.tenant_id}`);
     return redirect(reply, tabUrl(dest.tenant_id, 'destinacie'),
-      result.ok ? `Token funguje${result.name ? ` (${result.name})` : ''}.` : `Token nefunguje: ${result.error}.`, result.ok ? 'ok' : 'err');
+      result.ok ? `Prístup funguje${result.name ? ` (${result.name})` : ''}.` : `Prístup nefunguje: ${result.error}.`, result.ok ? 'ok' : 'err');
   });
 
   app.post('/admin/destinations/:id/test-on', async (req, reply) => {

@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.3.3
+ * Version:      1.3.4
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.3.3';
+const NOWERA_CAPI_VERSION = '1.3.4';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -1367,6 +1367,12 @@ function nowera_capi_request_context(): array {
 	$cookie     = function ( string $name ) use ( $marketing ) {
 		return ( $marketing && isset( $_COOKIE[ $name ] ) ) ? sanitize_text_field( wp_unslash( $_COOKIE[ $name ] ) ) : null;
 	};
+	// OpenAI's references are opaque and must reach it byte for byte, so they are
+	// checked (printable ASCII, no spaces) rather than cleaned.
+	$opaque = function ( $raw ) use ( $marketing ) {
+		$value = ( $marketing && is_string( $raw ) ) ? wp_unslash( $raw ) : '';
+		return preg_match( '/^[\x21-\x7e]{1,1024}$/', $value ) ? $value : null;
+	};
 	return array(
 		'marketing'     => $marketing,
 		'statistics'    => $statistics,
@@ -1374,6 +1380,9 @@ function nowera_capi_request_context(): array {
 		'fbc'           => $cookie( '_fbc' ),
 		// No cookie yet on the very landing page the ad click opened.
 		'fbclid'        => ( $marketing && ! empty( $_GET['fbclid'] ) ) ? sanitize_text_field( wp_unslash( $_GET['fbclid'] ) ) : null,
+		// OpenAI Ads: its pixel keeps the ad click (__oppref) and the browser (__obref).
+		'oppref'        => $opaque( $_GET['oppref'] ?? null ) ?? $opaque( $_COOKIE['__oppref'] ?? null ),
+		'obref'         => $opaque( $_COOKIE['__obref'] ?? null ),
 		'ga_client_id'  => $ga['client_id'],
 		'ga_session_id' => $ga['session_id'],
 		'ip'            => nowera_capi_client_ip(),
@@ -1438,6 +1447,8 @@ function nowera_capi_send( string $event_name, string $event_id, array $user, ar
 		'fbp'               => $marketing ? ( $ctx['fbp'] ?? null ) : null,
 		'fbc'               => $marketing ? ( $ctx['fbc'] ?? null ) : null,
 		'fbclid'            => $marketing ? ( $ctx['fbclid'] ?? null ) : null,
+		'oppref'            => $marketing ? ( $ctx['oppref'] ?? null ) : null,
+		'obref'             => $marketing ? ( $ctx['obref'] ?? null ) : null,
 		'client_ip_address' => $ctx['ip'] ?? '',
 		'client_user_agent' => $ctx['ua'] ?? '',
 	);
@@ -1691,6 +1702,8 @@ function nowera_capi_remember_checkout_context( \WC_Order $order ): void {
 	if ( $ctx['marketing'] ) {
 		$keep['fbp']     = $ctx['fbp'];
 		$keep['fbc']     = $ctx['fbc'];
+		$keep['oppref']  = $ctx['oppref'];
+		$keep['obref']   = $ctx['obref'];
 		$keep['visitor'] = nowera_capi_visitor_id();
 	}
 	$order->update_meta_data( '_nowera_capi_ctx', $keep );
@@ -2758,6 +2771,8 @@ add_action( 'nowera_capi_purchase_fallback', function ( $order_id ) {
 		'fbp'           => $stored['fbp'] ?? null,
 		'fbc'           => $stored['fbc'] ?? null,
 		'fbclid'        => null,
+		'oppref'        => $stored['oppref'] ?? null,
+		'obref'         => $stored['obref'] ?? null,
 		'ga_client_id'  => $stored['ga_client_id'] ?? null,
 		'ga_session_id' => $stored['ga_session_id'] ?? null,
 		'ip'            => (string) $order->get_customer_ip_address(),

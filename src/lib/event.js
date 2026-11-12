@@ -5,6 +5,9 @@ const MAX_AGE_SECONDS = 7 * 86400; // Meta rejects events older than 7 days
 const EVENT_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const MAX_URL = 2048;
 
+// Ad click ids that may sit in a landing page's address.
+const AD_CLICK_PARAMS = ['fbclid', 'oppref'];
+
 const PII_KEYS = ['em', 'ph', 'fn', 'ln', 'ct', 'st', 'zp', 'country', 'ge', 'db', 'external_id'];
 
 /** Long-form aliases so the WordPress plugin can send readable keys. */
@@ -113,6 +116,11 @@ function pickUrl(raw) {
   return value.length <= MAX_URL ? value : `${url.origin}${url.pathname}`.slice(0, MAX_URL);
 }
 
+/** An opaque identifier from a third party, passed on unchanged when it looks like one. */
+function pickOpaque(raw) {
+  return typeof raw === 'string' && /^[\x21-\x7e]{1,1024}$/.test(raw) ? raw : null;
+}
+
 /**
  * Turn whatever arrived on the wire into the canonical shape every destination
  * driver consumes. Throws on input we refuse to guess about.
@@ -141,15 +149,27 @@ export function normalizeEvent(input, context) {
   if (eventTime > nowSeconds + 60) eventTime = nowSeconds;
   if (eventTime < nowSeconds - MAX_AGE_SECONDS) eventTime = nowSeconds - MAX_AGE_SECONDS;
 
+  const consent = pickConsent(input.consent);
+  // Ad click ids are advertising identifiers: without marketing consent they do
+  // not travel even inside the page address (GA4's page_location).
+  const stripClicks = (url) => {
+    if (!url || consent?.marketing !== false) return url;
+    try {
+      const u = new URL(url);
+      for (const p of AD_CLICK_PARAMS) u.searchParams.delete(p);
+      return u.toString().replace(/\?$/, '');
+    } catch { return url; }
+  };
+
   return {
     event_name: name,
     event_id: eventId,
     event_time: eventTime,
-    event_source_url: pickUrl(input.event_source_url) || pickUrl(input.url) || pickUrl(context.referer),
+    event_source_url: stripClicks(pickUrl(input.event_source_url) || pickUrl(input.url) || pickUrl(context.referer)),
     referrer_url: pickReferrer(input.referrer_url),
     action_source: input.action_source || context.actionSource || 'website',
     user: pickUser(input.user_data || input.user || {}),
-    consent: pickConsent(input.consent),
+    consent,
     account_id: pickAccount(input.account_id),
     google_user: pickGoogleUser(input.google_user),
     properties: input.custom_data || input.properties || {},
@@ -160,6 +180,9 @@ export function normalizeEvent(input, context) {
       fbc: context.fbc || null,
       gaClientId: input.ga_client_id || context.gaClientId || null,
       gaSessionId: input.ga_session_id || context.gaSessionId || null,
+      // OpenAI Ads: the ad click reference and the browser reference its pixel keeps.
+      oppref: pickOpaque(context.oppref),
+      obref: pickOpaque(context.obref),
     },
   };
 }

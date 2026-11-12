@@ -86,7 +86,7 @@ export function healthOf(tenant, destinations, now = Date.now()) {
   };
   if (!tenant.active) return { level: 'off', reasons: ['klient je vypnutý'] };
   for (const d of active) {
-    const name = d.kind === 'meta' ? 'Meta' : d.kind === 'ga4' ? 'GA4' : d.kind;
+    const name = { meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' }[d.kind] || d.kind;
     const total = d.sent + d.dead + d.retrying;
     const failing = d.dead + d.retrying;
     // A single refused event is worth a look; a refusing destination is an outage.

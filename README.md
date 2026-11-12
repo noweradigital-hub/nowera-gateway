@@ -58,6 +58,37 @@ so a site keeps exactly one Google tag, configuration only:
   GA4 uses them only with *user-provided data collection* switched on in the
   property. `user_id` is sent for customer accounts only.
 
+## OpenAI Ads
+
+A third kind of destination next to Meta and GA4, for clients advertising in
+ChatGPT ([Conversions API](https://developers.openai.com/ads/conversions-api),
+[pixel](https://developers.openai.com/ads/measurement-pixel)). Add it in the
+client's Destinácie with the Pixel ID and a Conversions API key from OpenAI Ads
+Manager, then press "Overiť kľúč" (a `validate_only` event, nothing recorded).
+
+- **Pixel.** px.js loads OpenAI's pixel (`oaiq`) only after marketing consent,
+  tells it about consent explicitly, initialises it with the same hashed
+  identifiers the Meta pixel gets, and reports each event with
+  `measureSingle` under the id the gateway uses. A refusal calls
+  `oaiq("consent", false)`, which removes its cookies.
+- **Server.** One copy per event id (OpenAI keeps the first it receives): the
+  first leg to arrive, normally the plugin's. The plugin (1.3.4+) and px.js
+  forward the ad click reference (`oppref` from the landing URL or the
+  `__oppref` cookie) and the browser reference (`__obref`), with marketing
+  consent only.
+- **Events.** PageView `page_viewed`, ViewContent `contents_viewed`, AddToCart
+  `items_added`, InitiateCheckout `checkout_started`, Purchase `order_created`,
+  Lead `lead_created`, CompleteRegistration `registration_completed`, Schedule
+  `appointment_scheduled`, Subscribe `subscription_created`, StartTrial
+  `trial_started` (`OPENAI_EVENTS` in `src/lib/event-policy.js`). Nothing else
+  is queued for OpenAI.
+- **Money.** OpenAI takes an integer in the currency's ISO 4217 minor unit
+  (`2599` for 25.99 EUR). The conversion lives in `minorAmount()` only; a value
+  that is not a plain number (`"70,74 €"`) leaves the amount out rather than
+  being guessed at.
+- **Cookies.** `__oppref` (30 days) and `__obref` (365 days) belong in the
+  site's consent tool under marketing, and in its privacy policy.
+
 ## Layout
 
 | Path | Purpose |
