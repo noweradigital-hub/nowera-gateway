@@ -1,11 +1,11 @@
 {
-  "version": "1.3.3",
-  "file": "nowera-capi-1.3.3.zip",
-  "sha256": "09b1a29c6a4c2f2c5c0676fea369a082449d8da6c024f4ab41d6235348ed7ad4",
-  "signature": "HtcND3ybdLaLdcikq7yF70k1KYHlQxysEHRc2ocscJpdxwyiS2fjeDvQhFKedzkANE8M7/ji+MjsAmmwi+IZAw==",
-  "released_at": "2026-11-10T11:39:10.555Z",
+  "version": "1.3.4",
+  "file": "nowera-capi-1.3.4.zip",
+  "sha256": "1ba75b8488979c71d83bd0360e0f37a32445486fbf5d0f4dc44c428df1e8cbe9",
+  "signature": "ypjKWlJYjGG1OGphwIv0TN3DxjUdjbhl60sMfSwd+d5Htry2WFpwncUf2tXS16d8zG48C2IjjAIC5IxkW6DuCg==",
+  "released_at": "2026-11-12T09:19:31.333Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Kliknutie z reklamy (_fbc) platí 90 dní od kliknutia; nové kliknutie nahradí staré. Odstraňuje hlásenie Mety o expirovanom fbclid."
+  "notes": "Podpora OpenAI Ads: serverové udalosti nesú odkaz na kliknutie z reklamy v ChatGPT (oppref) a prehliadač (obref), len so súhlasom s marketingom."
 }
