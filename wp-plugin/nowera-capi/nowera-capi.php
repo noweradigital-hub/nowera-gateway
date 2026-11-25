@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.3.4
+ * Version:      1.3.5
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.3.4';
+const NOWERA_CAPI_VERSION = '1.3.5';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -2429,8 +2429,61 @@ add_action( 'action_scheduler_init', function () {
 } );
 
 add_action( 'nowera_capi_audit', function () {
+	nowera_capi_heal_purchases();
 	nowera_capi_send_audit();
 } );
+
+/**
+ * A safety net under the after-payment job: a paid checkout order of the last
+ * three days that, 45 minutes on, was neither reported nor decided and has no
+ * job waiting gets one now. The job itself checks consent and the rest. Three
+ * days keep the purchase inside what Meta accepts. Returns how many it queued.
+ */
+function nowera_capi_heal_purchases(): int {
+	if ( ! function_exists( 'wc_get_orders' ) || ! function_exists( 'as_schedule_single_action' ) ) {
+		return 0;
+	}
+	// Only orders still open on our side are read (the meta conditions; the
+	// older post-table storage ignores them, so the pages go on), oldest first,
+	// a page of 200 at a time and at most ten seconds or ten pages an hour.
+	$queued  = 0;
+	$started = microtime( true );
+	for ( $page = 1; $page <= 10 && microtime( true ) - $started < 10; $page++ ) {
+		$ids = wc_get_orders( array(
+			'type'         => 'shop_order',
+			'limit'        => 200,
+			'paged'        => $page,
+			'return'       => 'ids',
+			'orderby'      => 'date',
+			'order'        => 'ASC',
+			'status'       => array( 'processing', 'completed', 'on-hold' ),
+			'date_created' => ( time() - 3 * DAY_IN_SECONDS ) . '...' . ( time() - 45 * MINUTE_IN_SECONDS ),
+			'meta_query'   => array(
+				'relation' => 'AND',
+				array( 'key' => '_nowera_capi_ctx', 'compare' => 'EXISTS' ),
+				array( 'key' => '_nowera_capi_purchase_sent', 'compare' => 'NOT EXISTS' ),
+				array( 'key' => '_nowera_capi_purchase_consent', 'compare' => 'NOT EXISTS' ),
+			),
+		) );
+		foreach ( $ids as $id ) {
+			$order = wc_get_order( $id );
+			if ( ! $order || ! nowera_capi_purchase_ready( $order ) || ! $order->get_meta( '_nowera_capi_ctx' )
+				|| $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_purchase_consent' ) ) {
+				continue;
+			}
+			$args = array( (int) $id );
+			if ( as_next_scheduled_action( 'nowera_capi_purchase_fallback', $args, 'nowera-capi' ) ) {
+				continue;
+			}
+			as_schedule_single_action( time() + MINUTE_IN_SECONDS, 'nowera_capi_purchase_fallback', $args, 'nowera-capi' );
+			$queued++;
+		}
+		if ( count( $ids ) < 200 ) {
+			break;
+		}
+	}
+	return $queued;
+}
 
 add_action( 'nowera_capi_audit_backfill', function ( $page = 1, $attempt = 1 ) {
 	// Marked first, so page loads do not queue it again while it runs.
@@ -2484,6 +2537,25 @@ function nowera_capi_send_audit( int $days = 3, int $from_page = 1, int $budget 
 	$tz      = wp_timezone();
 	$today   = ( new \DateTimeImmutable( 'now', $tz ) )->format( 'Y-m-d' );
 	$since   = time() - $days * DAY_IN_SECONDS;
+	// A site without WooCommerce has no orders. The list still goes, empty, so the
+	// gateway sees the plugin and its scheduler alive, with any bookings it holds.
+	if ( ! function_exists( 'wc_get_orders' ) ) {
+		$body = wp_json_encode( array(
+			'day'      => $today,
+			'timezone' => $tz->getName(),
+			'page'     => 1,
+			'pages'    => 1,
+			'total'    => 0,
+			'cron'     => nowera_capi_cron_report(),
+			'orders'   => array(),
+			'bookings' => nowera_capi_ledger_bookings( $since ),
+		) );
+		if ( null !== nowera_capi_deliver( $body, '/r', 15 ) ) {
+			return false;
+		}
+		nowera_capi_more_bookings_later( $since );
+		return true;
+	}
 	$started = microtime( true );
 	$per     = 200;
 	$page    = $from_page;
@@ -2524,11 +2596,8 @@ function nowera_capi_send_audit( int $days = 3, int $from_page = 1, int $budget 
 		if ( null !== nowera_capi_deliver( $body, '/r', 15 ) ) {
 			return false; // the next run sends it all again
 		}
-		// More bookings than one request holds: the rest follow on their own, one
-		// request a minute (see nowera_capi_bookings_more).
-		if ( $first && 500 === count( nowera_capi_ledger_bookings( $since ) ) && function_exists( 'as_schedule_single_action' )
-			&& ! as_has_scheduled_action( 'nowera_capi_bookings_more', null, 'nowera-capi' ) ) {
-			as_schedule_single_action( time() + MINUTE_IN_SECONDS, 'nowera_capi_bookings_more', array( $since, 500 ), 'nowera-capi' );
+		if ( $first ) {
+			nowera_capi_more_bookings_later( $since );
 		}
 		$page++;
 		if ( $budget && $page <= $pages && microtime( true ) - $started > $budget ) {
@@ -2536,6 +2605,17 @@ function nowera_capi_send_audit( int $days = 3, int $from_page = 1, int $budget 
 		}
 	} while ( $page <= $pages );
 	return true;
+}
+
+/**
+ * More bookings than one request holds: the rest follow on their own, one
+ * request a minute (see nowera_capi_bookings_more).
+ */
+function nowera_capi_more_bookings_later( int $since ): void {
+	if ( 500 === count( nowera_capi_ledger_bookings( $since ) ) && function_exists( 'as_schedule_single_action' )
+		&& ! as_has_scheduled_action( 'nowera_capi_bookings_more', null, 'nowera-capi' ) ) {
+		as_schedule_single_action( time() + MINUTE_IN_SECONDS, 'nowera_capi_bookings_more', array( $since, 500 ), 'nowera-capi' );
+	}
 }
 
 /**
@@ -2728,8 +2808,14 @@ function nowera_capi_schedule_purchase_fallback( $order_id ): void {
 	if ( ! $order || ! function_exists( 'as_schedule_single_action' ) ) {
 		return;
 	}
-	if ( $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_purchase_consent' ) || ! $order->get_meta( '_nowera_capi_ctx' ) ) {
-		return; // already reported, already decided, or never went through our checkout
+	if ( $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_purchase_consent' ) ) {
+		return; // already reported or already decided
+	}
+	// A payment gateway that confirms within the checkout request may hold its own,
+	// older copy of the order, one without the checkout context written moments
+	// before. A checkout order is scheduled anyway; the job reads the order afresh.
+	if ( ! $order->get_meta( '_nowera_capi_ctx' ) && ! in_array( $order->get_created_via(), array( 'checkout', 'store-api' ), true ) ) {
+		return; // never went through our checkout
 	}
 	$args = array( (int) $order->get_id() );
 	// The thank-you page already came and went (the order was not paid yet then):

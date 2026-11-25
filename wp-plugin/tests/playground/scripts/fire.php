@@ -348,6 +348,61 @@ switch ( $event ) {
 			),
 		);
 		break;
+	case 'paid_ctx_unseen':
+		// The gateway confirms the payment within the checkout request, from its
+		// own copy of the order that does not show the checkout context yet.
+		$order = nwr_order( $ids );
+		$order->set_created_via( 'checkout' );
+		$order->save();
+		$order->payment_complete( 'TX-RACE' );
+		$scheduled = (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		// The context is in the database by the time the job runs.
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), wc_get_order( $order->get_id() ) );
+		nwr_cookies( array() );
+		nwr_flush();
+		delete_option( 'nwr_test_captured' );
+		do_action( 'nowera_capi_purchase_fallback', $order->get_id() );
+		$fresh    = wc_get_order( $order->get_id() );
+		$purchase = array( 'order' => $fresh->get_id(), 'scheduled' => $scheduled, 'sent' => (bool) $fresh->get_meta( '_nowera_capi_purchase_sent' ) );
+		$admin    = nwr_order( $ids );
+		$admin->set_created_via( 'admin' );
+		$admin->save();
+		$admin->payment_complete( 'TX-ADMIN' );
+		$purchase['admin_scheduled'] = (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $admin->get_id() ), 'nowera-capi' );
+		break;
+	case 'heal':
+		// A paid checkout order whose after-payment job got lost: the hourly list finds it.
+		$order = nwr_order( $ids );
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		$order = wc_get_order( $order->get_id() );
+		$order->payment_complete( 'TX-LOST' );
+		$order = wc_get_order( $order->get_id() );
+		$order->set_date_created( time() - 2 * HOUR_IN_SECONDS );
+		$order->save();
+		as_unschedule_all_actions( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		$done = nwr_order( $ids ); // reported long ago: left alone
+		do_action( 'woocommerce_checkout_order_processed', $done->get_id(), array(), $done );
+		$done = wc_get_order( $done->get_id() );
+		$done->update_meta_data( '_nowera_capi_purchase_sent', time() );
+		$done->set_status( 'processing' );
+		$done->set_date_created( time() - 3 * HOUR_IN_SECONDS );
+		$done->save();
+		as_unschedule_all_actions( 'nowera_capi_purchase_fallback', array( (int) $done->get_id() ), 'nowera-capi' );
+		$recent = nwr_order( $ids ); // too fresh: its own job still has time
+		do_action( 'woocommerce_checkout_order_processed', $recent->get_id(), array(), $recent );
+		wc_get_order( $recent->get_id() )->payment_complete( 'TX-NEW' );
+		as_unschedule_all_actions( 'nowera_capi_purchase_fallback', array( (int) $recent->get_id() ), 'nowera-capi' );
+		$queued   = nowera_capi_heal_purchases();
+		$again    = nowera_capi_heal_purchases();
+		$purchase = array(
+			'queued'    => $queued,
+			'again'     => $again,
+			'scheduled' => (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' ),
+			'recent'    => (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $recent->get_id() ), 'nowera-capi' ),
+			'done'      => (bool) as_next_scheduled_action( 'nowera_capi_purchase_fallback', array( (int) $done->get_id() ), 'nowera-capi' ),
+		);
+		as_unschedule_all_actions( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+		break;
 	case 'cancel_after_purchase':
 	case 'cancel_unpaid':
 		$order = nwr_order( $ids );

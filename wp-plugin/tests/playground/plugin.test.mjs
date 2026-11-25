@@ -580,6 +580,23 @@ test('the order list for the completeness check: signed, paged, no contact data,
   assert.equal(typeof sent[0].body.cron.disabled, 'boolean');
 });
 
+test('a payment confirmed before the checkout context is visible still gets its after-payment job', async () => {
+  const { purchase, sent } = await fire('paid_ctx_unseen');
+  assert.equal(purchase.scheduled, true, 'scheduled on the checkout order even without the context in that copy');
+  assert.equal(purchase.sent, true);
+  assert.deepEqual(sent.map((c) => c.body.event_name), ['Purchase']);
+  assert.equal(purchase.admin_scheduled, false, 'an order the admin made never went through the checkout');
+});
+
+test('the hourly list re-queues a paid order whose after-payment job was lost, once', async () => {
+  const { purchase } = await fire('heal');
+  assert.ok(purchase.queued >= 1);
+  assert.equal(purchase.scheduled, true);
+  assert.equal(purchase.again, 0, 'a job already waiting is not queued twice');
+  assert.equal(purchase.recent, false, 'an order under 45 minutes old still has its own chance');
+  assert.equal(purchase.done, false, 'a reported order is not even read');
+});
+
 // ---------------------------------------------------------------- bookings, gift cards, subscriptions
 
 const kindOrder = (lines, extra = '', cookies = '') => fire('kind_order', cookies, `&lines=${lines}${extra}`);
