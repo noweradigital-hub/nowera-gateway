@@ -494,8 +494,63 @@ test('the order key never leaves with the thank-you page address', () => {
   assert.equal(e.event_source_url, 'https://shop.sk/pokladna/order-received/77/?utm_source=x');
   const only = normalizeEvent({ event_name: 'Purchase', event_source_url: 'https://shop.sk/order-received/77/?key=wc_order_AbC123' }, {});
   assert.equal(only.event_source_url, 'https://shop.sk/order-received/77/');
-  const other = normalizeEvent({ event_name: 'PageView', event_source_url: 'https://shop.sk/?key=value' }, {});
-  assert.equal(other.event_source_url, 'https://shop.sk/?key=value', 'other keys are left alone');
+  // Any `key` goes: an API key or a reset link's key is no less secret.
+  const other = normalizeEvent({ event_name: 'PageView', event_source_url: 'https://shop.sk/?key=value&utm_source=x' }, {});
+  assert.equal(other.event_source_url, 'https://shop.sk/?utm_source=x');
+  // The plugin's address arrives the same way, and the referrer keeps no query at all.
+  const signed = normalizeEvent({ event_name: 'Purchase', event_source_url: 'https://shop.sk/pokladna/order-received/77/?key=wc_order_AbC123',
+    referrer_url: 'https://shop.sk/pokladna/order-received/77/?key=wc_order_AbC123' }, { actionSource: 'website' });
+  assert.ok(!JSON.stringify(signed).includes('wc_order_'), 'the order key is nowhere in the stored event');
+});
+
+test('contact details and secrets in a page address are removed before it is stored', () => {
+  const url = (u) => normalizeEvent({ event_name: 'PageView', event_source_url: u }, {}).event_source_url;
+  // Named parameters go, the rest stays exactly as it was written.
+  assert.equal(url('https://x.sk/kontakt/?email=jana%40shop.sk&utm_source=newsletter&utm_campaign=jar%20sale'),
+    'https://x.sk/kontakt/?utm_source=newsletter&utm_campaign=jar%20sale');
+  assert.equal(url('https://x.sk/?your-email=a&billing_phone=0905123456&e-mail=b&Tel=1&mobil=2&userEmail=c&phoneNumber=d&p=5'),
+    'https://x.sk/?p=5');
+  assert.equal(url('https://x.sk/?token=t&access_token=a&api_key=k&password=p&pwd=x&pass=y&auth=z&session=s&sid=1&otp=9&q=boty'),
+    'https://x.sk/?q=boty');
+  // An e-mail address under any other name is redacted, the parameter kept.
+  assert.equal(url('https://x.sk/hladat/?s=jana%40shop.sk&page=2'), 'https://x.sk/hladat/?s=redacted&page=2');
+  assert.equal(url('https://x.sk/?q=jana@shop.sk'), 'https://x.sk/?q=redacted');
+  // ... and so is one in the path, and sign-in details before the host.
+  assert.equal(url('https://x.sk/odhlasit/jana%40shop.sk/'), 'https://x.sk/odhlasit/redacted/');
+  assert.equal(url('https://user:secret@x.sk/a'), 'https://x.sk/a');
+  assert.equal(url('https://x.sk/galeria/?img=logo@2x.png'), 'https://x.sk/galeria/?img=logo@2x.png', 'an image name is not an address');
+  // `code` is a one-time code on a sign-in callback, a product code elsewhere.
+  assert.equal(url('https://x.sk/oauth/callback?code=abc&state=xyz'), 'https://x.sk/oauth/callback?state=xyz');
+  assert.equal(url('https://x.sk/?code=abc&state=xyz'), 'https://x.sk/?state=xyz');
+  assert.equal(url('https://x.sk/produkt/?code=SKU-1'), 'https://x.sk/produkt/?code=SKU-1');
+  assert.equal(url('https://x.sk/?coupon_code=JAR10'), 'https://x.sk/?coupon_code=JAR10');
+  // A fragment with a token (implicit sign-in) is cleaned, an ordinary anchor kept.
+  assert.equal(url('https://x.sk/prihlasenie#access_token=abc&expires_in=3600'), 'https://x.sk/prihlasenie#expires_in=3600');
+  assert.equal(url('https://x.sk/faq#doprava'), 'https://x.sk/faq#doprava');
+  // A client-side route with its own query: the route stays, the code goes.
+  assert.equal(url('https://x.sk/#/callback?code=secret&state=abc'), 'https://x.sk/#/callback?state=abc');
+  assert.equal(url('https://x.sk/#/u/jana%40shop.sk'), 'https://x.sk/#/u/redacted');
+  assert.equal(url('https://x.sk/#/kosik?krok=2'), 'https://x.sk/#/kosik?krok=2');
+  // Session ids and keys under their usual joined or camelCase names.
+  assert.equal(url('https://x.sk/?PHPSESSID=s1&JSESSIONID=s2&clientSessionId=s3&resetKey=k&apiKey=k2&userPass=p&page=3'),
+    'https://x.sk/?page=3');
+  // Attribution survives untouched, ad click ids included.
+  const ads = 'https://x.sk/?utm_source=fb&utm_medium=cpc&utm_term=boty&fbclid=FB1&gclid=G1&gbraid=GB&wbraid=WB&msclkid=MS&ttclid=TT&oppref=OP&obref=OB';
+  assert.equal(url(ads), ads);
+  // An address with nothing to remove is stored exactly as sent.
+  assert.equal(url('https://x.sk/kategoria/?orderby=price&filter_farba=modr%C3%A1'), 'https://x.sk/kategoria/?orderby=price&filter_farba=modr%C3%A1');
+  // The referrer keeps origin and path only, and no address in the path either.
+  const ref = normalizeEvent({ event_name: 'PageView', referrer_url: 'https://x.sk/u/jana%40shop.sk/?email=a' }, {});
+  assert.equal(ref.referrer_url, 'https://x.sk/u/redacted/');
+});
+
+test('the cleaned page address is what Meta, GA4 and OpenAI receive', async () => {
+  const { buildPayload: openaiPayload } = await import('../src/destinations/openai.js');
+  const e = normalizeEvent({ event_name: 'Lead', event_id: 'l1', event_source_url: 'https://x.sk/dakujeme/?email=jana%40shop.sk&utm_source=x' }, {});
+  const clean = 'https://x.sk/dakujeme/?utm_source=x';
+  assert.equal(metaPayload(e, {}).data[0].event_source_url, clean);
+  assert.equal(ga4Payload(e, {}).events[0].params.page_location, clean);
+  assert.equal(openaiPayload(e, {}).events[0].source_url, clean);
 });
 
 test('ga4 counts revenue without VAT when the site sends it; meta keeps the full total', () => {
@@ -606,4 +661,101 @@ test('a real-estate listing view: Meta keeps content_type home_listing and the p
   assert.equal(pricedGa4.value, 385000);
   assert.equal(pricedGa4.currency, 'EUR');
   assert.equal(pricedGa4.items[0].price, 385000);
+});
+
+// ------------------------------------------------------------ money
+
+test('money: amounts become numbers with two decimals, a decimal comma included', async () => {
+  const { moneyAmount, MAX_AMOUNT } = await import('../src/lib/event.js');
+  const cases = [
+    [49.9, 49.9], ['49.90', 49.9], ['70,74', 70.74], [' 70.74 ', 70.74], ['1 234,56', 1234.56],
+    ['1.234,56', 1234.56], ['1,234.56', 1234.56], ['1.234.567', 1234567], [70.73999999999, 70.74], [0, 0], ['0', 0],
+  ];
+  for (const [raw, want] of cases) assert.equal(moneyAmount(raw), want, JSON.stringify(raw));
+  // "1,234" could be 1.234 or 1234: refused, never guessed.
+  for (const bad of [-5, '-5', '25,99 €', '€25', 'abc', '', NaN, Infinity, MAX_AMOUNT + 1, 1732540000000, true, {}, '1e3', '12,34,56', '1,234', '70,745']) {
+    assert.equal(moneyAmount(bad), null, `refused: ${String(bad)}`);
+  }
+  assert.equal(moneyAmount('12.3456', 3), 12.346, 'three-decimal currencies keep their third decimal');
+});
+
+test('money: the event keeps its amounts checked, a bad field is dropped and the event still goes', () => {
+  const e = normalizeEvent({
+    event_name: 'Purchase', event_id: 'ord-70',
+    custom_data: {
+      value: '70,74', value_net: '57,51', shipping: 'zadarmo', tax: '', currency: ' eur ',
+      contents: [{ id: 'A', quantity: 2, item_price: '30,37' }, { id: 'B', quantity: 1, item_price: -1 }],
+      items: [{ item_id: 'A', price: '24,69' }],
+    },
+  }, {});
+  assert.equal(e.properties.value, 70.74);
+  assert.equal(e.properties.value_net, 57.51);
+  assert.equal(e.properties.currency, 'EUR');
+  assert.equal('shipping' in e.properties, false, 'not a number: dropped');
+  assert.equal('tax' in e.properties, false, 'empty: dropped, GA4 would read it as 0');
+  assert.deepEqual(e.properties.contents, [{ id: 'A', quantity: 2, item_price: 30.37 }, { id: 'B', quantity: 1 }]);
+  assert.equal(e.properties.items[0].price, 24.69);
+  assert.deepEqual(e.warnings, ['money_invalid']);
+  const d = metaPayload(e, {}).data[0];
+  assert.equal(d.custom_data.value, 70.74, 'Meta gets the amount instead of NaN');
+  assert.equal(d.custom_data.currency, 'EUR');
+  assert.equal(ga4Payload(e, {}).events[0].params.value, 57.51);
+
+  const badCurrency = normalizeEvent({ event_name: 'Purchase', custom_data: { value: 10, currency: '€' } }, {});
+  assert.equal(badCurrency.properties.currency, undefined);
+  assert.equal(badCurrency.properties.value, 10);
+  assert.deepEqual(badCurrency.warnings, ['currency_invalid']);
+  assert.equal(normalizeEvent({ event_name: 'Purchase', custom_data: { value: 1, currency: 'XYZ' } }, {}).properties.currency, undefined);
+
+  const clean = normalizeEvent({ event_name: 'Purchase', custom_data: { value: 24.9, currency: 'EUR', order_id: 7 } }, {});
+  assert.equal(clean.warnings, undefined, 'nothing to say about clean data');
+  assert.deepEqual(clean.properties, { value: 24.9, currency: 'EUR', order_id: 7 });
+});
+
+test('money: a value about a hundred times its items is flagged as cents, never rewritten', () => {
+  const cents = normalizeEvent({ event_name: 'Purchase', custom_data: {
+    value: 5480, currency: 'EUR', contents: [{ id: 'A', quantity: 2, item_price: 24.9 }],
+  } }, {});
+  assert.equal(cents.properties.value, 5480, 'the value goes as sent');
+  assert.deepEqual(cents.warnings, ['value_cents']);
+  // GA4-shaped items count too, quantity defaults to one.
+  assert.deepEqual(normalizeEvent({ event_name: 'Purchase', custom_data: { value: 1990, items: [{ item_id: 'A', price: 19.9 }] } }, {}).warnings, ['value_cents']);
+
+  const ok = (props) => normalizeEvent({ event_name: 'Purchase', custom_data: props }, {}).warnings;
+  // Shipping on top, a discount, VAT on net item prices: an ordinary order.
+  assert.equal(ok({ value: 54.8, contents: [{ id: 'A', quantity: 2, item_price: 24.9 }] }), undefined);
+  assert.equal(ok({ value: 5.89, contents: [{ id: 'A', quantity: 1, item_price: 0.99 }] }), undefined, 'a cheap item and its shipping');
+  assert.equal(ok({ value: 30, contents: [{ id: 'A', quantity: 1, item_price: 60 }] }), undefined);
+  // Not enough to judge: an item without a price, or no items at all.
+  assert.equal(ok({ value: 5480, contents: [{ id: 'A', quantity: 2, item_price: 24.9 }, { id: 'B' }] }), undefined);
+  assert.equal(ok({ value: 5480 }), undefined);
+});
+
+// ------------------------------------------------------------ phone country
+
+test('a national phone number gets the tenant country code when the event has no country', () => {
+  const lead = (user, defaultCountry) => normalizeEvent({ event_name: 'Lead', user_data: user }, { defaultCountry });
+  const e = lead({ phone: '0905 123 456' }, 'SK');
+  assert.equal(e.user.ph, sha('421905123456'));
+  assert.equal(e.user.country, undefined, 'the tenant country is not the visitor country');
+  assert.equal(metaPayload(e, {}).data[0].user_data.country, undefined, 'and is never sent to Meta');
+  // The event's own country wins; an international number needs nothing.
+  assert.equal(lead({ phone: '777 123 456', country: 'CZ' }, 'SK').user.ph, sha('420777123456'));
+  assert.equal(lead({ phone: '+420 777 123 456' }, 'SK').user.ph, sha('420777123456'));
+  // A hashed country cannot be read, so the tenant country completes the phone.
+  const hashed = lead({ phone: '0905 123 456', country: sha('sk') }, 'SK');
+  assert.equal(hashed.user.ph, sha('421905123456'));
+  assert.equal(hashed.user.country, sha('sk'));
+  // No setting, or one without a calling-code rule: as before.
+  assert.equal(lead({ phone: '0905 123 456' }, null).user.ph, sha('905123456'));
+  assert.equal(lead({ phone: '0905 123 456' }, 'XX').user.ph, sha('905123456'));
+  // Already hashed on the site: passed through.
+  assert.equal(lead({ ph: sha('421905123456') }, 'CZ').user.ph, sha('421905123456'));
+});
+
+test('the tenant phone country setting accepts only countries with a calling-code rule', async () => {
+  const { phoneCountry } = await import('../src/lib/event.js');
+  assert.equal(phoneCountry('sk'), 'SK');
+  assert.equal(phoneCountry(' CZ '), 'CZ');
+  for (const bad of ['', null, undefined, 'XX', 'SVK', 'S']) assert.equal(phoneCountry(bad), null);
 });

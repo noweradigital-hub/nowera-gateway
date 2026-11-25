@@ -663,3 +663,125 @@ test('stripe: a browser Purchase whose record fails is not acknowledged as queue
     failContext = false;
   }
 });
+
+// ------------------------------------------------------------ queue health, phone country, money flags
+
+/** The collector with its own stubs on top of the shared ones. */
+async function collectorWith(extra) {
+  const Fastify = (await import('fastify')).default;
+  const cookie = (await import('@fastify/cookie')).default;
+  const collectRoutes = (await import('../src/routes/collect.js')).default;
+  const instance = Fastify({ logger: false, trustProxy: true });
+  await instance.register(cookie, { secret: 'x'.repeat(40) });
+  await instance.register(collectRoutes, { ...stubs, ...extra });
+  await instance.ready();
+  return instance;
+}
+
+test('/health?queue=1 answers 503 with a reason when the worker stops, plain /health never asks the queue', async () => {
+  let reading = { dueAge: 2, late: 0, sendingAge: null, stuck: 0 };
+  let reads = 0;
+  const gw = await collectorWith({
+    queueCacheMs: 0,
+    queueState: async () => {
+      reads += 1;
+      if (reading instanceof Error) throw reading;
+      return reading;
+    },
+  });
+  try {
+    // Docker's healthcheck (and so Traefik's routing) stays independent of the queue.
+    const plain = await gw.inject({ method: 'GET', url: '/health' });
+    assert.equal(plain.statusCode, 200);
+    assert.deepEqual(plain.json(), { ok: true });
+    assert.equal(reads, 0);
+
+    const fine = await gw.inject({ method: 'GET', url: '/health?queue=1' });
+    assert.equal(fine.statusCode, 200);
+    assert.deepEqual(fine.json(), { ok: true, queue: 'ok' });
+
+    reading = { dueAge: 16 * 60, late: 240, sendingAge: null, stuck: 0 };
+    const late = await gw.inject({ method: 'GET', url: '/health?queue=1' });
+    assert.equal(late.statusCode, 503);
+    assert.equal(late.json().reason, 'queue_late');
+    assert.match(late.json().detail, /240 eventov čaká/);
+
+    reading = { dueAge: null, late: 0, sendingAge: 45 * 60, stuck: 7 };
+    assert.equal((await gw.inject({ method: 'GET', url: '/health?queue=1' })).json().reason, 'queue_stuck');
+
+    reading = new Error('connection refused');
+    const down = await gw.inject({ method: 'GET', url: '/health?queue=1' });
+    assert.equal(down.statusCode, 503);
+    assert.equal(down.json().reason, 'database_unreachable');
+  } finally {
+    await gw.close();
+  }
+});
+
+test('/health?queue=1 shares one database reading among requests arriving together', async () => {
+  let reads = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const gw = await collectorWith({ queueState: async () => { reads += 1; await gate; return { dueAge: null, late: 0, sendingAge: null, stuck: 0 }; } });
+  try {
+    const all = Array.from({ length: 20 }, () => gw.inject({ method: 'GET', url: '/health?queue=1' }));
+    await new Promise((resolve) => setTimeout(resolve, 30)); // all twenty are waiting on the database
+    release();
+    const answers = await Promise.all(all);
+    assert.ok(answers.every((r) => r.statusCode === 200));
+    assert.equal(reads, 1, 'a slow database is asked once, not once per request');
+  } finally {
+    await gw.close();
+  }
+});
+
+test('/health?queue=1 reads the database at most once per 15 seconds', async () => {
+  let reads = 0;
+  const gw = await collectorWith({ queueState: async () => { reads += 1; return { dueAge: null, late: 0, sendingAge: null, stuck: 0 }; } });
+  try {
+    for (let i = 0; i < 5; i += 1) assert.equal((await gw.inject({ method: 'GET', url: '/health?queue=1' })).statusCode, 200);
+    assert.equal(reads, 1);
+  } finally {
+    await gw.close();
+  }
+});
+
+test('a form lead on a site without WooCommerce gets the tenant phone country; money flags are counted, values kept', async () => {
+  const FORMS = {
+    ...TENANT, id: 6, slug: 'formulare', collector_host: 't.formulare.sk', allowed_origins: 'https://formulare.sk',
+    cookie_domain: '.formulare.sk', consent_mode: 'none', default_country: 'SK',
+  };
+  const queued = [];
+  const issues = [];
+  const gw = await collectorWith({
+    tenantByHost: async (host) => (String(host).split(':')[0] === FORMS.collector_host ? FORMS : stubs.tenantByHost(host)),
+    enqueue: async (tenantId, event, destinations) => { queued.push(event); return destinations.length; },
+    stats: {
+      recordReceived() {}, countDropped() {}, notePlugin() {},
+      countIssue: (tenantId, code, name) => issues.push([tenantId, code, name]),
+    },
+  });
+  try {
+    const lead = await gw.inject({
+      method: 'POST', url: '/e',
+      headers: { host: FORMS.collector_host, origin: 'https://formulare.sk', 'content-type': 'application/json' },
+      payload: { event_name: 'Lead', event_source_url: 'https://formulare.sk/kontakt/?email=jana%40shop.sk', user_data: { phone: '0905 123 456' } },
+    });
+    assert.equal(lead.statusCode, 200);
+    assert.equal(queued[0].user.ph, sha('421905123456'));
+    assert.equal(queued[0].user.country, undefined);
+    assert.equal(queued[0].event_source_url, 'https://formulare.sk/kontakt/');
+
+    const purchase = await gw.inject({
+      method: 'POST', url: '/e',
+      headers: { host: FORMS.collector_host, origin: 'https://formulare.sk', 'content-type': 'application/json' },
+      payload: { event_name: 'Purchase', event_id: 'ord-9', custom_data: { value: 4980, currency: 'eur', contents: [{ id: '1', quantity: 2, item_price: 24.9 }] } },
+    });
+    assert.equal(purchase.statusCode, 200);
+    assert.equal(queued[1].properties.value, 4980, 'flagged, not rewritten');
+    assert.equal(queued[1].properties.currency, 'EUR');
+    assert.deepEqual(issues, [[6, 'value_cents', 'Purchase']]);
+  } finally {
+    await gw.close();
+  }
+});

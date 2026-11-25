@@ -94,7 +94,7 @@ Manager, then press "Overiť kľúč" (a `validate_only` event, nothing recorded
 | Path | Purpose |
 |---|---|
 | `src/server.js` | Fastify entrypoint, registers routes and starts the worker |
-| `src/routes/collect.js` | `/px.js`, `/e`, `/s`, `/health` — the public surface |
+| `src/routes/collect.js` | `/px.js`, `/e`, `/s`, `/health` (`?queue=1` for uptime monitors) — the public surface |
 | `src/routes/admin.js` | Dashboard, gated to `ADMIN_HOST` |
 | `src/lib/loader.js` | The first-party JS served per tenant |
 | `src/lib/hash.js` | Meta PII normalization + SHA-256 |
@@ -290,8 +290,29 @@ made in its Nastavenia, opens that client alone. Either goes in
 
 - **Meta bumps its API version about twice a year.** `META_API_VERSION` is a
   single env var; bump it and redeploy.
-- Failed deliveries retry with backoff (10s → 1h, 6 attempts) then land in
-  `dead` and show in the event log with Meta's own error text.
+- Failed deliveries retry with backoff (10 s → 12 h, 11 attempts over about
+  26 hours, inside GA4's 72-hour and Meta's 7-day limits) then land in `dead`
+  and show in the event log with the destination's own error text. An error
+  that will never succeed (bad token, malformed event) goes `dead` at once.
+- `/health` answers while the process runs; Docker's healthcheck uses it, and
+  it must stay that way (an unhealthy container drops out of Traefik's routing,
+  and the collectors with it). Point an external uptime monitor at
+  `/health?queue=1`: it answers 503 (`queue_late`, `queue_stuck`,
+  `database_unreachable`) when a due event has waited over 10 minutes or a row
+  has hung in `sending` over 20, i.e. the worker is dead or cannot keep up. The
+  alert rule "Fronta stojí" reports the same.
+- Page addresses are stored and forwarded without personal data: parameters
+  named like an e-mail, phone, token, key (WooCommerce's order key), password,
+  session or sign-in code are removed, and an e-mail address anywhere else in
+  the address is replaced by `redacted`. `utm_*` and ad click ids stay.
+- Money is checked on arrival: amounts become numbers (a decimal comma is
+  accepted), a currency must be an ISO code, and an invalid field is dropped
+  without dropping the event. A value about 100× its items' sum (cents sent as
+  euros) is flagged in the Kvalita tab and the log, never rewritten.
+- A tenant's *Krajina telefónnych čísel* completes phone numbers written
+  without a country code when the event carries no country (forms, bookings on
+  sites without WooCommerce). It is set from the collector domain (.sk, .cz,
+  .pl) and never sent as the visitor's country.
 - Events are swept after `RETENTION_DAYS` (default 30).
 - Everything runs in one process on one box: if it goes down, no client is
   measuring. Give it its own VPS before the client count gets serious.

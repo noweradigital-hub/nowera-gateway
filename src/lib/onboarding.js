@@ -34,6 +34,15 @@ export function deriveFromSite(site) {
   };
 }
 
+// Country-code domains whose phone numbers a new client's forms most likely carry.
+const TLD_COUNTRY = { sk: 'SK', cz: 'CZ', pl: 'PL' };
+
+/** The phone country a new client starts with, from its domain (t.klient.sk → SK), or null. */
+export function countryFromHost(host) {
+  const tld = String(host || '').toLowerCase().replace(/\.$/, '').split('.').pop();
+  return TLD_COUNTRY[tld] || null;
+}
+
 /** Recognise the consent tool from the site's front page. `null` when the page cannot be read. */
 export async function detectConsent(siteUrl, fetchImpl = fetch) {
   let html;

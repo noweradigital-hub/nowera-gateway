@@ -14,6 +14,8 @@ const CALLING_CODES = {
   SK: '421', CZ: '420', PL: '48', HU: '36', AT: '43', DE: '49', CH: '41', SI: '386', HR: '385',
   RO: '40', UA: '380', IT: '39', FR: '33', GB: '44', IE: '353', NL: '31', BE: '32', ES: '34',
 };
+/** Countries a national phone number can be completed for (a tenant's phone country). */
+export const PHONE_COUNTRIES = Object.keys(CALLING_CODES);
 const TRUNK_PREFIXES = { HU: '06', IT: '', ES: '' }; // default '0'
 const CODES_LONGEST_FIRST = Object.entries(CALLING_CODES).sort((a, b) => b[1].length - a[1].length);
 

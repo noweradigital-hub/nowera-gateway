@@ -21,7 +21,7 @@ import {
   accountPage, destinationForm, ingestKeyPage, loginPage, newTenantPage,
 } from '../views/pages.js';
 import {
-  destinationStats, eventDetail, eventList, eventNames, healthOf, overview, plural, quality, qualityFindings,
+  dataIssues, destinationStats, eventDetail, eventList, eventNames, healthOf, overview, plural, quality, qualityFindings,
   retryEvent, tenantOverview,
 } from '../lib/stats.js';
 import { forgetChecks, runChecks } from '../lib/checks.js';
@@ -45,7 +45,8 @@ import {
   restoreBackup, runBackup, saveBackupSettings, testStorage,
 } from '../lib/backup.js';
 import { keySource, recoveryKey } from '../lib/secrets.js';
-import { deriveFromSite, detectConsent, gatewayIp, pairingCode } from '../lib/onboarding.js';
+import { countryFromHost, deriveFromSite, detectConsent, gatewayIp, pairingCode } from '../lib/onboarding.js';
+import { phoneCountry } from '../lib/event.js';
 import { backupsPage, recoveryKeyPage } from '../views/backups.js';
 import { auditRows, summarise } from '../lib/order-audit.js';
 import { stripeCounts } from '../lib/stripe-purchases.js';
@@ -386,13 +387,13 @@ export default async function adminRoutes(app) {
       const row = await one(
         `INSERT INTO tenants (slug, name, collector_host, allowed_origins, cookie_domain, active,
                               consent_mode, consent_prefix, keep_path,
-                              ingest_secret, legacy_ingest, server_only_events, cron_enabled)
-         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, FALSE, $10, $11)
+                              ingest_secret, legacy_ingest, server_only_events, cron_enabled, default_country)
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, FALSE, $10, $11, $12)
          RETURNING id, name, collector_host`,
         [slug, String(b.name || derived?.domain || slug).trim(), collectorHost,
          pick('allowed_origins'), pick('cookie_domain') || null,
          consent.mode, consent.prefix, keepPath, seal(key), cleanEventNames(b.server_only_events),
-         b.wordpress === 'on' && b.cron_enabled === 'on'],
+         b.wordpress === 'on' && b.cron_enabled === 'on', countryFromHost(collectorHost)],
       );
       invalidateTenantCache();
       await audit(req, 'tenant.create', row.name);
@@ -422,7 +423,7 @@ export default async function adminRoutes(app) {
       const audit = summarise(await auditRows(id), destinations.filter((d) => d.active)
         .map((d) => ({ id: d.id, kind: d.kind, scope: d.settings?.scope || 'all' })), Date.now(), { since: tenant.first_event_at });
       const snap = await one('SELECT max(completed_at) AS last FROM audit_snapshots WHERE tenant_id = $1', [id]);
-      body = qualityTab(rows, qualityFindings(rows), completenessCard(audit, snap?.last));
+      body = qualityTab(rows, qualityFindings(rows, await dataIssues(id)), completenessCard(audit, snap?.last));
     } else if (tab === 'destinacie') {
       body = destinationsTab(tenant, destinations, SCHEMAS, config.metaApiVersion);
     } else if (tab === 'instalacia') {
@@ -466,13 +467,14 @@ export default async function adminRoutes(app) {
       `UPDATE tenants SET name = $2, collector_host = $3, allowed_origins = $4,
               cookie_domain = $5, active = $6, consent_mode = $7, consent_prefix = $8,
               keep_path = $9, legacy_ingest = $10, server_only_events = $11, quiet_alert_hours = $12,
-              cron_enabled = $13, cron_url = $14
+              cron_enabled = $13, cron_url = $14, default_country = $15
         WHERE id = $1`,
       [id, String(b.name || '').trim(), String(b.collector_host || '').trim().toLowerCase(),
        String(b.allowed_origins || '').trim(), String(b.cookie_domain || '').trim() || null,
        b.active === 'on', consent.mode, consent.prefix, normalizeKeepPath(b.keep_path),
        b.legacy_ingest === 'on', cleanEventNames(b.server_only_events), parseQuietHours(b.quiet_alert_hours),
-       b.cron_enabled === 'on', normalizeCronUrl(b.cron_url, { allowed_origins: String(b.allowed_origins || '').trim() })],
+       b.cron_enabled === 'on', normalizeCronUrl(b.cron_url, { allowed_origins: String(b.allowed_origins || '').trim() }),
+       phoneCountry(b.default_country)],
     );
     invalidateTenantCache();
     forgetChecks(id);

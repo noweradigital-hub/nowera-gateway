@@ -303,6 +303,24 @@ CREATE INDEX IF NOT EXISTS browser_contexts_time_idx ON browser_contexts(created
 ALTER TABLE destinations DROP CONSTRAINT IF EXISTS destinations_kind_check;
 ALTER TABLE destinations ADD CONSTRAINT destinations_kind_check CHECK (kind IN ('meta','ga4','openai'));
 
+-- The country a phone number without its international prefix belongs to, for a
+-- site whose forms send no country (no WooCommerce): only the calling code is
+-- taken from it, it is never sent as the visitor's country. NULL = none. Filled
+-- once from the collector host's domain when the column is created (.sk, .cz,
+-- .pl); afterwards only the settings form changes it.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                  WHERE table_schema = current_schema() AND table_name = 'tenants' AND column_name = 'default_country') THEN
+    ALTER TABLE tenants ADD COLUMN default_country TEXT;
+    UPDATE tenants SET default_country = CASE
+      WHEN lower(collector_host) LIKE '%.sk' THEN 'SK'
+      WHEN lower(collector_host) LIKE '%.cz' THEN 'CZ'
+      WHEN lower(collector_host) LIKE '%.pl' THEN 'PL'
+    END;
+  END IF;
+END $$;
+
 -- Who changed what in the dashboard.
 CREATE TABLE IF NOT EXISTS admin_audit (
   id      BIGSERIAL PRIMARY KEY,

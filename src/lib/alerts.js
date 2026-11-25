@@ -5,6 +5,7 @@ import { runChecks } from './checks.js';
 import { open, seal } from './secrets.js';
 import { backupCondition } from './backup.js';
 import { auditRows, overdueSnapshots, summarise } from './order-audit.js';
+import { queueProblem, queueState } from './queue.js';
 
 /**
  * Problems worth a message: the gateway checks every few minutes and sends each
@@ -21,6 +22,7 @@ export const RULES = {
   missing_purchase: { title: 'Chýbajú nákupy', hint: 'Zaplatená objednávka so súhlasom nemá ani po 2 hodinách doručený Purchase (podľa zoznamu objednávok, ktorý posiela plugin od verzie 1.2).' },
   audit_overdue: { title: 'Plugin neposiela objednávky', hint: 'Plugin 1.2 alebo novší neposlal zoznam objednávok 36 hodín — beží na webe WP-Cron / Action Scheduler?' },
   backup: { title: 'Záloha zlyhala', hint: '36 hodín bez úspešnej zálohy databázy (len keď sú zálohy nastavené).' },
+  queue: { title: 'Fronta stojí', hint: 'Event čaká na odoslanie dlhšie ako 10 minút alebo zostal v stave „odosiela sa“ dlhšie ako 20 minút: worker nebeží alebo nestíha. To isté hlási /health?queue=1 kódom 503 pre externý monitoring.' },
 };
 
 const DEFAULTS = { webhook_url: '', rules: Object.fromEntries(Object.keys(RULES).map((k) => [k, true])) };
@@ -204,7 +206,15 @@ export async function currentConditions({ now = Date.now(), siteChecks = true } 
   }
   const backup = await backupCondition(now).catch(() => null);
   if (backup) out.push(backup);
+  const queue = queueCondition(await queueState().catch(() => null));
+  if (queue) out.push(queue);
   return out;
+}
+
+/** The gateway-wide queue alert, from a queueState() reading, or null. */
+export function queueCondition(state) {
+  const problem = queueProblem(state);
+  return problem ? { tenant_id: null, rule: 'queue', subject: '', message: problem.message } : null;
 }
 
 function payload(event, alert, tenant) {

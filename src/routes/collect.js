@@ -2,7 +2,7 @@ import { parseSnapshot, saveSnapshot } from '../lib/order-audit.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { normalizeEvent } from '../lib/event.js';
-import { enqueue as defaultEnqueue } from '../lib/queue.js';
+import { enqueue as defaultEnqueue, queueProblem, queueState as defaultQueueState } from '../lib/queue.js';
 import { fbcFresh, fbcRemainingMs, newEventId, newFbp, resolveFbc } from '../lib/ids.js';
 import { originAllowed, tenantByHost as defaultTenantByHost } from '../lib/tenants.js';
 import { loaderScript } from '../lib/loader.js';
@@ -142,6 +142,36 @@ export default async function collectRoutes(app, opts = {}) {
   const recordContext = opts.recordContext || defaultRecordContext;
   const storePayment = opts.storePayment || defaultStorePayment;
   const transaction = opts.transaction || defaultTransaction;
+  const readQueue = opts.queueState || defaultQueueState;
+  const queueCacheMs = opts.queueCacheMs ?? 15_000;
+
+  // The public queue check reads the database; one reading (or the one under
+  // way) serves everyone for 15 seconds, so polling it cannot load the database.
+  let queueCache = { at: 0, reading: null };
+  const queueCheck = () => {
+    if (queueCache.reading && Date.now() - queueCache.at < queueCacheMs) return queueCache.reading;
+    const reading = Promise.resolve().then(readQueue).then(queueProblem,
+      () => ({ code: 'database_unreachable', message: 'Databáza neodpovedá.' }));
+    queueCache = { at: Date.now(), reading };
+    return reading;
+  };
+
+  // Money data that looked wrong (see normalizeEvent): counted per day for the
+  // dashboard's quality tab, and logged once an hour per client and problem,
+  // since a site that sends every price wrong would otherwise log every event.
+  const warned = new Map();
+  const noteWarnings = (req, tenant, event) => {
+    for (const code of event.warnings || []) {
+      stats.countIssue?.(tenant.id, code, event.event_name);
+      const key = `${tenant.id}|${code}|${event.event_name}`;
+      if (Date.now() - (warned.get(key) || 0) < 3600_000) continue;
+      if (warned.size > 1000) warned.clear(); // event names come from the page
+      warned.set(key, Date.now());
+      const p = event.properties || {};
+      req.log.warn({ tenant: tenant.slug, event: event.event_name, issue: code, value: p.value ?? null, currency: p.currency ?? null },
+        'suspicious money data');
+    }
+  };
 
   // Keep the raw body around so the HMAC is computed over exactly what was sent.
   // These routes are open to anyone until the signature is checked, so the body
@@ -165,7 +195,21 @@ export default async function collectRoutes(app, opts = {}) {
     return stream;
   });
 
-  app.get('/health', async () => ({ ok: true }));
+  /**
+   * Plain /health says the process answers. The image's Docker HEALTHCHECK calls
+   * it, and Traefik stops routing to a container Docker marks unhealthy, so it
+   * stays free of the queue on purpose: a late queue must not also stop the
+   * collector from taking new events (they would be lost, not late).
+   * /health?queue=1 is for an outside uptime monitor: 503 when due events wait
+   * or rows hang in 'sending', so a dead worker is noticed even when the alert
+   * loop died with it.
+   */
+  app.get('/health', async (req, reply) => {
+    if (!req.query?.queue) return { ok: true };
+    const problem = await queueCheck();
+    if (problem) return reply.code(503).send({ ok: false, reason: problem.code, detail: problem.message });
+    return { ok: true, queue: 'ok' };
+  });
 
   /** First-party loader, served from the client's own subdomain. */
   app.get('/px.js', async (req, reply) => {
@@ -249,6 +293,7 @@ export default async function collectRoutes(app, opts = {}) {
         userAgent: req.headers['user-agent'],
         referer: req.headers.referer,
         actionSource: 'website',
+        defaultCountry: tenant.default_country || null,
         ...identity,
       });
     } catch (err) {
@@ -275,6 +320,7 @@ export default async function collectRoutes(app, opts = {}) {
       : await enqueue(tenant.id, event, tenant.destinations);
     // Counted once it is stored, so a rolled-back event never shows in the dashboard.
     stats.recordReceived(tenant.id, event, 'browser');
+    noteWarnings(req, tenant, event);
     return reply.send({ ok: true, event_id: event.event_id, queued });
   });
 
@@ -326,6 +372,7 @@ export default async function collectRoutes(app, opts = {}) {
         userAgent: body.client_user_agent || req.headers['user-agent'],
         referer: null,
         actionSource: body.action_source || 'website',
+        defaultCountry: tenant.default_country || null,
         fbp: body.fbp || req.cookies?._fbp || null,
         // The site may hold no _fbc cookie yet and still be serving the very
         // landing page that carries ?fbclid=.
@@ -349,6 +396,7 @@ export default async function collectRoutes(app, opts = {}) {
     // paid without a return to the site); a GA4 fed by GTM takes only those.
     event.browserless = body.browserless === true;
     stats.recordReceived(tenant.id, event, 'server');
+    noteWarnings(req, tenant, event);
     const queued = await enqueue(tenant.id, event, tenant.destinations);
     return reply.send({ ok: true, event_id: event.event_id, queued });
   });

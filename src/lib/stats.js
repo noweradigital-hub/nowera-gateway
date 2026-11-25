@@ -1,5 +1,6 @@
 import { many, one, query } from '../db.js';
 import { testModeActive } from '../destinations/test-mode.js';
+import { ISSUE_PREFIX } from './stats-writer.js';
 
 /**
  * What the dashboard shows, read from `received` (one row per accepted event),
@@ -35,18 +36,22 @@ async function destinationStats(tenantId) {
             le.last_error, le.error_at
        FROM destinations d
        LEFT JOIN LATERAL (
-         SELECT count(*) FILTER (WHERE status = 'sent') AS sent,
-                count(*) FILTER (WHERE status = 'dead') AS dead,
+         -- Retries run for about 26 hours, so an event can be given up on more than
+         -- a day after it arrived: 'dead' counts what was given up on in the last
+         -- 24 hours (claimed_at is its last attempt), 'retrying' whatever still
+         -- waits, however old; sent and the latencies stay by arrival.
+         SELECT count(*) FILTER (WHERE status = 'sent' AND created_at > now() - interval '24 hours') AS sent,
+                count(*) FILTER (WHERE status = 'dead' AND COALESCE(claimed_at, created_at) > now() - interval '24 hours') AS dead,
                 count(*) FILTER (WHERE status = 'pending' AND attempts > 0) AS retrying,
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM sent_at - created_at))
-                  FILTER (WHERE status = 'sent') AS p50,
+                  FILTER (WHERE status = 'sent' AND created_at > now() - interval '24 hours') AS p50,
                 percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM sent_at - created_at))
-                  FILTER (WHERE status = 'sent') AS p95,
+                  FILTER (WHERE status = 'sent' AND created_at > now() - interval '24 hours') AS p95,
                 (SELECT max(e2.sent_at) FROM events e2
                   WHERE e2.destination_id = d.id AND e2.status = 'sent'
                     AND e2.created_at > now() - interval '30 days') AS last_success
            FROM events e
-          WHERE e.destination_id = d.id AND e.created_at > now() - interval '24 hours'
+          WHERE e.destination_id = d.id AND e.created_at > now() - interval '48 hours'
        ) s ON TRUE
        LEFT JOIN LATERAL (
          SELECT e3.last_error, e3.created_at AS error_at FROM events e3
@@ -73,8 +78,9 @@ async function destinationStats(tenantId) {
 
 /**
  * How a tenant is doing, in one word. Bad: a destination refuses the events or
- * gave up on some in the last hour. Warning: retries pending, test mode, or the
- * site went quiet for longer than it usually does.
+ * gave up on a share of them in the last 24 hours. Warning: a few given up,
+ * retries pending (a retried event is not lost yet: retries go on for about a
+ * day), test mode, or the site went quiet for longer than it usually does.
  */
 export function healthOf(tenant, destinations, now = Date.now()) {
   const active = destinations.filter((d) => d.active);
@@ -88,12 +94,13 @@ export function healthOf(tenant, destinations, now = Date.now()) {
   for (const d of active) {
     const name = { meta: 'Meta', ga4: 'GA4', openai: 'OpenAI' }[d.kind] || d.kind;
     const total = d.sent + d.dead + d.retrying;
-    const failing = d.dead + d.retrying;
     // A single refused event is worth a look; a refusing destination is an outage.
+    // Retries are counted, but only lost events make it bad: during an outage the
+    // queue holds them, and the "failing" alert reports the outage itself.
     if (d.tokenError) raise('bad', `${name} odmieta prístup (neplatný token alebo verzia API)`);
-    else if (failing >= 5 && failing / total > 0.05) raise('bad', `${name}: ${plural(failing, 'event zlyhal', 'eventy zlyhali', 'eventov zlyhalo')} za 24 h`);
+    else if (d.dead >= 5 && d.dead / total > 0.05) raise('bad', `${name}: ${plural(d.dead, 'event zlyhal', 'eventy zlyhali', 'eventov zlyhalo')} za 24 h`);
     else if (d.dead > 0) raise('warn', `${name}: ${plural(d.dead, 'event sa nepodarilo', 'eventy sa nepodarilo', 'eventov sa nepodarilo')} doručiť`);
-    else if (d.retrying > 0) raise('warn', `${name}: ${plural(d.retrying, 'event čaká', 'eventy čakajú', 'eventov čaká')} na opakovanie`);
+    if (!d.tokenError && d.retrying > 0) raise('warn', `${name}: ${plural(d.retrying, 'event čaká', 'eventy čakajú', 'eventov čaká')} na opakovanie`);
     if (d.testing) raise('warn', `${name} je v testovacom režime`);
   }
   if (!active.length) raise('warn', 'žiadna aktívna destinácia');
@@ -247,9 +254,41 @@ export async function quality(tenantId, days = 7) {
   });
 }
 
-/** Plain-language notes on the quality table: what to fix, and what is normal. */
-export function qualityFindings(rows) {
+/**
+ * Money data the collector found wrong over the last `days` days (see
+ * countIssue in stats-writer.js), as [{ code, event, n }], most frequent first.
+ */
+export async function dataIssues(tenantId, days = 7) {
+  const rows = await many(
+    `SELECT name, sum(count)::int AS n FROM daily_counters
+      WHERE tenant_id = $1 AND name LIKE $2 AND day > (now() AT TIME ZONE '${TZ}')::date - $3::int
+      GROUP BY name ORDER BY n DESC`, [tenantId, `${ISSUE_PREFIX}%`, days]);
+  return rows.map((r) => {
+    const [code, event] = r.name.slice(ISSUE_PREFIX.length).split(':');
+    return { code, event, n: r.n };
+  });
+}
+
+const atEvents = (n) => `pri ${n} ${n === 1 ? 'evente' : 'eventoch'} za 7 dní`;
+const ISSUE_FINDINGS = {
+  value_cents: (n) => ({ title: `Hodnota vyzerá ako v centoch (${atEvents(n)}).`,
+    text: 'Hodnota je asi stokrát vyššia ako súčet cien položiek, web zrejme posiela centy namiesto eur. Gateway ju neprepisuje, treba ju opraviť na webe.' }),
+  money_invalid: (n) => ({ title: `Suma, ktorá nie je platné číslo (${atEvents(n)}).`,
+    text: 'Hodnota alebo cena položky nebola číslo od 0 (napr. „25,99 €“, záporná alebo nezmyselne veľká suma), preto sa vynechala. Event odišiel bez nej.' }),
+  currency_invalid: (n) => ({ title: `Neplatná mena (${atEvents(n)}).`,
+    text: 'Mena musí byť trojpísmenový kód ISO 4217, napr. EUR alebo CZK. Event odišiel bez nej a Meta nákup bez meny neprijme.' }),
+};
+
+/**
+ * Plain-language notes on the quality table: what to fix, and what is normal.
+ * `issues` are the money problems from dataIssues().
+ */
+export function qualityFindings(rows, issues = []) {
   const out = [];
+  for (const issue of issues) {
+    const finding = ISSUE_FINDINGS[issue.code]?.(issue.n);
+    if (finding) out.push({ tone: 'warn', event: issue.event, ...finding });
+  }
   const get = (name) => rows.find((r) => r.event_name === name);
   const pct = (v) => `${Math.round(v * 100)} %`;
   const expectsBrowser = ['AddToCart', 'InitiateCheckout', 'Purchase'];

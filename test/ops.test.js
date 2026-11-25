@@ -591,3 +591,111 @@ test('the administration\'s icon: PNG on its own host, nothing on a collector ho
     await app.close();
   }
 });
+
+// ------------------------------------------------------------ retries and the queue
+
+test('retries carry an event through a day-long outage, and stop before any destination would refuse it', async () => {
+  const { retryDelay, MAX_ATTEMPTS, RETRY_DELAYS_SECONDS } = await import('../src/lib/queue.js');
+  const { GA4_MAX_AGE_SECONDS } = await import('../src/destinations/ga4.js');
+  assert.equal(retryDelay(1), 10, 'a blip is retried within seconds');
+  let waited = 0;
+  for (let attempts = 1; attempts < MAX_ATTEMPTS; attempts += 1) {
+    const delay = retryDelay(attempts);
+    assert.ok(delay >= (retryDelay(attempts - 1) ?? 0), 'never shorter than the wait before');
+    waited += delay;
+  }
+  assert.equal(MAX_ATTEMPTS, RETRY_DELAYS_SECONDS.length + 1);
+  assert.ok(waited >= 24 * 3600, `the last try is ${(waited / 3600).toFixed(1)} h after the first, not ~1.7 h`);
+  assert.ok(waited < GA4_MAX_AGE_SECONDS, 'GA4 still accepts the event at the last try (72 h)');
+  assert.ok(waited < 7 * 86400, 'so do Meta and OpenAI (7 days)');
+  assert.equal(retryDelay(MAX_ATTEMPTS), null, 'then it is given up');
+  assert.equal(retryDelay(0), null);
+  assert.equal(retryDelay(undefined), null);
+});
+
+test('queue: a due event left waiting or a row stuck in sending is a problem, a moving queue is not', async () => {
+  const { queueProblem, QUEUE_LATE_MINUTES, SENDING_STUCK_MINUTES } = await import('../src/lib/queue.js');
+  const state = (over) => ({ dueAge: null, late: 0, sendingAge: null, stuck: 0, ...over });
+  assert.equal(queueProblem(state()), null, 'empty queue');
+  assert.equal(queueProblem(state({ dueAge: 3, sendingAge: 4 })), null, 'claimed within a tick, one call in flight');
+  assert.equal(queueProblem(state({ dueAge: QUEUE_LATE_MINUTES * 60 - 1 })), null);
+  assert.equal(queueProblem(state({ sendingAge: SENDING_STUCK_MINUTES * 60 - 1 })), null, 'the stale sweep still has time');
+  const late = queueProblem(state({ dueAge: 14 * 60, late: 37 }));
+  assert.equal(late.code, 'queue_late');
+  assert.match(late.message, /^37 eventov čaká na odoslanie dlhšie ako 10 min, najstarší 14 min/);
+  const stuck = queueProblem(state({ sendingAge: 25 * 60, stuck: 2 }));
+  assert.equal(stuck.code, 'queue_stuck');
+  assert.match(stuck.message, /^2 eventy zostali v stave „odosiela sa“, najstarší 25 min/);
+  assert.equal(queueProblem(null), null);
+});
+
+test('queue alert: one gateway-wide rule, on by default, from the same reading as /health?queue=1', async () => {
+  const { queueCondition, RULES } = await import('../src/lib/alerts.js');
+  assert.ok(RULES.queue.title && RULES.queue.hint.includes('/health?queue=1'));
+  const c = queueCondition({ dueAge: 15 * 60, late: 3, sendingAge: null, stuck: 0 });
+  assert.equal(c.tenant_id, null);
+  assert.equal(c.rule, 'queue');
+  assert.equal(c.subject, '', 'one open alert however the message changes');
+  assert.match(c.message, /3 eventy čakajú/);
+  assert.equal(queueCondition({ dueAge: 2, late: 0, sendingAge: null, stuck: 0 }), null);
+});
+
+test('destination figures count an event given up on after a day of retries, and retries of any age', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../src/lib/stats.js', import.meta.url), 'utf8');
+  const lateral = src.slice(src.indexOf('async function destinationStats'), src.indexOf(') s ON TRUE'));
+  // Retries span ~26 h: a 24-hour window by arrival would never see their end.
+  assert.match(lateral, /status = 'dead' AND COALESCE\(claimed_at, created_at\) > now\(\) - interval '24 hours'/);
+  assert.match(lateral, /status = 'pending' AND attempts > 0\) AS retrying/);
+  assert.match(lateral, /e\.created_at > now\(\) - interval '48 hours'/);
+});
+
+test('health: retries still running are a warning, events given up on make it bad', async () => {
+  const { healthOf } = await import('../src/lib/stats.js');
+  const tenant = { active: true, last_event_at: new Date() };
+  const dest = (over) => ({ kind: 'meta', active: true, sent: 100, dead: 0, retrying: 0, ...over });
+  const outage = healthOf(tenant, [dest({ sent: 20, retrying: 80 })]);
+  assert.equal(outage.level, 'warn', 'Meta down for an hour: queued, not lost');
+  assert.deepEqual(outage.reasons, ['Meta: 80 eventov čaká na opakovanie']);
+  const lost = healthOf(tenant, [dest({ dead: 10, retrying: 3 })]);
+  assert.equal(lost.level, 'bad');
+  assert.deepEqual(lost.reasons, ['Meta: 10 eventov zlyhalo za 24 h', 'Meta: 3 eventy čakajú na opakovanie']);
+  assert.equal(healthOf(tenant, [dest({ dead: 2 })]).level, 'warn', 'a couple lost: worth a look');
+  assert.equal(healthOf(tenant, [dest({ dead: 5, sent: 1000 })]).level, 'warn', 'under 5 %');
+  assert.equal(healthOf(tenant, [dest({ tokenError: true, retrying: 5 })]).level, 'bad');
+});
+
+test('quality: wrong money data counted by the collector shows as findings per event', async () => {
+  const { qualityFindings } = await import('../src/lib/stats.js');
+  const findings = qualityFindings([], [
+    { code: 'value_cents', event: 'Purchase', n: 4 },
+    { code: 'currency_invalid', event: 'ViewContent', n: 1 },
+    { code: 'money_invalid', event: 'AddToCart', n: 12 },
+    { code: 'unknown_code', event: 'X', n: 1 },
+  ]);
+  assert.deepEqual(findings.map((f) => [f.event, f.tone]), [['Purchase', 'warn'], ['ViewContent', 'warn'], ['AddToCart', 'warn']]);
+  assert.match(findings[0].title, /centoch \(pri 4 eventoch za 7 dní\)/);
+  assert.match(findings[1].title, /pri 1 evente/);
+  assert.deepEqual(qualityFindings([]), [], 'nothing without issues');
+});
+
+test('a new client starts with the phone country of its domain', async () => {
+  const { countryFromHost } = await import('../src/lib/onboarding.js');
+  assert.equal(countryFromHost('t.klient.sk'), 'SK');
+  assert.equal(countryFromHost('T.Obchod.CZ.'), 'CZ');
+  assert.equal(countryFromHost('t.sklep.pl'), 'PL');
+  assert.equal(countryFromHost('t.kidvak.com'), null, 'no country to guess from');
+  assert.equal(countryFromHost(''), null);
+});
+
+test('the migration adds the phone country once, filled from the domain, and never refills it', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const sql = await readFile(new URL('../src/migrate.js', import.meta.url), 'utf8');
+  const block = sql.slice(sql.indexOf('DO $$'), sql.indexOf('END $$;') + 7);
+  assert.match(block, /IF NOT EXISTS \(SELECT 1 FROM information_schema\.columns[\s\S]*column_name = 'default_country'\) THEN/);
+  assert.match(block, /ALTER TABLE tenants ADD COLUMN default_country TEXT;\s*UPDATE tenants SET default_country = CASE/,
+    'the fill runs only together with creating the column, so a cleared setting stays cleared');
+  for (const [tld, code] of [['sk', 'SK'], ['cz', 'CZ'], ['pl', 'PL']]) {
+    assert.ok(block.includes(`LIKE '%.${tld}' THEN '${code}'`));
+  }
+});

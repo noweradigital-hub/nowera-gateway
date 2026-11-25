@@ -166,3 +166,18 @@ test('WP-Cron: a switch in the new-client setup and in the client settings', asy
   assert.match(form, /placeholder="https:\/\/www\.klient\.sk\/wp-cron\.php"/);
   assert.match(form, /Naposledy: HTTP 200, 300 ms/);
 });
+
+test('client settings: the phone country is a choice of countries with a calling-code rule', () => {
+  const form = tenantForm({ ...tenant, default_country: 'CZ' });
+  assert.match(form, /<select id="default_country" name="default_country">/);
+  assert.match(form, /<option value="CZ" selected>Česko \(\+420\)<\/option>/);
+  assert.match(form, /<option value="">Žiadna \(len čísla s predvoľbou\)<\/option>/);
+  assert.doesNotMatch(form, /<option value="SK" selected>/);
+  assert.doesNotMatch(tenantForm(null), /default_country/, 'a new client gets it from its domain');
+});
+
+test('a destination card tells retries still running from errors', () => {
+  const html = destinationsTab(tenant, [dest({ sent: 10, dead: 1, retrying: 3 })], SCHEMAS, 'v26.0');
+  assert.match(html, /10 doručených, 4 chýb \(\d+ %\), z toho 3 ešte čakajú na opakovanie/);
+  assert.doesNotMatch(destinationsTab(tenant, [dest()], SCHEMAS, 'v26.0'), /na opakovanie/);
+});

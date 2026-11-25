@@ -1,10 +1,20 @@
 import { config } from '../config.js';
-import { many, query } from '../db.js';
+import { many, one, query } from '../db.js';
 import { consentAllows, dedupeKeyFor, driverFor, openSettings, wants } from '../destinations/index.js';
+import { plural } from './stats.js';
 
-// Exponential backoff, capped. Index = attempt number.
-const BACKOFF_SECONDS = [10, 30, 120, 600, 1800, 3600];
-const MAX_ATTEMPTS = BACKOFF_SECONDS.length;
+// How long to wait after the n-th failed attempt (n = 1 is the first entry).
+// Quick retries cover a blip; the long steps carry an event through an outage of
+// a whole day: the last try is about 26 hours after the first, well inside what
+// the destinations still accept (Meta and OpenAI 7 days, GA4 72 hours).
+export const RETRY_DELAYS_SECONDS = [10, 30, 120, 600, 1800, 3600, 7200, 14400, 21600, 43200];
+export const MAX_ATTEMPTS = RETRY_DELAYS_SECONDS.length + 1;
+
+/** Seconds until the next try after `attempts` failed ones, or null when it is time to give up. */
+export function retryDelay(attempts) {
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts >= MAX_ATTEMPTS) return null;
+  return RETRY_DELAYS_SECONDS[attempts - 1];
+}
 
 /**
  * Fan one canonical event out to every active destination of the tenant.
@@ -58,15 +68,14 @@ async function claimBatch(limit) {
 }
 
 async function markFailed(row, error, retryable) {
-  const attempts = row.attempts;
-  if (!retryable || attempts >= MAX_ATTEMPTS) {
+  const delay = retryable ? retryDelay(row.attempts) : null;
+  if (delay === null) {
     await query(
       `UPDATE events SET status = 'dead', last_error = $2, response = $2, sent_at = NULL WHERE id = $1`,
       [row.id, error],
     );
     return;
   }
-  const delay = BACKOFF_SECONDS[Math.min(attempts, BACKOFF_SECONDS.length - 1)];
   await query(
     `UPDATE events
         SET status = 'pending',
@@ -92,6 +101,56 @@ export async function requeueStale(olderThanMinutes = 10) {
     [String(olderThanMinutes)],
   );
   return rowCount;
+}
+
+// A due event is normally claimed within one tick (2 s); one left waiting this
+// long means the worker is not running or cannot keep up.
+export const QUEUE_LATE_MINUTES = 10;
+// A row is 'sending' for one HTTP call (10 s at most). The stale sweep returns
+// rows older than 10 minutes every 5 minutes, so 20 minutes means it is not running.
+export const SENDING_STUCK_MINUTES = 20;
+
+/**
+ * How the queue looks right now, timed by the database's own clock: how long the
+ * oldest due event has waited and how long the oldest 'sending' row has been out.
+ */
+export async function queueState() {
+  const row = await one(
+    `SELECT (SELECT extract(epoch FROM now() - min(next_attempt_at))::int FROM events
+              WHERE status = 'pending' AND next_attempt_at <= now()) AS due_age,
+            (SELECT count(*)::int FROM events
+              WHERE status = 'pending' AND next_attempt_at <= now() - ($1 || ' minutes')::interval) AS late,
+            (SELECT extract(epoch FROM now() - min(COALESCE(claimed_at, created_at)))::int FROM events
+              WHERE status = 'sending') AS sending_age,
+            (SELECT count(*)::int FROM events
+              WHERE status = 'sending' AND COALESCE(claimed_at, created_at) < now() - ($2 || ' minutes')::interval) AS stuck`,
+    [String(QUEUE_LATE_MINUTES), String(SENDING_STUCK_MINUTES)],
+  );
+  return {
+    dueAge: row?.due_age ?? null,
+    late: row?.late ?? 0,
+    sendingAge: row?.sending_age ?? null,
+    stuck: row?.stuck ?? 0,
+  };
+}
+
+/** What is wrong with the queue, as { code, message } in Slovak, or null when it moves. */
+export function queueProblem(state) {
+  if (!state) return null;
+  const minutes = (s) => Math.floor(s / 60);
+  if (state.dueAge !== null && state.dueAge >= QUEUE_LATE_MINUTES * 60) {
+    return {
+      code: 'queue_late',
+      message: `${plural(Math.max(state.late, 1), 'event čaká', 'eventy čakajú', 'eventov čaká')} na odoslanie dlhšie ako ${QUEUE_LATE_MINUTES} min, najstarší ${minutes(state.dueAge)} min. Worker nebeží alebo nestíha.`,
+    };
+  }
+  if (state.sendingAge !== null && state.sendingAge >= SENDING_STUCK_MINUTES * 60) {
+    return {
+      code: 'queue_stuck',
+      message: `${plural(Math.max(state.stuck, 1), 'event zostal', 'eventy zostali', 'eventov zostalo')} v stave „odosiela sa“, najstarší ${minutes(state.sendingAge)} min. Worker sa zasekol a nikto ich nevracia do fronty.`,
+    };
+  }
+  return null;
 }
 
 /** Deliveries since the last summary line, per destination kind. */

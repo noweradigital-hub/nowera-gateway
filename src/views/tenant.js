@@ -190,7 +190,7 @@ function destinationCard(t, d, metaVersion) {
     <div class="card-b" style="display:grid;gap:12px">
       <dl class="kv">${rows}
         <dt>Posledný úspech</dt><dd>${esc(formatAgo(d.last_success))}</dd>
-        <dt>Za 24 h</dt><dd>${num(d.sent)} doručených${total ? `, ${num(d.dead + d.retrying)} chýb (${pct((d.dead + d.retrying) / total)})` : ''}</dd>
+        <dt>Za 24 h</dt><dd>${num(d.sent)} doručených${total ? `, ${num(d.dead + d.retrying)} chýb (${pct((d.dead + d.retrying) / total)})` : ''}${d.retrying ? `, z toho ${plural(d.retrying, 'ešte čaká', 'ešte čakajú', 'ešte čaká')} na opakovanie` : ''}</dd>
         <dt>Posledná chyba</dt><dd>${d.last_error ? `<span class="err">${esc(String(d.last_error).slice(0, 220))}</span> <span class="dim">${esc(formatAgo(d.error_at))}</span>` : '<span class="dim">žiadna za 7 dní</span>'}</dd>
       </dl>
       ${testBox}

@@ -697,8 +697,11 @@ export function loaderScript({ endpoint, pixelId, measurementId, consent, cookie
 
     if (c.marketing && PIXEL_ID && !NOT_FOR_META[ev.name]) {
       ensurePixel();
+      // trackSingle: only our pixel gets the event. A plain 'track' goes to every
+      // pixel initialised on the page, so a second pixel (the site's own, an
+      // agency's) would receive our events too.
       try {
-        w.fbq(META_STANDARD[ev.name] ? 'track' : 'trackCustom', ev.name, pixelProps(ev.props), { eventID: ev.id });
+        w.fbq(META_STANDARD[ev.name] ? 'trackSingle' : 'trackSingleCustom', PIXEL_ID, ev.name, pixelProps(ev.props), { eventID: ev.id });
       } catch (e) {}
     }
 

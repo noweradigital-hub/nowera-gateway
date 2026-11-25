@@ -40,6 +40,16 @@ export function countDropped(tenantId, name) {
   counters.set(key, (counters.get(key) || 0) + 1);
 }
 
+/**
+ * An accepted event whose money data looked wrong (normalizeEvent's warnings:
+ * 'value_cents', 'money_invalid', 'currency_invalid'), per tenant, day and event
+ * name, for the quality tab. Stored with the other daily counters.
+ */
+export function countIssue(tenantId, code, eventName) {
+  countDropped(tenantId, `${ISSUE_PREFIX}${code}:${eventName}`);
+}
+export const ISSUE_PREFIX = 'issue:';
+
 /** A signed request from the tenant's plugin, with the version it reported. */
 export function notePlugin(tenantId, version) {
   const t = touch(tenantId);

@@ -1,6 +1,14 @@
 import { cronUrl } from '../lib/site-cron.js';
 import { esc } from './layout.js';
 import { CONSENT_MODES } from '../lib/consent.js';
+import { PHONE_COUNTRIES } from '../lib/hash.js';
+
+const COUNTRY_NAMES = {
+  SK: 'Slovensko (+421)', CZ: 'Česko (+420)', PL: 'Poľsko (+48)', HU: 'Maďarsko (+36)', AT: 'Rakúsko (+43)',
+  DE: 'Nemecko (+49)', CH: 'Švajčiarsko (+41)', SI: 'Slovinsko (+386)', HR: 'Chorvátsko (+385)', RO: 'Rumunsko (+40)',
+  UA: 'Ukrajina (+380)', IT: 'Taliansko (+39)', FR: 'Francúzsko (+33)', GB: 'Spojené kráľovstvo (+44)', IE: 'Írsko (+353)',
+  NL: 'Holandsko (+31)', BE: 'Belgicko (+32)', ES: 'Španielsko (+34)',
+};
 
 export const loginPage = () => `
 <div class="card"><div class="card-b form" style="padding:22px">
@@ -89,6 +97,13 @@ export function tenantForm(t) {
       <div><label for="cookie_domain">Cookie doména</label>
         <input id="cookie_domain" name="cookie_domain" type="text" class="mono" value="${esc(t?.cookie_domain)}" placeholder=".klient.sk">
         <div class="hint">S bodkou na začiatku, aby cookie platila pre web aj collector.</div></div>
+      ${t ? `<div><label for="default_country">Krajina telefónnych čísel</label>
+        <select id="default_country" name="default_country">
+          <option value="">Žiadna (len čísla s predvoľbou)</option>
+          ${PHONE_COUNTRIES.map((c) => `<option value="${c}" ${t.default_country === c ? 'selected' : ''}>${esc(COUNTRY_NAMES[c] || c)}</option>`).join('')}
+        </select>
+        <div class="hint">Číslu bez predvoľby (0905 123 456) z formulára alebo rezervácie, ktoré neposiela krajinu, gateway doplní predvoľbu tejto krajiny,
+          inak ho Meta nespáruje. Ako krajinu návštevníka ju neposiela. Objednávky z WooCommerce majú vlastnú krajinu.</div></div>` : ''}
 
       <div class="group-t">Súhlasy</div>
       <div><label for="consent_mode">Nástroj na súhlasy</label>

@@ -99,7 +99,10 @@ function browser({ cookie = '', page, user, consent, hasConsent, fbclid, tenantC
 
 const isInit = (call) => call[0] === 'init' && call[1] === 'PIX';
 
-const tracked = (fbq) => fbq.filter((c) => c[0] === 'track' || c[0] === 'trackCustom');
+// Event calls to our pixel, as [method, name, props, options]. px.js only ever
+// uses trackSingle / trackSingleCustom with its own pixel id.
+const tracked = (fbq) => fbq.filter((c) => c[0] === 'trackSingle' || c[0] === 'trackSingleCustom')
+  .map((c) => { assert.equal(c[1], 'PIX', 'aimed at our pixel only'); return [c[0], ...c.slice(2)]; });
 
 test('without consent handling it fires PageView at once, on both legs, with one event id', () => {
   const b = browser();
@@ -114,6 +117,24 @@ test('without consent handling it fires PageView at once, on both legs, with one
   assert.equal(pv[3].eventID, b.posts[0].body.event_id, 'shared id is what lets Meta dedupe');
 });
 
+test('a second Meta pixel on the page never receives our events', () => {
+  // The site (or an agency) runs its own pixel next to ours: fbq is already
+  // there and knows another id. Only trackSingle with our id keeps them apart.
+  const b = browser({ page: { type: 'category', data: { content_category: 'Osušky' } } });
+  b.window.fbq('init', 'OTHER-PIXEL');
+  b.run();
+  b.window.nwr('track', 'Purchase', { value: 5, currency: 'EUR' }, { eventID: 'ord-2' });
+  const events = b.fbq.filter((c) => c[0] !== 'init');
+  assert.ok(events.length >= 3, 'PageView, ViewCategory and Purchase reached the pixel');
+  for (const call of events) {
+    assert.ok(['trackSingle', 'trackSingleCustom'].includes(call[0]), `no page-wide fbq('${call[0]}')`);
+    assert.equal(call[1], 'PIX');
+  }
+  const purchase = tracked(b.fbq).find((c) => c[1] === 'Purchase');
+  assert.equal(purchase[3].eventID, 'ord-2', 'the shared event id still travels for dedupe');
+  assert.deepEqual(b.fbq.filter((c) => c[0] === 'init').map((c) => c[1]), ['OTHER-PIXEL', 'PIX'], 'our pixel is initialised by id');
+});
+
 test('a product page also fires ViewContent with the published product data', () => {
   const data = { content_ids: ['42'], content_type: 'product', value: 19.9, currency: 'EUR' };
   const b = browser({ page: { type: 'product', data } });
@@ -122,7 +143,7 @@ test('a product page also fires ViewContent with the published product data', ()
   assert.ok(vc, 'ViewContent posted');
   assert.deepEqual(vc.body.custom_data, data);
   const pixel = tracked(b.fbq).find((c) => c[1] === 'ViewContent');
-  assert.equal(pixel[0], 'track');
+  assert.equal(pixel[0], 'trackSingle');
   assert.equal(pixel[3].eventID, vc.body.event_id);
 });
 
@@ -163,12 +184,12 @@ test('category and search pages fire ViewCategory as a custom event and Search a
   const c = browser({ page: { type: 'category', data: { content_category: 'Osušky' } } });
   c.run();
   const vcat = tracked(c.fbq).find((x) => x[1] === 'ViewCategory');
-  assert.equal(vcat[0], 'trackCustom', 'Meta only accepts standard names with track()');
+  assert.equal(vcat[0], 'trackSingleCustom', 'Meta only accepts standard names with trackSingle()');
 
   const s = browser({ page: { type: 'search', data: { search_string: 'osuska' } } });
   s.run();
   const search = tracked(s.fbq).find((x) => x[1] === 'Search');
-  assert.equal(search[0], 'track');
+  assert.equal(search[0], 'trackSingle');
   assert.equal(s.posts.find((p) => p.body.event_name === 'Search').body.custom_data.search_string, 'osuska');
 });
 
