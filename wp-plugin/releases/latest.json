@@ -1,11 +1,11 @@
 {
-  "version": "1.3.5",
-  "file": "nowera-capi-1.3.5.zip",
-  "sha256": "80ad95c7cfd9751c97372045f2717dbf71e1576784274f6a475746305b419b4f",
-  "signature": "PY5CmrDwgswxClkeDwnqCnEtbvn0IgFxlJ3nV8JSzxQpWuBAWmwjp7h2x3kkhLHeYaN5F3iYE/JzMAhdyx5zCA==",
-  "released_at": "2026-11-25T10:25:57.230Z",
+  "version": "1.3.6",
+  "file": "nowera-capi-1.3.6.zip",
+  "sha256": "cdf9cfd72481e9702767977b150fee47cf9fb730fe93f66df4726dd9502724c6",
+  "signature": "oH6eRy9GJWdrEVaKYuOP4InhsqgNZ6cWbA/WsU5vKbzXhmgn01PwCG7ivhCW8N3kWvaS0JBQR5zdDN661z7pDA==",
+  "released_at": "2026-11-25T11:18:28.203Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Zaplatená objednávka bez nahláseného nákupu dostane dodatočné odoslanie (hodinová kontrola, aj pri platbe potvrdenej ešte počas pokladne, napr. Apple Pay cez Stripe). Weby bez WooCommerce posielajú prázdny zoznam objednávok namiesto chyby."
+  "notes": "Refundácie a storná idú do GA4 len so súhlasom, s ktorým odišiel nákup (oprava súhlasu so štatistikami)."
 }
