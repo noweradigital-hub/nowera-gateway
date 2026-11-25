@@ -2,7 +2,7 @@
 /**
  * Plugin Name:  Nowera CAPI
  * Description:  Posiela serverové eventy z WooCommerce do Nowera Gateway (Meta CAPI + GA4) a zdieľa event_id s prehliadačovou vetvou.
- * Version:      1.3.5
+ * Version:      1.3.6
  * Author:       Nowera
  * License:      GPL-2.0-or-later
  * Requires at least: 6.0
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 const NOWERA_CAPI_OPTION  = 'nowera_capi_settings';
-const NOWERA_CAPI_VERSION = '1.3.5';
+const NOWERA_CAPI_VERSION = '1.3.6';
 
 /**
  * Ed25519 public keys whose signature an update must carry. The private key
@@ -2040,11 +2040,29 @@ function nowera_capi_report_order( \WC_Order $order, array $user, ?array $ctx = 
 			'content_name' => nowera_capi_names_label( $plan['subscribe']['names'] ),
 		) );
 	}
+	// The consent these events go with: the visitor's own on the thank-you page,
+	// the one kept from checkout after a payment confirmation.
+	$ctx     = $ctx ?? nowera_capi_request_context();
 	$outcome = 'none';
 	foreach ( $events as $event ) {
 		$outcome = nowera_capi_send( $event[0], $event[1], $user, $event[2], $url, $ctx, $id );
 		if ( $on_page ) {
 			nowera_capi_browser_leg( $event[0], $event[1], $event[2] );
+		}
+	}
+	// Kept with the order once sent: whether GA4 counted the purchase, and so
+	// whether and how a refund may take it back (nowera_capi_ga4_purchase_consent).
+	// The first consent GA4 counted it under stays: a retry after one of the
+	// order's events failed goes with the checkout's consent, but GA4 keeps the
+	// first copy it was allowed to take (one per event id). Only a record without
+	// statistics consent is replaced.
+	if ( 'marketing' === $outcome || 'statistics' === $outcome ) {
+		$before = $order->get_meta( '_nowera_capi_sent_consent' );
+		if ( ! is_array( $before ) || empty( $before['statistics'] ) ) {
+			$order->update_meta_data( '_nowera_capi_sent_consent', array(
+				'marketing'  => ! empty( $ctx['marketing'] ),
+				'statistics' => ! empty( $ctx['statistics'] ),
+			) );
 		}
 	}
 	return $outcome;
@@ -3139,11 +3157,56 @@ function nowera_capi_maybe_initiate_checkout(): void {
 add_action( 'template_redirect', 'nowera_capi_maybe_initiate_checkout', 20 );
 
 /**
+ * The consent GA4 counted an order's Purchase under, which a refund or a
+ * cancellation of it carries: array( 'marketing' => bool, 'statistics' => true ).
+ * Null when GA4 holds no Purchase of the order from here: none was sent, it went
+ * without statistics consent (for Meta alone), or nothing on the order says.
+ * Never more than the buyer gave: marketing only if the Purchase carried it.
+ */
+function nowera_capi_ga4_purchase_consent( \WC_Order $order ): ?array {
+	$sent    = $order->get_meta( '_nowera_capi_sent_consent' );
+	$decided = (string) $order->get_meta( '_nowera_capi_purchase_consent' );
+	// A Purchase went with statistics consent: exactly what it carried, written
+	// when it was sent. That holds while a retry is due too (another event of the
+	// order failed, which takes the sent mark away): GA4 keeps that first copy.
+	if ( is_array( $sent ) && ! empty( $sent['statistics'] ) ) {
+		return array( 'marketing' => ! empty( $sent['marketing'] ), 'statistics' => true );
+	}
+	if ( $order->get_meta( '_nowera_capi_purchase_sent' ) ) {
+		if ( ! is_array( $sent ) && 'statistics' === $decided ) {
+			// Reported by an older plugin, which kept only the outcome: 'statistics'
+			// is a Purchase without marketing consent, with statistics consent.
+			return array( 'marketing' => false, 'statistics' => true );
+		}
+		// Sent without statistics consent (for Meta alone); or by an older plugin
+		// with any other outcome ('marketing' says nothing about statistics: the
+		// thank-you page may have had other consent than the checkout) or none at
+		// all. No record that GA4 got it with statistics consent, so nothing goes:
+		// a refund GA4 misses is better than one claiming a consent nobody recorded.
+		return null;
+	}
+	// Not reported yet (refunded before the buyer came back or the payment's
+	// confirmation was worked off): the after-payment job will report it with
+	// the consent kept at checkout — if it still counts as a purchase as it
+	// stands now (fully refunded or cancelled, it never will) and the thank-you
+	// page has not already decided (no consent there, say) with no retry of a
+	// failed delivery due. A refund skipped that way is not replayed should a
+	// later visit to the thank-you page report the Purchase after all.
+	$stored = $order->get_meta( '_nowera_capi_ctx' );
+	$retry  = (int) $order->get_meta( '_nowera_capi_purchase_retry' ) > 0;
+	if ( ! is_array( $stored ) || empty( $stored['statistics'] ) || ! nowera_capi_purchase_ready( $order )
+		|| ( '' !== $decided && ! $retry ) ) {
+		return null;
+	}
+	return array( 'marketing' => ! empty( $stored['marketing'] ), 'statistics' => true );
+}
+
+/**
  * A refund, partial or full, made in the administration or by the payment
  * gateway. No browser sees it, so it goes from here, marked as browserless: GA4
  * subtracts it from the purchase it recorded under the same transaction id. Only
- * for orders whose buyer allowed statistics at checkout, the ones GA4 can have
- * counted; Meta has no refund event and the gateway does not pass it there.
+ * for orders GA4 counted, a Purchase sent with statistics consent, and with that
+ * Purchase's consent; Meta has no refund event and the gateway does not pass it there.
  */
 function nowera_capi_refund( $order_id, $refund_id ): void {
 	$order  = wc_get_order( $order_id );
@@ -3153,9 +3216,9 @@ function nowera_capi_refund( $order_id, $refund_id ): void {
 	}
 	$stored = $order->get_meta( '_nowera_capi_ctx' );
 	$stored = is_array( $stored ) ? $stored : array();
-	// Only what GA4 counted can be taken back: a Purchase reported (with consent,
-	// at checkout or later on the thank-you page) or consent stored at checkout.
-	if ( ! $order->get_meta( '_nowera_capi_purchase_sent' ) && empty( $stored['statistics'] ) ) {
+	// Only what GA4 counted can be taken back.
+	$consent = nowera_capi_ga4_purchase_consent( $order );
+	if ( ! $consent ) {
 		return;
 	}
 	// A cancellation already took back everything that was left.
@@ -3248,8 +3311,8 @@ function nowera_capi_refund( $order_id, $refund_id ): void {
 	}
 
 	nowera_capi_send( 'Refund', 'refund-' . $refund->get_id(), array(), $props, nowera_capi_order_url( $order ), array(
-		'marketing'     => ! empty( $stored['marketing'] ),
-		'statistics'    => true,
+		'marketing'     => $consent['marketing'],
+		'statistics'    => $consent['statistics'],
 		'fbp'           => null,
 		'fbc'           => null,
 		'fbclid'        => null,
@@ -3271,7 +3334,14 @@ add_action( 'woocommerce_order_refunded', 'nowera_capi_refund', 10, 2 );
  */
 function nowera_capi_cancelled( $order_id ): void {
 	$order = wc_get_order( $order_id );
-	if ( ! $order || ! $order->get_meta( '_nowera_capi_purchase_sent' ) || $order->get_meta( '_nowera_capi_cancel_sent' ) ) {
+	if ( ! $order || $order->get_meta( '_nowera_capi_cancel_sent' ) ) {
+		return;
+	}
+	// Only a purchase GA4 counted (sent with statistics consent) is taken back,
+	// also while a retry of another of its events is due. One not reported yet
+	// never will be now that the order is cancelled, so there is nothing to undo.
+	$consent = nowera_capi_ga4_purchase_consent( $order );
+	if ( ! $consent ) {
 		return;
 	}
 	$stored = $order->get_meta( '_nowera_capi_ctx' );
@@ -3298,8 +3368,8 @@ function nowera_capi_cancelled( $order_id ): void {
 		'value_net' => max( 0, round( (float) ( $plan['net'] ?? nowera_capi_order_net( $order ) ) - (float) $order->get_meta( '_nowera_capi_refunded_net' ), wc_get_price_decimals() ) ),
 		'currency'  => $order->get_currency(),
 	), nowera_capi_order_url( $order ), array(
-		'marketing'     => ! empty( $stored['marketing'] ),
-		'statistics'    => true,
+		'marketing'     => $consent['marketing'],
+		'statistics'    => $consent['statistics'],
 		'fbp'           => null,
 		'fbc'           => null,
 		'fbclid'        => null,

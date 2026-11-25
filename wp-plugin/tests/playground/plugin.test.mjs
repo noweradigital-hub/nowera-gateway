@@ -1483,10 +1483,15 @@ test('a partial refund goes from the server with the refunded items, marked as n
 });
 
 test('a full refund reports the whole order', async () => {
-  const { sent, purchase } = await fire('refund_full');
+  const { sent, purchase } = await fire('refund_full', '', '&reported=1');
   const refunds = sent.filter((e) => e.body.event_name === 'Refund');
   assert.equal(refunds.length, 1);
   assert.equal(refunds[0].body.custom_data.value, purchase.total);
+});
+
+test('a full refund before the purchase was reported sends nothing: no Purchase will ever follow it', async () => {
+  const { sent } = await fire('refund_full');
+  assert.deepEqual(sent.map((e) => e.body.event_name), [], 'GA4 would hold a refund it cannot match');
 });
 
 test('no refund for a buyer who allowed no statistics: GA4 never counted the purchase', async () => {
@@ -1494,6 +1499,115 @@ test('no refund for a buyer who allowed no statistics: GA4 never counted the pur
   try {
     const { sent } = await fireCs('refund_partial', 'targeting');
     assert.equal(sent.filter((e) => e.body.event_name === 'Refund').length, 0);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+// consent_refund: CookieScript categories at checkout and on the thank-you page,
+// then a refund or a cancellation; returns the consent of each Refund sent.
+const consentRefund = async (opts) => {
+  const q = Object.entries(opts).map(([k, v]) => `&${k}=${encodeURIComponent(v)}`).join('');
+  const r = await json(`/nwr-test/fire.php?event=consent_refund${q}`);
+  return { ...r, refunds: r.sent.filter((e) => e.body.event_name === 'Refund').map((e) => e.body.consent) };
+};
+
+test('a refund or cancellation goes to GA4 only for a purchase it counted, under the consent that purchase went with', async () => {
+  await setConsent('cookiescript');
+  try {
+    const both = { marketing: true, statistics: true };
+    for (const then of ['refund', 'cancel']) {
+      // Statistics refused: Meta got the Purchase, GA4 did not. Nothing to take back.
+      const meta = await consentRefund({ at_checkout: 'targeting', then });
+      assert.equal(meta.purchase.consent, 'marketing');
+      assert.deepEqual(meta.purchase.reported, [{ marketing: true, statistics: false }]);
+      assert.deepEqual(meta.refunds, [], `${then}: no GA4 refund claiming a statistics consent the buyer refused`);
+      assert.deepEqual(meta.purchase.sent_consent, { marketing: true, statistics: false }, 'written down with the Purchase');
+      // Both allowed: taken back with both.
+      assert.deepEqual((await consentRefund({ at_checkout: 'targeting|performance', then })).refunds, [both], then);
+      // Statistics only: taken back without claiming marketing.
+      const stats = await consentRefund({ at_checkout: 'performance', then });
+      assert.equal(stats.purchase.consent, 'statistics');
+      assert.deepEqual(stats.refunds, [{ marketing: false, statistics: true }], then);
+    }
+    // The consent the Purchase went with counts, not the one recorded at checkout.
+    const withdrawn = await consentRefund({ at_checkout: 'targeting|performance', at_thankyou: 'targeting' });
+    assert.deepEqual(withdrawn.purchase.reported, [{ marketing: true, statistics: false }]);
+    assert.deepEqual(withdrawn.refunds, [], 'statistics refused by the time the purchase was reported');
+    const granted = await consentRefund({ at_checkout: 'targeting', at_thankyou: 'targeting|performance' });
+    assert.deepEqual(granted.refunds, [both], 'statistics allowed on the thank-you page, which reported it');
+    // Paid without a return: reported with the checkout's consent, taken back the same way.
+    assert.deepEqual((await consentRefund({ at_checkout: 'targeting', noreturn: 1 })).refunds, []);
+    const paid = await consentRefund({ at_checkout: 'performance', noreturn: 1 });
+    assert.equal(paid.purchase.sent, true);
+    assert.deepEqual(paid.refunds, [{ marketing: false, statistics: true }]);
+    // The thank-you page found no consent, so nothing was reported: GA4 holds no purchase,
+    // whatever the checkout allowed.
+    const refused = await consentRefund({ at_checkout: 'targeting|performance', at_thankyou: 'reject' });
+    assert.equal(refused.purchase.consent, 'none');
+    assert.equal(refused.purchase.sent, false);
+    assert.deepEqual(refused.refunds, []);
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('an order an older plugin reported is taken back only where its outcome proves statistics consent', async () => {
+  await setConsent('cookiescript');
+  try {
+    for (const then of ['refund', 'cancel']) {
+      // Outcome 'statistics': the Purchase went with statistics and without marketing.
+      const stats = await consentRefund({ at_checkout: 'performance', legacy: 'statistics', then });
+      assert.deepEqual(stats.refunds, [{ marketing: false, statistics: true }], then);
+      // Outcome 'marketing' says nothing about statistics, and the checkout's record cannot
+      // tell: the thank-you page that reported it may have had other consent.
+      const meta = await consentRefund({ at_checkout: 'targeting|performance', legacy: 'marketing', then });
+      assert.deepEqual(meta.refunds, [], `${then}: statistics at checkout is no proof GA4 got the purchase`);
+      // Reported before any consent was written down: nothing goes.
+      assert.deepEqual((await consentRefund({ at_checkout: 'targeting|performance', legacy: '-', then })).refunds, [], then);
+    }
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('a retry after one of the order\'s events failed does not forget that GA4 got the purchase with statistics consent', async () => {
+  await setConsent('cookiescript');
+  try {
+    // Checkout with marketing only; the thank-you page with both reports Purchase and
+    // Subscribe, the gateway refuses the Subscribe, and the retry goes with the checkout's consent.
+    for (const then of ['refund', 'cancel']) {
+      const r = await consentRefund({ at_checkout: 'targeting', at_thankyou: 'targeting|performance', subscription: 1, fail_event: 'Subscribe', then });
+      assert.equal(r.purchase.retry, 1, 'the refused Subscribe scheduled a retry');
+      assert.deepEqual(r.purchase.reported, [{ marketing: true, statistics: true }, { marketing: true, statistics: false }]);
+      assert.equal(r.purchase.sent, true);
+      assert.deepEqual(r.purchase.sent_consent, { marketing: true, statistics: true }, 'never downgraded');
+      assert.deepEqual(r.refunds, [{ marketing: true, statistics: true }], then);
+      // Statistics only on the thank-you page: GA4 counted the first copy without ad consent,
+      // and the retry's marketing consent (for Meta) does not change that.
+      const ga4 = await consentRefund({ at_checkout: 'targeting', at_thankyou: 'performance', subscription: 1, fail_event: 'Subscribe', then });
+      assert.deepEqual(ga4.purchase.reported, [{ marketing: false, statistics: true }, { marketing: true, statistics: false }]);
+      assert.deepEqual(ga4.purchase.sent_consent, { marketing: false, statistics: true }, 'the first consent GA4 counted it under');
+      assert.deepEqual(ga4.refunds, [{ marketing: false, statistics: true }], `${then}: no ad consent the purchase never carried`);
+    }
+  } finally {
+    await setConsent('none');
+  }
+});
+
+test('refunded in full or cancelled while that retry is due: taken back once, and the retry reports nothing more', async () => {
+  await setConsent('cookiescript');
+  try {
+    for (const then of ['refund_full', 'cancel']) {
+      // The thank-you page's consent (statistics only), not the checkout's (marketing only).
+      const r = await consentRefund({ at_checkout: 'targeting', at_thankyou: 'performance', subscription: 1, fail_event: 'Subscribe', retry_last: 1, then });
+      assert.deepEqual(r.purchase.reported, [{ marketing: false, statistics: true }], 'the Purchase reached the gateway');
+      assert.equal(r.purchase.retry, 1, 'the refused Subscribe scheduled a retry');
+      assert.equal(r.purchase.status, then === 'cancel' ? 'cancelled' : 'refunded');
+      assert.deepEqual(r.sent.map((e) => e.body.event_name), ['Refund'], `${then}: one Refund, and no second Purchase from the retry`);
+      assert.deepEqual(r.refunds, [{ marketing: false, statistics: true }], then);
+      assert.ok(r.sent[0].body.custom_data.value > 0, then);
+    }
   } finally {
     await setConsent('none');
   }

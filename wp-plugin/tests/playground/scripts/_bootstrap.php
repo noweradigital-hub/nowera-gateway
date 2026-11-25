@@ -37,6 +37,11 @@ add_filter( 'pre_http_request', function ( $pre, $args, $url ) {
 		update_option( 'nwr_test_attempts', (int) get_option( 'nwr_test_attempts', 0 ) + 1, false );
 		return new WP_Error( 'http_request_failed', 'cURL error 28: Operation timed out' );
 	}
+	// 'event:Subscribe': the gateway refuses that one event (a 4xx, so no outage pause).
+	if ( is_string( $fail ) && 0 === strpos( $fail, 'event:' )
+		&& substr( $fail, 6 ) === ( json_decode( $args['body'], true )['event_name'] ?? '' ) ) {
+		return array( 'headers' => array(), 'body' => 'refused', 'response' => array( 'code' => 400, 'message' => 'Bad Request' ), 'cookies' => array() );
+	}
 	$log   = get_option( 'nwr_test_captured', array() );
 	$log[] = array(
 		'url'       => $url,

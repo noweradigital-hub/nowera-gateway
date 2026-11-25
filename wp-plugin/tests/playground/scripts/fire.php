@@ -124,7 +124,8 @@ switch ( $event ) {
 	case 'refund_full':
 	case 'refund_shipping':
 	case 'refund_then_cancel':
-		// The buyer checks out (consent recorded with the order), pays, then the shop refunds.
+		// The buyer checks out (consent recorded with the order), pays, then the shop
+		// refunds; before the purchase is reported, or after with &reported=1.
 		$order = nwr_order( $ids );
 		$ship  = new WC_Order_Item_Shipping();
 		$ship->set_method_title( 'Kuriér' );
@@ -136,6 +137,12 @@ switch ( $event ) {
 		$order = wc_get_order( $order->get_id() );
 		$order->set_status( 'processing' );
 		$order->save();
+		if ( ! empty( $_GET['reported'] ) ) {
+			ob_start();
+			do_action( 'woocommerce_thankyou', $order->get_id() );
+			ob_end_clean();
+			$order = wc_get_order( $order->get_id() );
+		}
 		nwr_flush();
 		delete_option( 'nwr_test_captured' );
 		if ( 'refund_shipping' === $event ) {
@@ -160,7 +167,9 @@ switch ( $event ) {
 			) );
 			if ( 'refund_then_cancel' === $event ) {
 				$order = wc_get_order( $order->get_id() );
-				$order->update_meta_data( '_nowera_capi_purchase_sent', time() ); // it had been counted
+				// It had been counted, with the consent the plugin writes down with a Purchase.
+				$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
+				$order->update_meta_data( '_nowera_capi_sent_consent', array( 'marketing' => true, 'statistics' => true ) );
 				$order->save();
 				$order->update_status( 'cancelled' );
 			}
@@ -426,6 +435,108 @@ switch ( $event ) {
 			wc_create_refund( array( 'order_id' => $order->get_id(), 'amount' => $order->get_total(), 'reason' => 'test' ) );
 		}
 		$purchase = array( 'order' => $order->get_id() );
+		break;
+	case 'consent_refund':
+		// A refund (&then=refund, default; refund_full for all of it) or a cancellation
+		// (&then=cancel) of an order by what its buyer allowed, under CookieScript (set.php?consent=cookiescript):
+		// &at_checkout=targeting|performance (categories; reject for none) and
+		// &at_thankyou=… (the checkout's by default) for a Purchase reported from the
+		// thank-you page; &noreturn=1 for one reported from the payment's confirmation;
+		// &legacy=marketing|statistics|- for one an older plugin reported, which kept
+		// only the outcome ('-': not even that), &noctx=1 without the checkout's record.
+		// &subscription=1 adds a subscription (Purchase + Subscribe); &fail_event=Subscribe
+		// has the gateway refuse that event from the thank-you page, after which the
+		// retry the plugin schedules runs, with the checkout's consent; before the
+		// refund, or after it with &retry_last=1.
+		$cs = function ( string $categories ): array {
+			return array( 'CookieScriptConsent' => 'reject' === $categories
+				? nwr_cookiescript( array( 'strict' ), 'reject' )
+				: nwr_cookiescript( array_merge( array( 'strict' ), array_filter( explode( '|', $categories ) ) ) ) );
+		};
+		$at_checkout = sanitize_text_field( wp_unslash( $_GET['at_checkout'] ?? 'targeting|performance' ) );
+		$at_thankyou = sanitize_text_field( wp_unslash( $_GET['at_thankyou'] ?? $at_checkout ) );
+		$legacy      = sanitize_key( $_GET['legacy'] ?? '' );
+		$fail_event  = preg_replace( '/[^A-Za-z]/', '', (string) ( $_GET['fail_event'] ?? '' ) );
+		$order       = nwr_order( $ids );
+		if ( ! empty( $_GET['subscription'] ) ) {
+			$sub = new WC_Product_Simple();
+			$sub->set_name( 'Členstvo 1 mesiac' );
+			$sub->set_regular_price( '7.50' );
+			$sub->update_meta_data( '_subscrpt_enabled', '1' );
+			$sub->save();
+			$order->add_product( $sub, 1 );
+			$order->calculate_totals();
+			$order->save();
+		}
+		nwr_cookies( $cs( $at_checkout ) );
+		do_action( 'woocommerce_checkout_order_processed', $order->get_id(), array(), $order );
+		$order = wc_get_order( $order->get_id() );
+		if ( '' !== $legacy ) {
+			$order->set_status( 'processing' );
+			$order->update_meta_data( '_nowera_capi_purchase_sent', time() );
+			if ( '-' !== $legacy ) {
+				$order->update_meta_data( '_nowera_capi_purchase_consent', $legacy );
+			}
+			if ( ! empty( $_GET['noctx'] ) ) {
+				$order->delete_meta_data( '_nowera_capi_ctx' );
+			}
+			$order->save();
+		} elseif ( ! empty( $_GET['noreturn'] ) ) {
+			nwr_cookies( array() ); // the payment's confirmation carries no visitor
+			$order->payment_complete( 'TX-TEST' );
+			do_action( 'nowera_capi_purchase_fallback', $order->get_id() );
+		} else {
+			$order->set_status( 'processing' );
+			$order->save();
+			nwr_cookies( $cs( $at_thankyou ) );
+			if ( '' !== $fail_event ) {
+				update_option( 'nwr_test_fail', 'event:' . $fail_event, false );
+			}
+			ob_start();
+			do_action( 'woocommerce_thankyou', $order->get_id() );
+			ob_end_clean();
+		}
+		nwr_flush();
+		// The gateway takes everything again and the retry runs, from the order alone:
+		// before the refund, or after it with &retry_last=1.
+		$run_retry = function () use ( $order ) {
+			nwr_cookies( array() );
+			do_action( 'nowera_capi_purchase_fallback', $order->get_id() );
+			as_unschedule_all_actions( 'nowera_capi_purchase_fallback', array( (int) $order->get_id() ), 'nowera-capi' );
+			nwr_flush();
+		};
+		$retry_before = '' !== $fail_event && empty( $_GET['retry_last'] );
+		delete_option( 'nwr_test_fail' );
+		if ( $retry_before ) {
+			$run_retry();
+		}
+		$reported = array_values( array_filter( nwr_captured(), function ( $c ) {
+			return 'Purchase' === ( $c['body']['event_name'] ?? '' );
+		} ) );
+		delete_option( 'nwr_test_captured' );
+		nwr_cookies( array() ); // the shop's staff, not the buyer, does the rest
+		$then = sanitize_key( $_GET['then'] ?? 'refund' );
+		$open = wc_get_order( $order->get_id() );
+		if ( 'cancel' === $then ) {
+			$open->update_status( 'cancelled' );
+		} elseif ( 'refund_full' === $then ) {
+			wc_create_refund( array( 'order_id' => $open->get_id(), 'amount' => $open->get_total(), 'reason' => 'test' ) );
+		} else {
+			wc_create_refund( array( 'order_id' => $open->get_id(), 'amount' => 10, 'reason' => 'test' ) );
+		}
+		if ( '' !== $fail_event && ! $retry_before ) {
+			$run_retry();
+		}
+		$fresh    = wc_get_order( $order->get_id() );
+		$purchase = array(
+			'order'        => $fresh->get_id(),
+			'status'       => $fresh->get_status(),
+			'consent'      => $fresh->get_meta( '_nowera_capi_purchase_consent' ),
+			'sent'         => (bool) $fresh->get_meta( '_nowera_capi_purchase_sent' ),
+			'sent_consent' => $fresh->get_meta( '_nowera_capi_sent_consent' ) ?: null,
+			'retry'        => (int) $fresh->get_meta( '_nowera_capi_purchase_retry' ),
+			'reported'     => array_map( function ( $c ) { return $c['body']['consent'] ?? null; }, $reported ),
+		);
 		break;
 	case 'audit':
 		// Today's orders: one paid with consent, one failed, one by the admin.
