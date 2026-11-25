@@ -1,11 +1,11 @@
 {
-  "version": "1.3.4",
-  "file": "nowera-capi-1.3.4.zip",
-  "sha256": "1ba75b8488979c71d83bd0360e0f37a32445486fbf5d0f4dc44c428df1e8cbe9",
-  "signature": "ypjKWlJYjGG1OGphwIv0TN3DxjUdjbhl60sMfSwd+d5Htry2WFpwncUf2tXS16d8zG48C2IjjAIC5IxkW6DuCg==",
-  "released_at": "2026-11-12T09:19:31.333Z",
+  "version": "1.3.5",
+  "file": "nowera-capi-1.3.5.zip",
+  "sha256": "80ad95c7cfd9751c97372045f2717dbf71e1576784274f6a475746305b419b4f",
+  "signature": "PY5CmrDwgswxClkeDwnqCnEtbvn0IgFxlJ3nV8JSzxQpWuBAWmwjp7h2x3kkhLHeYaN5F3iYE/JzMAhdyx5zCA==",
+  "released_at": "2026-11-25T10:25:57.230Z",
   "requires": "6.0",
   "requires_php": "8.0",
   "tested": null,
-  "notes": "Podpora OpenAI Ads: serverové udalosti nesú odkaz na kliknutie z reklamy v ChatGPT (oppref) a prehliadač (obref), len so súhlasom s marketingom."
+  "notes": "Zaplatená objednávka bez nahláseného nákupu dostane dodatočné odoslanie (hodinová kontrola, aj pri platbe potvrdenej ešte počas pokladne, napr. Apple Pay cez Stripe). Weby bez WooCommerce posielajú prázdny zoznam objednávok namiesto chyby."
 }
